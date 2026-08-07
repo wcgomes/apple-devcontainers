@@ -8,8 +8,8 @@ Product delivery ladder for the Apple-container devcontainer CLI. **MVP = Phases
 | **1** | `containerEnv`, `user`, `workspaceFolder` | Non-root user, env, correct cwd | **Done** |
 | **2** | Mounts (bind + volume), `forwardPorts` → publish, `portsAttributes` metadata | Persistent volumes, host file binds, published ports | **Done** |
 | **3** | `postCreateCommand` (+ established path for other lifecycle hooks) | Bootstrap scripts after create; pattern for later hooks | **Done** |
-| **4** | Broader lifecycle as first-class (`onCreateCommand`, `updateContentCommand`, `postStartCommand`, `postAttachCommand`) **+** `runArgs` **allowlist** (e.g. `--cap-add`, `--init`; still reject privileged/device/unknown) **+** `hostRequirements` preflight (memory/CPU warn or fail — not silent ignore) | Full lifecycle hooks; safe runArgs subset; host capacity checks before create | **Next** |
-| **5** | Features runner: OCI fetch + derived image build (runner-owned); never docker-ood | Feature installs without Docker-ood; still subject to reject list | Planned |
+| **4** | Broader lifecycle as first-class (`onCreateCommand`, `updateContentCommand`, `postStartCommand`, `postAttachCommand`) **+** `runArgs` **allowlist** (e.g. `--cap-add`, `--init`; still reject privileged/device/unknown) **+** `hostRequirements` preflight (memory/CPU fail-on-shortfall + create `-m`/`-c`; parse/unknown fail) | Full lifecycle hooks; safe runArgs subset; host capacity enforce + apply on create | **Done** |
+| **5** | Features runner: OCI fetch + derived image build (runner-owned); never docker-ood | Feature installs without Docker-ood; still subject to reject list | **Next** |
 | **6** | Advanced parity / stretch (only what Apple container can support safely) | Closes remaining agreed gaps; still no silent unsupported props | Stretch |
 
 ## MVP boundary
@@ -20,9 +20,10 @@ Product delivery ladder for the Apple-container devcontainer CLI. **MVP = Phases
 
 ## Implementation status
 
-- **Phases 0–3 done** — core MVP realized; SDD change `adevcontainer-core` archived (`specs/changes/archive/20260807-adevcontainer-core/`). Realized contract: `specs/adevcontainer/spec.md`.
-- **Next: Phase 4** — lifecycle hooks (first-class) + `runArgs` allowlist + `hostRequirements` preflight.
-- postCreate failure cleanup and ProcessRunner pipe drain are in place; see [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
+- **Phases 0–3 done** — core MVP realized; SDD change `adevcontainer-core` archived (`specs/changes/archive/20260807-adevcontainer-core/`).
+- **Phase 4 done** — lifecycle matrix, `runArgs` allowlist, `hostRequirements` enforce+apply (fail shortfall; map limits on create). Merged into realized contract `specs/adevcontainer/spec.md`. Archived: `specs/changes/archive/20260807-lifecycle-runargs-host/`. No active change open. Tests ~105 via `swift run adevcontainerTests`.
+- **Next: Phase 5** — features runner (OCI fetch + derived image build); never docker-ood.
+- postCreate / create-path hook failure cleanup and ProcessRunner pipe drain are in place; see [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
 - Does not change ADR 0002 MVP cut; Phase 4 scope refined after MVP (see ADR 0002 consequences).
 
 ## Cross-phase rules
@@ -30,5 +31,5 @@ Product delivery ladder for the Apple-container devcontainer CLI. **MVP = Phases
 - Unsupported property → structured hard error.
 - Forever-reject (v1): docker-ood, `--privileged`, `--device=/dev/net/tun`, Compose, blind `runArgs` — [0003](../decisions/0003-reject-docker-ood-privileged-tun.md).
 - Features never imply docker-ood support.
-- `runArgs` allowlist (Phase 4+) never admits privileged, device, or unknown flags.
-- `hostRequirements` (Phase 4+) is preflight: warn or fail per policy — never silent ignore.
+- `runArgs` allowlist never admits privileged, device, or unknown flags.
+- `hostRequirements` is preflight: fail on capacity shortfall or unreadable host; apply requested memory/cpus as create `-m`/`-c` when host OK; warn unsupported `gpu`; fail on unparseable values or unknown keys — never silent ignore.

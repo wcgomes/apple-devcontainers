@@ -160,5 +160,13 @@ nonisolated(unsafe) let integrationTests: [(String, () throws -> Void)] = [
     ("fixtureE2E_lifecycle", {
         // postCreate is "echo postCreate-ok && pwd" — success of up + exec is enough
         try IntegrationSupport.runFixtureE2E(fixtureFile: "lifecycle.json")
+    }),
+    ("fixtureE2E_lifecycleHooks", {
+        // Lifecycle hooks are echo-only; up success implies create-path order completed.
+        try IntegrationSupport.runFixtureE2E(fixtureFile: "lifecycle-hooks.json")
+    }),
+    ("fixtureE2E_runargsHost", {
+        // Allowlisted runArgs + hostRequirements enforce+apply (8gb/4 cpus OK on typical Macs).
+        try IntegrationSupport.runFixtureE2E(fixtureFile: "runargs-host.json")
     })
 ]

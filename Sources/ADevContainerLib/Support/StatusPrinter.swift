@@ -1,6 +1,6 @@
 import Foundation
 
-/// Phase / progress lines on stderr (`==> …`). Disabled when `ADEVCONTAINER_QUIET=1`.
+/// Progress lines on stderr (`==> …`). Disabled when `ADEVCONTAINER_QUIET=1`.
 public enum StatusPrinter {
     /// Tests set this to `false`. Defaults from env at first use.
     nonisolated(unsafe) public static var enabled: Bool = ProcessInfo.processInfo.environment["ADEVCONTAINER_QUIET"] != "1"
@@ -9,4 +9,11 @@ public enum StatusPrinter {
         guard enabled else { return }
         fputs("==> \(message)\n", stderr)
     }
+
+    /// Volume-style warning line on stderr (`warning: …`). Honors `enabled`.
+    public static func warning(_ message: String) {
+        guard enabled else { return }
+        fputs("warning: \(message)\n", stderr)
+    }
 }
+

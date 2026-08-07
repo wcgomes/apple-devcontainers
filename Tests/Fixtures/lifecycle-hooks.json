@@ -1,0 +1,11 @@
+{
+  "name": "Lifecycle Hooks",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "remoteUser": "vscode",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "onCreateCommand": ["echo", "onCreate-ok"],
+  "updateContentCommand": "echo updateContent-ok",
+  "postCreateCommand": "echo postCreate-ok",
+  "postStartCommand": "echo postStart-ok",
+  "postAttachCommand": "echo postAttach-should-not-run"
+}

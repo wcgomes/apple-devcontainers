@@ -44,6 +44,11 @@ public struct CreateRequest: Equatable, Sendable {
     public var mounts: [MountSpec]
     public var publishPorts: [Int]
     public var portsAttributes: [String: [String: String]]
+    public var runArgs: [AllowlistedRunArg]
+    /// Apple `container create -m` value when hostRequirements.memory is set.
+    public var memoryLimit: String?
+    /// Apple `container create -c` value when hostRequirements.cpus is set.
+    public var cpuLimit: String?
     public var configHash: String
 
     public init(
@@ -58,6 +63,9 @@ public struct CreateRequest: Equatable, Sendable {
         mounts: [MountSpec] = [],
         publishPorts: [Int] = [],
         portsAttributes: [String: [String: String]] = [:],
+        runArgs: [AllowlistedRunArg] = [],
+        memoryLimit: String? = nil,
+        cpuLimit: String? = nil,
         configHash: String
     ) {
         self.name = name
@@ -71,6 +79,9 @@ public struct CreateRequest: Equatable, Sendable {
         self.mounts = mounts
         self.publishPorts = publishPorts
         self.portsAttributes = portsAttributes
+        self.runArgs = runArgs
+        self.memoryLimit = memoryLimit
+        self.cpuLimit = cpuLimit
         self.configHash = configHash
     }
 
@@ -111,6 +122,18 @@ public struct CreateRequest: Equatable, Sendable {
             args += ["-p", "\(port):\(port)"]
         }
 
+        // Allowlisted runArgs (no blind passthrough).
+        for runArg in runArgs {
+            args += runArg.createTokens
+        }
+
+        if let memoryLimit {
+            args += ["-m", memoryLimit]
+        }
+        if let cpuLimit {
+            args += ["-c", cpuLimit]
+        }
+
         // Keep container alive for attach/exec.
         args += ["--entrypoint", "sleep", image, "infinity"]
         return args
@@ -123,7 +146,8 @@ public struct CreateRequest: Equatable, Sendable {
         configHash: String,
         workspacePath: String
     ) -> CreateRequest {
-        CreateRequest(
+        let (memoryLimit, cpuLimit) = mergeMemoryCpuLimits(from: resolved)
+        return CreateRequest(
             name: identityName,
             image: resolved.image,
             labels: labels,
@@ -135,7 +159,76 @@ public struct CreateRequest: Equatable, Sendable {
             mounts: resolved.mounts,
             publishPorts: resolved.forwardPorts,
             portsAttributes: resolved.portsAttributes,
+            runArgs: resolved.runArgs,
+            memoryLimit: memoryLimit,
+            cpuLimit: cpuLimit,
             configHash: configHash
         )
+    }
+
+    /// hostRequirements wins when set; otherwise apply runArgs `--memory`/`--cpus`.
+    private static func mergeMemoryCpuLimits(
+        from resolved: ResolvedDevContainerConfig
+    ) -> (memory: String?, cpus: String?) {
+        var memoryLimit = resolved.hostRequirements?.memoryCreateFlagValue
+        var cpuLimit = resolved.hostRequirements?.cpuCreateFlagValue
+
+        var runArgsMemory: String?
+        var runArgsCpus: String?
+        for arg in resolved.runArgs {
+            switch arg {
+            case .memory(let raw):
+                if runArgsMemory == nil {
+                    runArgsMemory = normalizeRunArgsMemory(raw)
+                }
+            case .cpus(let raw):
+                if runArgsCpus == nil {
+                    runArgsCpus = normalizeRunArgsCpus(raw)
+                }
+            default:
+                break
+            }
+        }
+
+        if let runArgsMemory {
+            if memoryLimit != nil {
+                StatusPrinter.warning(
+                    "runArgs --memory ignored; hostRequirements.memory wins"
+                )
+            } else {
+                memoryLimit = runArgsMemory
+            }
+        }
+        if let runArgsCpus {
+            if cpuLimit != nil {
+                StatusPrinter.warning(
+                    "runArgs --cpus ignored; hostRequirements.cpus wins"
+                )
+            } else {
+                cpuLimit = runArgsCpus
+            }
+        }
+
+        return (memoryLimit, cpuLimit)
+    }
+
+    /// Normalize runArgs memory size to Apple `-m` form when parseable; else pass through.
+    private static func normalizeRunArgsMemory(_ raw: String) -> String {
+        if let bytes = HostRequirements.parseMemoryBytes(raw) {
+            let hr = HostRequirements(memoryBytes: bytes, memoryRaw: raw)
+            return hr.memoryCreateFlagValue ?? raw
+        }
+        return raw
+    }
+
+    private static func normalizeRunArgsCpus(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let d = Double(trimmed), d > 0, d.isFinite {
+            if d == floor(d), d <= Double(Int.max) {
+                return "\(Int(d))"
+            }
+            return String(d)
+        }
+        return trimmed
     }
 }

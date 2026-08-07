@@ -202,7 +202,7 @@ struct AdevcontainerMain {
 
     static func printUsage() {
         let text = """
-        adevcontainer — Apple container devcontainer CLI (Phases 0–3)
+        adevcontainer — Apple container devcontainer CLI
 
         Usage:
           adevcontainer <command> [options]

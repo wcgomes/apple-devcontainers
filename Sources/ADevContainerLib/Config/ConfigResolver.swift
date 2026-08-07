@@ -166,7 +166,14 @@ public enum ConfigResolver {
             }
         }
 
+        let onCreate = try LifecycleCommand.parse(raw["onCreateCommand"], property: "onCreateCommand")
+        let updateContent = try LifecycleCommand.parse(raw["updateContentCommand"], property: "updateContentCommand")
         let postCreate = try LifecycleCommand.parse(raw["postCreateCommand"], property: "postCreateCommand")
+        let postStart = try LifecycleCommand.parse(raw["postStartCommand"], property: "postStartCommand")
+        let postAttach = try LifecycleCommand.parse(raw["postAttachCommand"], property: "postAttachCommand")
+
+        let runArgs = try RunArgsAdmission.parse(raw["runArgs"])
+        let hostRequirements = try HostRequirements.parse(raw["hostRequirements"])
 
         var hasVscode = false
         if let customizations = raw["customizations"] as? [String: Any],
@@ -185,6 +192,12 @@ public enum ConfigResolver {
             forwardPorts: forwardPorts,
             portsAttributes: portsAttributes,
             postCreateCommand: postCreate,
+            onCreateCommand: onCreate,
+            updateContentCommand: updateContent,
+            postStartCommand: postStart,
+            postAttachCommand: postAttach,
+            runArgs: runArgs,
+            hostRequirements: hostRequirements,
             hasVscodeCustomizations: hasVscode
         )
     }

@@ -8,7 +8,7 @@ Greenfield native Swift executable (arm64). Reads `devcontainer.json`, drives Ap
 |------|--------|
 | Host | macOS 26+, Apple Silicon only |
 | CLI language | Swift 6.x (SPM; full Xcode not required) |
-| User runtime dep | Apple `container` only (host already has 1.2.1) |
+| User runtime dep | Apple `container` CLI (prerequisite; install separately — [apple/container](https://github.com/apple/container); tested with 1.2.x JSON) |
 | Apple container binary (typical) | `/usr/local/bin/container` |
 | Product binary | `adevcontainer` |
 
@@ -50,7 +50,7 @@ devcontainer.json → Config resolver → AppleContainerRuntime → /usr/local/b
 
 **delete vs prune:** `delete` drops the workspace container only. `prune` also removes config `type=volume` mounts and the config `image` reference. Neither deletes bind-mount host paths or runs global `volume`/`image` prune.
 
-**Progress:** long ops print `==> …` phase lines on stderr and tee Apple `container` stderr (pull/create/start/stop/delete/volume create). `ADEVCONTAINER_QUIET=1` silences phase status.
+**Progress:** long ops print `==> …` progress lines on stderr and tee Apple `container` stderr (pull/create/start/stop/delete/volume create). `ADEVCONTAINER_QUIET=1` silences progress status.
 
 ## Identity
 
@@ -62,13 +62,21 @@ devcontainer.json → Config resolver → AppleContainerRuntime → /usr/local/b
 
 - `forwardPorts` → publish ports on the Apple container (IDE auto-forward not guaranteed).
 - `portsAttributes` stored/surfaced as metadata where useful.
-- Lifecycle: MVP ships `postCreateCommand` via `container exec` (not baked into image). **Next (Phase 4):** first-class `onCreateCommand`, `updateContentCommand`, `postStartCommand`, `postAttachCommand`; plus `runArgs` allowlist and `hostRequirements` preflight. See [phase-ladder.md](domain/phase-ladder.md).
+- Lifecycle hooks run via `container exec` (not baked into image). Matrix:
+
+  | `up` path | Hooks |
+  |-----------|--------|
+  | Fresh create | `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand`; delete container if any create-path hook fails |
+  | Reuse running | no lifecycle hooks |
+  | Start stopped | `postStartCommand` only; failure fails `up` but does **not** delete |
+  | `postAttachCommand` | admitted; **not** run on `up` (status: skipped — no attach hook) |
+
+- **runArgs allowlist** and **hostRequirements** enforce+apply: [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md). Ladder: [phase-ladder.md](domain/phase-ladder.md).
 - Long-lived devcontainers use keep-alive entrypoint (`sleep … infinity` pattern) so the container stays up for `exec`/attach.
-- **postCreate failure:** delete the container before failing `up`, so a later reuse cannot succeed on a dirty container. See [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md).
 
 ## Features
 
-Features (OCI fetch + derived image build) are **Phase 5** — not MVP; runner-owned; never docker-ood. See [phase-ladder.md](domain/phase-ladder.md).
+Features (OCI fetch + derived image build) are **next** (see [phase-ladder.md](domain/phase-ladder.md)) — not in current surface; runner-owned; never docker-ood.
 
 ## VS Code flow
 

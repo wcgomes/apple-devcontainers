@@ -1,6 +1,6 @@
 import Foundation
 
-/// Fail-closed admission for Phases 0–3 property surface.
+/// Fail-closed admission for the supported property surface.
 public enum ConfigAdmissions {
     /// Keys that may appear and are either supported or intentionally ignored.
     private static let supportedKeys: Set<String> = [
@@ -14,8 +14,13 @@ public enum ConfigAdmissions {
         "forwardPorts",
         "portsAttributes",
         "postCreateCommand",
+        "onCreateCommand",
+        "updateContentCommand",
+        "postStartCommand",
+        "postAttachCommand",
         "customizations",
-        "hostRequirements" // ignore without failing
+        "hostRequirements",
+        "runArgs"
     ]
 
     private static let composeKeys: Set<String> = [
@@ -44,16 +49,21 @@ public enum ConfigAdmissions {
             try admitFeatures(features)
         }
 
-        // runArgs
-        if let runArgs = raw["runArgs"] {
-            try admitRunArgs(runArgs)
+        // runArgs — allowlisted subset only
+        if raw["runArgs"] != nil {
+            _ = try RunArgsAdmission.parse(raw["runArgs"])
+        }
+
+        // hostRequirements — parse/validate (no longer pure-ignore)
+        if raw["hostRequirements"] != nil {
+            _ = try HostRequirements.parse(raw["hostRequirements"])
         }
 
         // Unknown top-level keys (fail closed)
         for key in raw.keys {
             if supportedKeys.contains(key) { continue }
             if composeKeys.contains(key) { continue } // already handled
-            if key == "features" || key == "runArgs" { continue } // handled
+            if key == "features" { continue } // handled
             throw CLIError(
                 code: CLIErrorCode.unsupportedProperty,
                 property: key,
@@ -116,47 +126,5 @@ public enum ConfigAdmissions {
             message: "Features are not supported on the MVP path: \(ids)",
             hint: "Remove the features block; features runner is post-MVP"
         )
-    }
-
-    private static func admitRunArgs(_ runArgs: Any) throws {
-        guard let args = runArgs as? [Any] else {
-            throw CLIError(
-                code: CLIErrorCode.unsupportedProperty,
-                property: "runArgs",
-                message: "runArgs must be an array of strings"
-            )
-        }
-        // MVP allowlist is empty — every entry errors; call out privileged/device specially.
-        for item in args {
-            guard let arg = item as? String else {
-                throw CLIError(
-                    code: CLIErrorCode.unsupportedProperty,
-                    property: "runArgs",
-                    message: "runArgs entries must be strings"
-                )
-            }
-            if arg == "--privileged" || arg.hasPrefix("--privileged=") {
-                throw CLIError(
-                    code: CLIErrorCode.unsupportedProperty,
-                    property: "runArgs",
-                    message: "runArgs entry '--privileged' is forever-rejected",
-                    hint: "Remove --privileged from runArgs"
-                )
-            }
-            if arg == "--device" || arg.hasPrefix("--device=") || arg.hasPrefix("--device ") {
-                throw CLIError(
-                    code: CLIErrorCode.unsupportedProperty,
-                    property: "runArgs",
-                    message: "runArgs entry '\(arg)' (device passthrough) is forever-rejected",
-                    hint: "Remove --device flags from runArgs"
-                )
-            }
-            throw CLIError(
-                code: CLIErrorCode.unsupportedProperty,
-                property: "runArgs",
-                message: "runArgs entry '\(arg)' is not on the allowlist",
-                hint: "MVP runArgs allowlist is empty — remove all runArgs"
-            )
-        }
     }
 }

@@ -51,6 +51,11 @@ public enum CLIErrorCode {
     public static let containerNotRunning = "container_not_running"
     public static let configHashMismatch = "config_hash_mismatch"
     public static let postCreateFailed = "post_create_failed"
+    /// Lifecycle hook failure (onCreate / updateContent / postStart / etc.).
+    public static let lifecycleFailed = "lifecycle_failed"
+    /// hostRequirements capacity shortfall or unverifiable host resources.
+    public static let hostRequirements = "host_requirements"
     public static let usage = "usage"
     public static let internalError = "internal_error"
 }
+

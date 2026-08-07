@@ -46,9 +46,17 @@ public enum LifecycleCommand: Equatable, Sendable {
             return args
         }
     }
+
+    /// Stable encoding for config hash material.
+    public var hashEncoding: Any {
+        switch self {
+        case .shell(let s): return s
+        case .argv(let a): return a
+        }
+    }
 }
 
-/// Fully resolved Phase 0–3 config ready for runtime mapping.
+/// Fully resolved devcontainer config ready for runtime mapping.
 public struct ResolvedDevContainerConfig: Equatable {
     public var name: String?
     public var image: String
@@ -60,8 +68,54 @@ public struct ResolvedDevContainerConfig: Equatable {
     public var forwardPorts: [Int]
     public var portsAttributes: [String: [String: String]]
     public var postCreateCommand: LifecycleCommand?
+    public var onCreateCommand: LifecycleCommand?
+    public var updateContentCommand: LifecycleCommand?
+    public var postStartCommand: LifecycleCommand?
+    public var postAttachCommand: LifecycleCommand?
+    /// Allowlisted runArgs mapped onto create argv.
+    public var runArgs: [AllowlistedRunArg]
+    /// Evaluated hostRequirements (nil when absent).
+    public var hostRequirements: HostRequirements?
     /// Present when config included customizations.vscode (metadata only; not Sendable JSON).
     public var hasVscodeCustomizations: Bool
+
+    public init(
+        name: String? = nil,
+        image: String,
+        containerEnv: [String: String] = [:],
+        remoteUser: String? = nil,
+        containerUser: String? = nil,
+        workspaceFolder: String,
+        mounts: [MountSpec] = [],
+        forwardPorts: [Int] = [],
+        portsAttributes: [String: [String: String]] = [:],
+        postCreateCommand: LifecycleCommand? = nil,
+        onCreateCommand: LifecycleCommand? = nil,
+        updateContentCommand: LifecycleCommand? = nil,
+        postStartCommand: LifecycleCommand? = nil,
+        postAttachCommand: LifecycleCommand? = nil,
+        runArgs: [AllowlistedRunArg] = [],
+        hostRequirements: HostRequirements? = nil,
+        hasVscodeCustomizations: Bool = false
+    ) {
+        self.name = name
+        self.image = image
+        self.containerEnv = containerEnv
+        self.remoteUser = remoteUser
+        self.containerUser = containerUser
+        self.workspaceFolder = workspaceFolder
+        self.mounts = mounts
+        self.forwardPorts = forwardPorts
+        self.portsAttributes = portsAttributes
+        self.postCreateCommand = postCreateCommand
+        self.onCreateCommand = onCreateCommand
+        self.updateContentCommand = updateContentCommand
+        self.postStartCommand = postStartCommand
+        self.postAttachCommand = postAttachCommand
+        self.runArgs = runArgs
+        self.hostRequirements = hostRequirements
+        self.hasVscodeCustomizations = hasVscodeCustomizations
+    }
 
     public var effectiveUser: String? {
         // Prefer remoteUser for exec/attach semantics; fall back to containerUser.
@@ -88,10 +142,21 @@ public struct ResolvedDevContainerConfig: Equatable {
         ]
         if let remoteUser { m["remoteUser"] = remoteUser }
         if let containerUser { m["containerUser"] = containerUser }
-        if let postCreateCommand {
-            switch postCreateCommand {
-            case .shell(let s): m["postCreateCommand"] = s
-            case .argv(let a): m["postCreateCommand"] = a
+        if let onCreateCommand { m["onCreateCommand"] = onCreateCommand.hashEncoding }
+        if let updateContentCommand { m["updateContentCommand"] = updateContentCommand.hashEncoding }
+        if let postCreateCommand { m["postCreateCommand"] = postCreateCommand.hashEncoding }
+        if let postStartCommand { m["postStartCommand"] = postStartCommand.hashEncoding }
+        // postAttach does not affect create identity; omit from hash.
+        if !runArgs.isEmpty {
+            m["runArgs"] = runArgs.map { $0.hashEncoding as Any }
+        }
+        // hostRequirements memory/cpus affect create limits; include when set.
+        if let hostRequirements {
+            if let memoryBytes = hostRequirements.memoryBytes {
+                m["hostRequirements.memoryBytes"] = memoryBytes
+            }
+            if let cpus = hostRequirements.cpus {
+                m["hostRequirements.cpus"] = cpus
             }
         }
         // portsAttributes are metadata; include for inspect consistency
@@ -101,7 +166,3 @@ public struct ResolvedDevContainerConfig: Equatable {
         return m
     }
 }
-
-// Make customizations comparable-ish by ignoring in Equatable via manual synthesis exclusion.
-// We exclude customizationsVscode from Equatable by custom implementation:
-

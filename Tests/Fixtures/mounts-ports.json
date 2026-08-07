@@ -1,5 +1,5 @@
 {
-  "name": "Phase 2 Mounts Ports",
+  "name": "Mounts Ports",
   "image": "mcr.microsoft.com/devcontainers/dotnet:10.0",
   "containerEnv": {
     "ENVIRONMENT": "Development",

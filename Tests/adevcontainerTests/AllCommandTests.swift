@@ -914,3 +914,406 @@ nonisolated(unsafe) let phase3Tests: [(String, () throws -> Void)] = [
         try MiniTest.expect(s.contains("postCreate-ok"))
     })
 ]
+
+// MARK: - up lifecycle matrix
+
+private enum LifecycleUpSupport {
+    static let fullHooksJSON = """
+    {
+      "image": "alpine:3.20",
+      "onCreateCommand": "echo onCreate",
+      "updateContentCommand": "echo updateContent",
+      "postCreateCommand": "echo postCreate",
+      "postStartCommand": "echo postStart"
+    }
+    """
+
+    static func execBodies(_ args: [String]) -> [String] {
+        // exec argv: exec [flags...] containerId cmd...
+        // Find sh -lc <body> or bare tokens after container id.
+        if let lc = args.firstIndex(of: "-lc"), lc + 1 < args.count {
+            return [args[lc + 1]]
+        }
+        // argv form: last non-flag tokens after container name — return joined for matching
+        return args
+    }
+
+    static func mockFreshCreate(
+        resolved: ResolvedWorkspace,
+        execHandler: @escaping ([String]) -> ProcessResult = { _ in
+            ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+    ) -> MockProcessRunner {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "create" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("\(resolved.containerName)\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "start" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "exec" {
+                    return execHandler(args)
+                }
+                if args.first == "delete" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        return mock
+    }
+}
+
+nonisolated(unsafe) let phase4CommandTests: [(String, () throws -> Void)] = [
+    ("freshCreateRunsFullHookOrder", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: LifecycleUpSupport.fullHooksJSON)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        var execBodies: [String] = []
+        let mock = LifecycleUpSupport.mockFreshCreate(resolved: resolved) { args in
+            if let lc = args.firstIndex(of: "-lc"), lc + 1 < args.count {
+                execBodies.append(args[lc + 1])
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            hostResources: MockHostResourceInfo(physicalMemoryBytes: 64 << 30, cpuCount: 16)
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(execBodies, [
+            "echo onCreate",
+            "echo updateContent",
+            "echo postCreate",
+            "echo postStart"
+        ])
+    }),
+    ("reuseRunningSkipsLifecycle", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: LifecycleUpSupport.fullHooksJSON)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName, state: "running", labels: resolved.labels
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "exec" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+    }),
+    ("startStoppedRunsPostStartOnly", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: LifecycleUpSupport.fullHooksJSON)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName, state: "stopped", labels: resolved.labels
+        )
+        var execBodies: [String] = []
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "start" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "exec" {
+                    if let lc = args.firstIndex(of: "-lc"), lc + 1 < args.count {
+                        execBodies.append(args[lc + 1])
+                    }
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(execBodies, ["echo postStart"])
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+    }),
+    ("createPathHookFailureDeletesContainer", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "onCreateCommand": "exit 9",
+          "postCreateCommand": "echo should-not-run"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let mock = LifecycleUpSupport.mockFreshCreate(resolved: resolved) { _ in
+            ProcessResult(exitCode: 9, stdout: Data(), stderr: Data("boom\n".utf8))
+        }
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: ws.path, skipPull: true),
+                runtime: runtime,
+                localEnv: [:]
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.lifecycleFailed)
+            try MiniTest.expectEqual(err.property, "onCreateCommand")
+            try MiniTest.expect(err.message.contains("9"))
+        }
+        try MiniTest.expect(mock.calls.contains {
+            $0.arguments.first == "delete" && $0.arguments.contains(resolved.containerName)
+        })
+    }),
+    ("createPathPostStartFailureDeletesContainer", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "postStartCommand": "exit 3"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let mock = LifecycleUpSupport.mockFreshCreate(resolved: resolved) { _ in
+            ProcessResult(exitCode: 3, stdout: Data(), stderr: Data())
+        }
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: ws.path, skipPull: true),
+                runtime: runtime,
+                localEnv: [:]
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.lifecycleFailed)
+            try MiniTest.expectEqual(err.property, "postStartCommand")
+        }
+        try MiniTest.expect(mock.calls.contains {
+            $0.arguments.first == "delete" && $0.arguments.contains(resolved.containerName)
+        })
+    }),
+    ("restartPostStartFailureDoesNotDelete", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "postStartCommand": "exit 5"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName, state: "stopped", labels: resolved.labels
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "start" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 5, stdout: Data(), stderr: Data("fail\n".utf8))
+                }
+                if args.first == "delete" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: ws.path, skipPull: true),
+                runtime: runtime,
+                localEnv: [:]
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.lifecycleFailed)
+            try MiniTest.expectEqual(err.property, "postStartCommand")
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+    }),
+    ("postAttachAdmittedButNotRunOnUp", {
+        // Capture StatusPrinter by temporarily enabling and... we can't easily capture stderr.
+        // Verify: postAttach body never appears in exec; up succeeds even if postAttach would fail.
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "postAttachCommand": "exit 99",
+          "postCreateCommand": "echo postCreate"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        try MiniTest.expect(resolved.config.postAttachCommand != nil)
+        var execBodies: [String] = []
+        let mock = LifecycleUpSupport.mockFreshCreate(resolved: resolved) { args in
+            if let lc = args.firstIndex(of: "-lc"), lc + 1 < args.count {
+                execBodies.append(args[lc + 1])
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(execBodies, ["echo postCreate"])
+        try MiniTest.expect(!execBodies.contains(where: { $0.contains("exit 99") }))
+        // postAttach skip goes through StatusPrinter (enabled=false in suite); property admitted
+        // and not executed is the behavioral contract under test.
+        try MiniTest.expect(resolved.config.postAttachCommand != nil)
+    }),
+    ("createThenReuseStableWithHooks", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: LifecycleUpSupport.fullHooksJSON)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        var alive = false
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName, state: "running", labels: resolved.labels
+        )
+        var execCount = 0
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let payload: [Any] = alive ? [entry] : []
+                    let data = try! JSONSerialization.data(withJSONObject: payload)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "create" {
+                    alive = true
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("\(resolved.containerName)\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "start" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "exec" {
+                    execCount += 1
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let first = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(first.outcome, "success")
+        try MiniTest.expectEqual(execCount, 4) // full hook order
+        let second = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(second.outcome, "success")
+        try MiniTest.expectEqual(execCount, 4) // no additional hooks on reuse
+    }),
+    ("hostRequirementsShortfallFailsUp", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "hostRequirements": { "memory": "512gb", "cpus": 999 }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let mock = LifecycleUpSupport.mockFreshCreate(resolved: resolved)
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: ws.path, skipPull: true),
+                runtime: runtime,
+                localEnv: [:],
+                hostResources: MockHostResourceInfo(physicalMemoryBytes: 1 << 30, cpuCount: 1)
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.hostRequirements)
+            try MiniTest.expect(err.message.contains("memory") || err.message.contains("cpus"))
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+    }),
+    ("hostRequirementsEnoughSucceedsWithCreateLimits", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "hostRequirements": { "memory": "8gb", "cpus": 2 }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let mock = LifecycleUpSupport.mockFreshCreate(resolved: resolved)
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            hostResources: MockHostResourceInfo(physicalMemoryBytes: 64 << 30, cpuCount: 16)
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        guard let createArgs = mock.calls.first(where: { $0.arguments.first == "create" })?.arguments else {
+            throw MiniTest.Failure(message: "expected create call")
+        }
+        if let i = createArgs.firstIndex(of: "-m") {
+            try MiniTest.expectEqual(createArgs[i + 1], "8G")
+        } else {
+            throw MiniTest.Failure(message: "expected -m in create argv")
+        }
+        if let i = createArgs.firstIndex(of: "-c") {
+            try MiniTest.expectEqual(createArgs[i + 1], "2")
+        } else {
+            throw MiniTest.Failure(message: "expected -c in create argv")
+        }
+    }),
+    ("hostRequirementsNoLongerSilentlyIgnored", {
+        let req = try HostRequirements.parse(["memory": "8gb"] as [String: Any])!
+        let host = MockHostResourceInfo(physicalMemoryBytes: 1 << 30, cpuCount: 8)
+        let eval = HostRequirementsEvaluation.evaluate(req, host: host)
+        try MiniTest.expect(eval.hasHardFailures)
+        try MiniTest.expect(eval.hardFailures.contains { $0.contains("memory") })
+    })
+]

@@ -202,7 +202,9 @@ nonisolated(unsafe) let parserTests: [(String, () throws -> Void)] = [
             "smoke.json",
             "env-user.json",
             "mounts-ports.json",
-            "lifecycle.json"
+            "lifecycle.json",
+            "lifecycle-hooks.json",
+            "runargs-host.json"
         ] {
             let path = root.appendingPathComponent("Tests/Fixtures/\(name)").path
             let obj = try JSONCParser.loadFile(at: path)
@@ -306,10 +308,125 @@ nonisolated(unsafe) let admissionTests: [(String, () throws -> Void)] = [
         }
     }),
     ("rejectUnknownRunArgs", {
-        let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--cap-add=NET_ADMIN"]]
+        let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--not-a-real-flag"]]
         try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
-            try MiniTest.expect((error as! CLIError).message.contains("--cap-add=NET_ADMIN"))
+            let err = error as! CLIError
+            try MiniTest.expect(err.message.contains("--not-a-real-flag"))
+            try MiniTest.expect(err.message.lowercased().contains("allowlist"))
         }
+    }),
+    ("rejectNetworkHost", {
+        let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--network=host"]]
+        try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(err.message.lowercased().contains("host"))
+            try MiniTest.expect(
+                err.message.lowercased().contains("forever-rejected")
+                    || err.message.lowercased().contains("not allowed")
+            )
+        }
+    }),
+    ("rejectNetworkBridgeNoneContainer", {
+        for mode in ["bridge", "none", "container:abc", "HOST"] {
+            let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--network=\(mode)"]]
+            try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
+                try MiniTest.expectEqual((error as! CLIError).property, "runArgs")
+            }
+        }
+        let twoTok: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--network", "host"]]
+        try MiniTest.expectThrows({ try ConfigAdmissions.admit(twoTok) }) { error in
+            try MiniTest.expect((error as! CLIError).message.lowercased().contains("host"))
+        }
+    }),
+    ("rejectSecurityOptAndGpus", {
+        for flag in ["--security-opt=label=disable", "--gpus=all", "--ipc=host", "--pid=host"] {
+            let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": [flag]]
+            try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
+                try MiniTest.expect((error as! CLIError).message.lowercased().contains("forever-rejected"))
+            }
+        }
+    }),
+    ("rejectFirstClassRunArgsFlags", {
+        for entry in [["-e", "FOO=bar"], ["-p", "8080:8080"], ["--entrypoint=bash"], ["-v", "/tmp:/tmp"]] as [[String]] {
+            let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": entry]
+            try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
+                try MiniTest.expectEqual((error as! CLIError).property, "runArgs")
+            }
+        }
+    }),
+    ("allowlistedRunArgsAdmit", {
+        let raw: [String: Any] = [
+            "image": "alpine:3.20",
+            "runArgs": ["--init", "--cap-add=NET_ADMIN", "--cap-add", "SYS_PTRACE", "--cap-drop=MKNOD"]
+        ]
+        try ConfigAdmissions.admit(raw)
+        let parsed = try RunArgsAdmission.parse(raw["runArgs"])
+        try MiniTest.expectEqual(parsed, [
+            .initFlag,
+            .capAdd("NET_ADMIN"),
+            .capAdd("SYS_PTRACE"),
+            .capDrop("MKNOD")
+        ])
+    }),
+    ("allowlistedRunArgsWaveAB", {
+        let raw: [String: Any] = [
+            "image": "alpine:3.20",
+            "runArgs": [
+                "--shm-size=64m",
+                "--dns", "8.8.8.8",
+                "--dns-search=local",
+                "--dns-option", "ndots:1",
+                "--dns-domain=example.com",
+                "--no-dns",
+                "--ulimit=nofile=1024:2048",
+                "--tmpfs=/tmp:rw",
+                "--tmpfs", "/run",
+                "--network=mynet",
+                "--rosetta",
+                "--ssh",
+                "--read-only",
+                "--memory=2g",
+                "-c", "2"
+            ] as [Any]
+        ]
+        try ConfigAdmissions.admit(raw)
+        let parsed = try RunArgsAdmission.parse(raw["runArgs"])
+        try MiniTest.expect(parsed.contains(.shmSize("64m")))
+        try MiniTest.expect(parsed.contains(.dns("8.8.8.8")))
+        try MiniTest.expect(parsed.contains(.dnsSearch("local")))
+        try MiniTest.expect(parsed.contains(.dnsOption("ndots:1")))
+        try MiniTest.expect(parsed.contains(.dnsDomain("example.com")))
+        try MiniTest.expect(parsed.contains(.noDns))
+        try MiniTest.expect(parsed.contains(.ulimit("nofile=1024:2048")))
+        try MiniTest.expect(parsed.contains(.tmpfs("/tmp")))
+        try MiniTest.expect(parsed.contains(.tmpfs("/run")))
+        try MiniTest.expect(parsed.contains(.network("mynet")))
+        try MiniTest.expect(parsed.contains(.rosetta))
+        try MiniTest.expect(parsed.contains(.ssh))
+        try MiniTest.expect(parsed.contains(.readOnly))
+        try MiniTest.expect(parsed.contains(.memory("2g")))
+        try MiniTest.expect(parsed.contains(.cpus("2")))
+    }),
+    ("emptyRunArgsOK", {
+        let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": [] as [Any]]
+        try ConfigAdmissions.admit(raw)
+        let parsed = try RunArgsAdmission.parse(raw["runArgs"])
+        try MiniTest.expectEqual(parsed, [])
+    }),
+    ("rejectDanglingCapAdd", {
+        let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--cap-add"]]
+        try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(err.message.contains("--cap-add"))
+            try MiniTest.expect(err.message.lowercased().contains("incomplete") || err.message.contains("missing"))
+        }
+    }),
+    ("allowlistedCapAddNoLongerErrors", {
+        let raw: [String: Any] = [
+            "image": "alpine:3.20",
+            "runArgs": ["--cap-add=NET_ADMIN", "--init"]
+        ]
+        try ConfigAdmissions.admit(raw)
     }),
     ("rejectComposeKeys", {
         let raw: [String: Any] = [
@@ -343,7 +460,9 @@ nonisolated(unsafe) let admissionTests: [(String, () throws -> Void)] = [
             "smoke.json",
             "env-user.json",
             "mounts-ports.json",
-            "lifecycle.json"
+            "lifecycle.json",
+            "lifecycle-hooks.json",
+            "runargs-host.json"
         ] {
             let path = root.appendingPathComponent("Tests/Fixtures/\(name)").path
             let ws = FileManager.default.temporaryDirectory
@@ -356,6 +475,333 @@ nonisolated(unsafe) let admissionTests: [(String, () throws -> Void)] = [
             let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: env)
             try MiniTest.expect(!resolved.config.image.isEmpty, name)
         }
+    })
+]
+
+nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
+    ("runArgsMapToCreateArgv", {
+        let request = CreateRequest(
+            name: "ctr",
+            image: "alpine:3.20",
+            labels: [:],
+            workspaceBindHost: "/ws",
+            workspaceBindTarget: "/workspaces/ws",
+            runArgs: [
+                .initFlag,
+                .capAdd("NET_ADMIN"),
+                .capAdd("SYS_PTRACE"),
+                .capDrop("MKNOD"),
+                .shmSize("64m"),
+                .dns("8.8.8.8"),
+                .tmpfs("/tmp"),
+                .network("mynet"),
+                .rosetta,
+                .ssh,
+                .readOnly,
+                .memory("2g"),
+                .cpus("2")
+            ],
+            configHash: "h"
+        )
+        let args = request.createArguments()
+        try MiniTest.expect(args.contains("--init"))
+        // Apple form: --cap-add NAME
+        if let i = args.firstIndex(of: "--cap-add") {
+            try MiniTest.expect(args[i + 1] == "NET_ADMIN" || args.contains("NET_ADMIN"))
+        } else {
+            throw MiniTest.Failure(message: "expected --cap-add in create argv")
+        }
+        try MiniTest.expect(args.contains("SYS_PTRACE"))
+        try MiniTest.expect(args.contains("--cap-drop"))
+        try MiniTest.expect(args.contains("MKNOD"))
+        try MiniTest.expect(args.contains("--shm-size"))
+        try MiniTest.expect(args.contains("64m"))
+        try MiniTest.expect(args.contains("--dns"))
+        try MiniTest.expect(args.contains("8.8.8.8"))
+        try MiniTest.expect(args.contains("--tmpfs"))
+        try MiniTest.expect(args.contains("/tmp"))
+        try MiniTest.expect(args.contains("--network"))
+        try MiniTest.expect(args.contains("mynet"))
+        try MiniTest.expect(args.contains("--rosetta"))
+        try MiniTest.expect(args.contains("--ssh"))
+        try MiniTest.expect(args.contains("--read-only"))
+        // memory/cpus do not emit duplicate tokens from createTokens
+        try MiniTest.expect(!args.contains("--memory"))
+        try MiniTest.expect(!args.contains("--cpus"))
+        // No blind privileged/device
+        try MiniTest.expect(!args.contains(where: { $0.contains("privileged") }))
+        try MiniTest.expect(!args.contains(where: { $0.hasPrefix("--device") }))
+    }),
+    ("runArgsMemoryCpusMergeHostRequirementsWins", {
+        var resolved = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/x",
+            runArgs: [.memory("1g"), .cpus("1")],
+            hostRequirements: try HostRequirements.parse(["memory": "8gb", "cpus": 4] as [String: Any])
+        )
+        let request = CreateRequest.from(
+            resolved: resolved,
+            identityName: "ctr",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        )
+        try MiniTest.expectEqual(request.memoryLimit, "8G")
+        try MiniTest.expectEqual(request.cpuLimit, "4")
+        let args = request.createArguments()
+        if let i = args.firstIndex(of: "-m") {
+            try MiniTest.expectEqual(args[i + 1], "8G")
+        } else {
+            throw MiniTest.Failure(message: "expected -m from hostRequirements")
+        }
+        // only one -m
+        try MiniTest.expectEqual(args.filter { $0 == "-m" }.count, 1)
+        try MiniTest.expectEqual(args.filter { $0 == "-c" }.count, 1)
+        _ = resolved
+    }),
+    ("runArgsMemoryCpusApplyWhenNoHostRequirements", {
+        let resolved = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/x",
+            runArgs: [.memory("2g"), .cpus("2")]
+        )
+        let request = CreateRequest.from(
+            resolved: resolved,
+            identityName: "ctr",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        )
+        try MiniTest.expectEqual(request.memoryLimit, "2G")
+        try MiniTest.expectEqual(request.cpuLimit, "2")
+        let args = request.createArguments()
+        if let i = args.firstIndex(of: "-m") {
+            try MiniTest.expectEqual(args[i + 1], "2G")
+        } else {
+            throw MiniTest.Failure(message: "expected -m from runArgs")
+        }
+        if let i = args.firstIndex(of: "-c") {
+            try MiniTest.expectEqual(args[i + 1], "2")
+        } else {
+            throw MiniTest.Failure(message: "expected -c from runArgs")
+        }
+    }),
+    ("runArgsIncludedInConfigHash", {
+        let base = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            containerEnv: [:],
+            workspaceFolder: "/workspaces/x",
+            mounts: [],
+            forwardPorts: [],
+            portsAttributes: [:],
+            runArgs: [],
+            hasVscodeCustomizations: false
+        )
+        var withInit = base
+        withInit.runArgs = [.initFlag]
+        let h1 = ContainerIdentity.configHash(from: base.hashMaterial())
+        let h2 = ContainerIdentity.configHash(from: withInit.hashMaterial())
+        try MiniTest.expect(h1 != h2)
+    }),
+    ("hostRequirementsParseMemoryAndCpus", {
+        let mem8 = HostRequirements.parseMemoryBytes("8gb")
+        try MiniTest.expectEqual(mem8, 8 * 1_024 * 1_024 * 1_024)
+        let memMb = HostRequirements.parseMemoryBytes("8192mb")
+        try MiniTest.expectEqual(memMb, 8192 * 1_024 * 1_024)
+        let req = try HostRequirements.parse([
+            "memory": "8gb",
+            "cpus": 4
+        ] as [String: Any])!
+        try MiniTest.expectEqual(req.memoryBytes, 8 * 1_024 * 1_024 * 1_024)
+        try MiniTest.expectEqual(req.cpus, 4.0)
+        let reqStr = try HostRequirements.parse([
+            "cpus": "2"
+        ] as [String: Any])!
+        try MiniTest.expectEqual(reqStr.cpus, 2.0)
+    }),
+    ("hostRequirementsUnparseableMemoryFails", {
+        try MiniTest.expectThrows({
+            _ = try HostRequirements.parse(["memory": "plenty"] as [String: Any])
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.property, "hostRequirements.memory")
+        }
+    }),
+    ("hostRequirementsUnknownKeyFails", {
+        try MiniTest.expectThrows({
+            _ = try HostRequirements.parse(["storage": "100gb"] as [String: Any])
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.property, "hostRequirements.storage")
+        }
+    }),
+    ("hostRequirementsShortfallHasFailures", {
+        let req = try HostRequirements.parse([
+            "memory": "8gb",
+            "cpus": 64
+        ] as [String: Any])!
+        let host = MockHostResourceInfo(
+            physicalMemoryBytes: 1_024 * 1_024 * 1_024, // 1 GiB
+            cpuCount: 2
+        )
+        let eval = HostRequirementsEvaluation.evaluate(req, host: host)
+        try MiniTest.expect(eval.hasHardFailures)
+        try MiniTest.expect(eval.hardFailures.contains { $0.contains("memory") })
+        try MiniTest.expect(eval.hardFailures.contains { $0.contains("cpus") })
+        try MiniTest.expect(eval.warnings.isEmpty)
+    }),
+    ("hostRequirementsGpuWarnsUnsupported", {
+        let req = try HostRequirements.parse(["gpu": "optional"] as [String: Any])!
+        let host = MockHostResourceInfo(
+            physicalMemoryBytes: 64 * 1_024 * 1_024 * 1_024,
+            cpuCount: 16
+        )
+        let eval = HostRequirementsEvaluation.evaluate(req, host: host)
+        try MiniTest.expect(!eval.hasHardFailures)
+        try MiniTest.expectEqual(eval.warnings.count, 1)
+        try MiniTest.expect(eval.warnings[0].lowercased().contains("gpu"))
+        try MiniTest.expect(eval.warnings[0].lowercased().contains("unsupported"))
+    }),
+    ("hostRequirementsAbsentNoOp", {
+        let eval = HostRequirementsEvaluation.evaluate(nil, host: MockHostResourceInfo())
+        try MiniTest.expect(!eval.hasHardFailures)
+        try MiniTest.expect(eval.warnings.isEmpty)
+        try MiniTest.expect(eval.warningMessage() == nil)
+    }),
+    ("hostRequirementsMemoryCreateFlagValue", {
+        let req = try HostRequirements.parse(["memory": "8gb", "cpus": 4] as [String: Any])!
+        try MiniTest.expectEqual(req.memoryCreateFlagValue, "8G")
+        try MiniTest.expectEqual(req.cpuCreateFlagValue, "4")
+        let mb = try HostRequirements.parse(["memory": "8192mb"] as [String: Any])!
+        try MiniTest.expectEqual(mb.memoryCreateFlagValue, "8192M")
+    }),
+    ("lifecycleCommandFormsParse", {
+        let onCreate = try LifecycleCommand.parse(["echo", "hi"] as [Any], property: "onCreateCommand")
+        let postStart = try LifecycleCommand.parse("echo start", property: "postStartCommand")
+        try MiniTest.expectEqual(onCreate, .argv(["echo", "hi"]))
+        try MiniTest.expectEqual(postStart, .shell("echo start"))
+        try MiniTest.expectEqual(onCreate!.execArguments, ["echo", "hi"])
+        try MiniTest.expectEqual(postStart!.execArguments, ["sh", "-lc", "echo start"])
+    }),
+    ("invalidPostAttachFormFails", {
+        try MiniTest.expectThrows({
+            _ = try LifecycleCommand.parse(42, property: "postAttachCommand")
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.property, "postAttachCommand")
+        }
+    }),
+    ("lifecycleHooksFixtureAdmits", {
+        let root = TestRepo.root()
+        let fixture = root.appendingPathComponent("Tests/Fixtures/lifecycle-hooks.json")
+        let ws = FileManager.default.temporaryDirectory
+            .appendingPathComponent("p4-hooks-\(UUID().uuidString)", isDirectory: true)
+        let dc = ws.appendingPathComponent(".devcontainer", isDirectory: true)
+        try FileManager.default.createDirectory(at: dc, withIntermediateDirectories: true)
+        try Data(contentsOf: fixture).write(to: dc.appendingPathComponent("devcontainer.json"))
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        try MiniTest.expect(resolved.config.onCreateCommand != nil)
+        try MiniTest.expect(resolved.config.updateContentCommand != nil)
+        try MiniTest.expect(resolved.config.postCreateCommand != nil)
+        try MiniTest.expect(resolved.config.postStartCommand != nil)
+        try MiniTest.expect(resolved.config.postAttachCommand != nil)
+    }),
+    ("runargsHostFixtureAdmitsAndMaps", {
+        let root = TestRepo.root()
+        let fixture = root.appendingPathComponent("Tests/Fixtures/runargs-host.json")
+        let ws = FileManager.default.temporaryDirectory
+            .appendingPathComponent("p4-run-\(UUID().uuidString)", isDirectory: true)
+        let dc = ws.appendingPathComponent(".devcontainer", isDirectory: true)
+        try FileManager.default.createDirectory(at: dc, withIntermediateDirectories: true)
+        try Data(contentsOf: fixture).write(to: dc.appendingPathComponent("devcontainer.json"))
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        try MiniTest.expect(resolved.config.runArgs.contains(.initFlag))
+        try MiniTest.expect(resolved.config.runArgs.contains(.capAdd("NET_ADMIN")))
+        try MiniTest.expect(resolved.config.runArgs.contains(.capAdd("SYS_PTRACE")))
+        try MiniTest.expect(resolved.config.runArgs.contains(.capDrop("MKNOD")))
+        try MiniTest.expect(resolved.config.runArgs.contains(.shmSize("64m")))
+        try MiniTest.expect(resolved.config.runArgs.contains(.dns("8.8.8.8")))
+        try MiniTest.expect(resolved.config.hostRequirements?.memoryBytes != nil)
+        try MiniTest.expectEqual(resolved.config.hostRequirements?.cpus, 4.0)
+        let request = CreateRequest.from(
+            resolved: resolved.config,
+            identityName: resolved.containerName,
+            labels: resolved.labels,
+            configHash: resolved.configHash,
+            workspacePath: resolved.workspacePath
+        )
+        let args = request.createArguments()
+        try MiniTest.expect(args.contains("--init"))
+        try MiniTest.expect(args.contains("--cap-add"))
+        try MiniTest.expect(args.contains("NET_ADMIN"))
+        try MiniTest.expect(args.contains("--shm-size"))
+        try MiniTest.expect(args.contains("64m"))
+        try MiniTest.expect(args.contains("--dns"))
+        try MiniTest.expect(args.contains("8.8.8.8"))
+        // hostRequirements map to create limits
+        if let i = args.firstIndex(of: "-m") {
+            try MiniTest.expectEqual(args[i + 1], "8G")
+        } else {
+            throw MiniTest.Failure(message: "expected -m in create argv")
+        }
+        if let i = args.firstIndex(of: "-c") {
+            try MiniTest.expectEqual(args[i + 1], "4")
+        } else {
+            throw MiniTest.Failure(message: "expected -c in create argv")
+        }
+    }),
+    ("absentHostRequirementsOmitsCreateLimits", {
+        let request = CreateRequest(
+            name: "ctr",
+            image: "alpine:3.20",
+            labels: [:],
+            workspaceBindHost: "/ws",
+            workspaceBindTarget: "/workspaces/ws",
+            configHash: "h"
+        )
+        let args = request.createArguments()
+        try MiniTest.expect(!args.contains("-m"))
+        try MiniTest.expect(!args.contains("-c"))
+    }),
+    ("hostRequirementsIncludedInConfigHash", {
+        let base = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            containerEnv: [:],
+            workspaceFolder: "/workspaces/x",
+            mounts: [],
+            forwardPorts: [],
+            portsAttributes: [:],
+            runArgs: [],
+            hasVscodeCustomizations: false
+        )
+        var withMem = base
+        withMem.hostRequirements = try HostRequirements.parse(["memory": "8gb"] as [String: Any])
+        let h1 = ContainerIdentity.configHash(from: base.hashMaterial())
+        let h2 = ContainerIdentity.configHash(from: withMem.hashMaterial())
+        try MiniTest.expect(h1 != h2)
+    }),
+    ("lifecycleIncludedInConfigHash", {
+        var base = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            containerEnv: [:],
+            workspaceFolder: "/workspaces/x",
+            mounts: [],
+            forwardPorts: [],
+            portsAttributes: [:],
+            runArgs: [],
+            hasVscodeCustomizations: false
+        )
+        var withPostStart = base
+        withPostStart.postStartCommand = .shell("echo hi")
+        let h1 = ContainerIdentity.configHash(from: base.hashMaterial())
+        let h2 = ContainerIdentity.configHash(from: withPostStart.hashMaterial())
+        try MiniTest.expect(h1 != h2)
+        // postAttach should not affect hash
+        base.postAttachCommand = .shell("echo attach")
+        let h3 = ContainerIdentity.configHash(from: base.hashMaterial())
+        try MiniTest.expectEqual(h1, h3)
     })
 ]
 

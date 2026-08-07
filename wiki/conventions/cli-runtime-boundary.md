@@ -11,9 +11,9 @@ All host runtime interaction goes through **AppleContainerRuntime**. No other mo
 - `doctor` validates binary presence/version/runnability before `up` paths rely on it.
 - **ProcessRunner:** async-drain stdout/stderr pipes before and during `wait`, or a full pipe can deadlock the child.
 
-## Apple container 1.2.1 JSON (list/inspect)
+## Apple container machine JSON (list/inspect; tested 1.2.x)
 
-Parse these paths from machine JSON (not human tables):
+Parse these paths from machine JSON (not human tables). Shape documented against Apple container **1.2.x**:
 
 | Path | Meaning |
 |------|---------|
@@ -44,9 +44,32 @@ Fixtures may use directory binds already (`~/.kube`); configs that still use fil
 ## runArgs allowlist
 
 - No blind passthrough of `runArgs` from `devcontainer.json`.
-- Only explicitly allowlisted flags/shapes may reach argv.
-- Always reject (v1): `--privileged`, `--device=…` (incl. `/dev/net/tun`), and any flag not on the allowlist.
-- Unknown `runArgs` entries → structured error naming the entry.
+- Empty `runArgs` (`[]`) or omitted → OK (no-op).
+- Valued flags accept `=VALUE` or two-token form unless noted.
+- **Allowlist** (mapped onto `container create` via AppleContainerRuntime / `CreateRequest` only):
+  - `--init`
+  - `--cap-add=NAME` or `--cap-add` + `NAME`
+  - `--cap-drop=NAME` or `--cap-drop` + `NAME`
+  - `--shm-size=SIZE`
+  - `--dns=IP`, `--dns-search`, `--dns-option`, `--dns-domain`, `--no-dns`
+  - `--ulimit=type=soft[:hard]`
+  - `--tmpfs=PATH` (if value contains `:`, path before first `:` only)
+  - `--cpus`/`-c`, `--memory`/`-m` — **merge into** create `-c`/`-m` (no duplicate tokens); hostRequirements wins when set for that dimension
+  - `--network=NAME` — **named networks only** (reject host/bridge/none/container:*)
+  - `--rosetta`, `--ssh`, `--read-only`
+- **Not via runArgs** (first-class props): `-e`/`-u`/`-w`/`-p`/`-v`/`--mount`/`--name`/`--label`/`-i`/`-t`/`-d`/`--rm`/`--entrypoint`.
+- Forever-reject (v1): `--privileged`, `--device=…` (incl. `/dev/net/tun`), `--security-opt`, `--gpus`, `--ipc`, `--pid`, `--userns`, `--cgroupns`, `--hostname`, `--add-host`, `--sysctl`, `--group-add`, `--runtime`, Docker-only network modes, and any flag not on the allowlist.
+- Unknown or incomplete entries (e.g. bare `--cap-add` with no name) → structured error naming the entry.
+
+## hostRequirements preflight
+
+- Evaluate on every `up` before create/start/reuse — never silent ignore.
+- Supported keys: `memory` (e.g. `8gb` / `8192mb`), `cpus` (number).
+- **Fail `up`** on capacity shortfall or when host memory/cpus cannot be read while required.
+- When host has capacity: map **requested** values onto `container create` as `-m` / `-c` (Apple size suffixes); absent/empty → no limit flags.
+- **Warn** that `gpu` is unsupported when present (does not fail alone; no create flags).
+- **Fail** if `hostRequirements` is present but not an object, a supported key is unparseable, or an unknown key appears inside the object.
+- Config hash includes memory/cpus when set (limits affect create identity).
 
 ## Deterministic names and labels
 
@@ -83,15 +106,24 @@ Missing resources are skipped. Exit non-zero only if deleting an **existing** re
 
 ## Progress / tee
 
-- Phase status lines on **stderr**: `==> …` (pull, create, start, stop, delete, volume create, and related long steps).
+- Progress status lines on **stderr**: `==> …` (pull, create, start, stop, delete, volume create, and related long steps).
 - Tee Apple `container` stderr onto the same stream for those operations.
-- `--json` keeps **stdout** pure JSON. `ADEVCONTAINER_QUIET=1` silences phase status lines.
+- `--json` keeps **stdout** pure JSON. `ADEVCONTAINER_QUIET=1` silences progress status lines.
 
-## Lifecycle execution
+## Lifecycle execution (hook matrix)
 
-- Lifecycle hooks in MVP (`postCreateCommand`) run via runtime **exec** into the running container.
-- Capture exit codes; failed lifecycle fails `up` — do not pretend success.
-- **On postCreate failure:** delete the container **before** returning failure from `up`, so reuse cannot treat a half-bootstrapped container as healthy.
+Hooks run via runtime **exec** into the running container (effective user + workspace folder when set). String or argv-array forms. Omitted properties are no-ops.
+
+| `up` path | Hooks |
+|-----------|--------|
+| Fresh create | `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand` |
+| Reuse running | none |
+| Start stopped | `postStartCommand` only |
+| `postAttachCommand` | admitted; **skipped on `up`** (one status line; no attach hook yet) |
+
+- Capture exit codes; failed hook fails `up` — do not pretend success.
+- **Create-path failure** (any of onCreate / updateContent / postCreate / postStart on fresh create): delete the container **before** returning failure from `up`, so reuse cannot treat a half-bootstrapped container as healthy.
+- **Start-stopped `postStartCommand` failure:** fail `up` but **do not** delete.
 
 ## `exec`: interactive vs non-interactive
 

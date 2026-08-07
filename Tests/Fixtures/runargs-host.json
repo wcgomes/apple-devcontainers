@@ -1,0 +1,17 @@
+{
+  "name": "runArgs + hostRequirements",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "runArgs": [
+    "--init",
+    "--cap-add=NET_ADMIN",
+    "--cap-add",
+    "SYS_PTRACE",
+    "--cap-drop=MKNOD",
+    "--shm-size=64m",
+    "--dns=8.8.8.8"
+  ],
+  "hostRequirements": {
+    "memory": "8gb",
+    "cpus": 4
+  }
+}

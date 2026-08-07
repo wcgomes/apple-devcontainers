@@ -23,7 +23,8 @@ public enum UpCommand {
     public static func run(
         options: UpOptions,
         runtime: AppleContainerRuntime,
-        localEnv: [String: String] = ProcessInfo.processInfo.environment
+        localEnv: [String: String] = ProcessInfo.processInfo.environment,
+        hostResources: any HostResourceProviding = SystemHostResourceInfo()
     ) throws -> UpResult {
         StatusPrinter.status("Resolving configuration")
         let resolved = try ConfigResolver.resolve(
@@ -37,6 +38,9 @@ public enum UpCommand {
             configHash: resolved.configHash,
             workspacePath: resolved.workspacePath
         )
+
+        // hostRequirements: fail up on shortfall/unreadable host; warn gpu; limits applied on create.
+        try enforceHostRequirements(config: resolved.config, host: hostResources)
 
         let existing = try runtime.findByName(resolved.containerName)
 
@@ -57,12 +61,19 @@ public enum UpCommand {
                 try runtime.delete(nameOrId: existing.id, force: true)
             } else if existing.isRunning {
                 StatusPrinter.status("Reusing running container \(existing.name)")
+                LifecycleRunner.emitPostAttachSkipIfNeeded(config: resolved.config)
                 StatusPrinter.status("Ready")
                 return successResult(id: existing.id, name: existing.name, config: resolved.config)
             } else {
                 StatusPrinter.status("Starting container")
                 try runtime.start(nameOrId: existing.id)
-                // postCreate only on fresh create, not restart
+                // Restart path: postStart only; do not delete on failure.
+                try LifecycleRunner.runRestartPostStart(
+                    containerId: existing.id,
+                    config: resolved.config,
+                    runtime: runtime
+                )
+                LifecycleRunner.emitPostAttachSkipIfNeeded(config: resolved.config)
                 StatusPrinter.status("Ready")
                 return successResult(id: existing.id, name: existing.name, config: resolved.config)
             }
@@ -83,34 +94,33 @@ public enum UpCommand {
         StatusPrinter.status("Starting container")
         try runtime.start(nameOrId: id)
 
-        if let postCreate = resolved.config.postCreateCommand {
-            StatusPrinter.status("Running postCreateCommand")
-            let execResult = try runtime.exec(
-                nameOrId: id,
-                command: postCreate.execArguments,
-                user: resolved.config.effectiveUser,
-                workdir: resolved.config.workspaceFolder,
-                env: resolved.config.containerEnv
-            )
-            if !execResult.succeeded {
-                // Do not leave a reusable container after a failed create-path postCreate.
-                try? runtime.delete(nameOrId: id, force: true)
-                let detail = [
-                    execResult.stderrString.trimmingCharacters(in: .whitespacesAndNewlines),
-                    execResult.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
-                ].filter { !$0.isEmpty }.joined(separator: " | ")
-                throw CLIError(
-                    code: CLIErrorCode.postCreateFailed,
-                    property: "postCreateCommand",
-                    message: "postCreateCommand failed with exit \(execResult.exitCode)"
-                        + (detail.isEmpty ? "" : ": \(detail)"),
-                    hint: "Fix the postCreateCommand or exec into the container to debug"
-                )
-            }
-        }
+        // Fresh create: onCreate → updateContent → postCreate → postStart; delete on any failure.
+        try LifecycleRunner.runCreatePath(
+            containerId: id,
+            config: resolved.config,
+            runtime: runtime
+        )
 
+        LifecycleRunner.emitPostAttachSkipIfNeeded(config: resolved.config)
         StatusPrinter.status("Ready")
         return successResult(id: id, name: resolved.containerName, config: resolved.config)
+    }
+
+    private static func enforceHostRequirements(
+        config: ResolvedDevContainerConfig,
+        host: any HostResourceProviding
+    ) throws {
+        let evaluation = HostRequirementsEvaluation.evaluate(config.hostRequirements, host: host)
+        for warning in evaluation.warnings {
+            StatusPrinter.warning(warning)
+        }
+        guard evaluation.hasHardFailures else { return }
+        throw CLIError(
+            code: CLIErrorCode.hostRequirements,
+            property: "hostRequirements",
+            message: evaluation.hardFailures.joined(separator: "; "),
+            hint: "Reduce hostRequirements or run on a host with sufficient memory/CPUs"
+        )
     }
 
     private static func successResult(
