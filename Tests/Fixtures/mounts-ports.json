@@ -1,0 +1,52 @@
+{
+  "name": "Phase 2 Mounts Ports",
+  "image": "mcr.microsoft.com/devcontainers/dotnet:10.0",
+  "containerEnv": {
+    "ENVIRONMENT": "Development",
+    "MSBUILDDISABLENODEREUSE": "1"
+  },
+  "remoteUser": "vscode",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "mounts": [
+    "source=${localEnv:HOME}/.kube,target=/home/vscode/.kube,type=bind,readonly",
+    {
+      "source": "opencode-config",
+      "target": "/home/vscode/.config/opencode",
+      "type": "volume"
+    },
+    {
+      "source": "opencode-data",
+      "target": "/home/vscode/.local/share/opencode",
+      "type": "volume"
+    },
+    {
+      "source": "opencode-state",
+      "target": "/home/vscode/.local/state/opencode",
+      "type": "volume"
+    }
+  ],
+  "forwardPorts": [14200, 14201, 15000, 15001],
+  "portsAttributes": {
+    "14200": {
+      "label": "PlantSuite Portal",
+      "onAutoForward": "openBrowser"
+    },
+    "14201": {
+      "label": "Gateway Client"
+    },
+    "15000": {
+      "label": "Alarms API"
+    },
+    "15001": {
+      "label": "Dashboards API"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-dotnettools.csdevkit",
+        "EditorConfig.EditorConfig"
+      ]
+    }
+  }
+}

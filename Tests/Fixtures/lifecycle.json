@@ -1,0 +1,39 @@
+{
+  "name": "Phase 3 Lifecycle",
+  "image": "mcr.microsoft.com/devcontainers/dotnet:10.0",
+  "containerEnv": {
+    "ENVIRONMENT": "Development",
+    "MSBUILDDISABLENODEREUSE": "1"
+  },
+  "remoteUser": "vscode",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "mounts": [
+    {
+      "source": "opencode-config",
+      "target": "/home/vscode/.config/opencode",
+      "type": "volume"
+    },
+    {
+      "source": "opencode-data",
+      "target": "/home/vscode/.local/share/opencode",
+      "type": "volume"
+    }
+  ],
+  "forwardPorts": [15000, 15001],
+  "portsAttributes": {
+    "15000": {
+      "label": "Alarms API"
+    },
+    "15001": {
+      "label": "Dashboards API"
+    }
+  },
+  "postCreateCommand": "echo postCreate-ok && pwd",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-dotnettools.csdevkit"
+      ]
+    }
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "name": "Phase 0 Smoke",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu"
+}

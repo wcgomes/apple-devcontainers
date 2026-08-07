@@ -1,0 +1,38 @@
+# SwiftPM
+.build/
+.swiftpm/xcode/xcuserdata/
+.swiftpm/configuration/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*~
+.history/
+
+# Local / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+
+# Test / coverage
+coverage/
+*.xcresult
+
+# OS / misc
+*.log
+tmp/
+temp/
+.cache/

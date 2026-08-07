@@ -1,0 +1,23 @@
+{
+  "name": "Phase 1 Env User Folder",
+  "image": "mcr.microsoft.com/devcontainers/dotnet:10.0",
+  "containerEnv": {
+    "ENVIRONMENT": "Development",
+    "DOTNET_gcServer": "1",
+    "MSBUILDDISABLENODEREUSE": "1",
+    "WORKSPACE_BASENAME": "${localWorkspaceFolderBasename}"
+  },
+  "remoteUser": "vscode",
+  "containerUser": "vscode",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-dotnettools.csdevkit"
+      ],
+      "settings": {
+        "nuget.includePrereleasePackageVersions": true
+      }
+    }
+  }
+}
