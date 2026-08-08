@@ -81,8 +81,10 @@ public enum ConfigAdmissions {
         }
         _ = image
 
-        // customizations.vscode must not fail — only reject unknown customization namespaces if needed.
-        // We allow any customizations content as metadata.
+        // customizations must be an object when present. Nested customizations.vscode is admitted
+        // without hard-fail on nested shape: well-formed extensions/settings are retained for
+        // runtime apply; malformed nested types soft-skip apply (see ConfigResolver).
+        // Other customizations.* namespaces remain non-applied metadata.
         if let customizations = raw["customizations"] {
             if !(customizations is [String: Any]) {
                 throw CLIError(

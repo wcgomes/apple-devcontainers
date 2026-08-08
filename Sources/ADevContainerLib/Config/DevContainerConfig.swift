@@ -76,8 +76,12 @@ public struct ResolvedDevContainerConfig: Equatable {
     public var runArgs: [AllowlistedRunArg]
     /// Evaluated hostRequirements (nil when absent).
     public var hostRequirements: HostRequirements?
-    /// Present when config included customizations.vscode (metadata only; not Sendable JSON).
+    /// Present when config included `customizations.vscode` (intent flag; nested shapes may be empty).
     public var hasVscodeCustomizations: Bool
+    /// Normalized string extension IDs from `customizations.vscode.extensions` (empty = none / soft-skip).
+    public var vscodeExtensions: [String]
+    /// Canonical JSON object bytes for `customizations.vscode.settings` (`{}` when absent/empty/soft-skip).
+    public var vscodeSettingsJSON: Data
     /// Admitted OCI features (empty = no Features runner work).
     public var features: [AdmittedFeature]
     /// Extra lifecycle hooks contributed by features (run after config hooks per stage).
@@ -105,6 +109,8 @@ public struct ResolvedDevContainerConfig: Equatable {
         runArgs: [AllowlistedRunArg] = [],
         hostRequirements: HostRequirements? = nil,
         hasVscodeCustomizations: Bool = false,
+        vscodeExtensions: [String] = [],
+        vscodeSettingsJSON: Data = Data("{}".utf8),
         features: [AdmittedFeature] = [],
         featureOnCreateCommands: [LifecycleCommand] = [],
         featureUpdateContentCommands: [LifecycleCommand] = [],
@@ -129,12 +135,27 @@ public struct ResolvedDevContainerConfig: Equatable {
         self.runArgs = runArgs
         self.hostRequirements = hostRequirements
         self.hasVscodeCustomizations = hasVscodeCustomizations
+        self.vscodeExtensions = vscodeExtensions
+        self.vscodeSettingsJSON = vscodeSettingsJSON
         self.features = features
         self.featureOnCreateCommands = featureOnCreateCommands
         self.featureUpdateContentCommands = featureUpdateContentCommands
         self.featurePostCreateCommands = featurePostCreateCommands
         self.featurePostStartCommands = featurePostStartCommands
         self.featurePostAttachCommands = featurePostAttachCommands
+    }
+
+    /// True when there is any applyable vscode customizations payload (extensions and/or non-empty settings).
+    public var hasApplyableVscodeCustomizations: Bool {
+        !vscodeExtensions.isEmpty || Self.settingsObjectHasKeys(vscodeSettingsJSON)
+    }
+
+    /// Settings JSON parses as an object with at least one key.
+    public static func settingsObjectHasKeys(_ data: Data) -> Bool {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        return !obj.isEmpty
     }
 
     public var effectiveUser: String? {
@@ -187,6 +208,7 @@ public struct ResolvedDevContainerConfig: Equatable {
         if !features.isEmpty {
             m["features"] = features.map { $0.hashMaterial }
         }
+        // customizations.vscode (extensions/settings) intentionally omitted — apply uses guest marker.
         return m
     }
 }

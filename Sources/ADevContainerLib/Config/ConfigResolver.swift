@@ -195,11 +195,7 @@ public enum ConfigResolver {
         let runArgs = try RunArgsAdmission.parse(raw["runArgs"])
         let hostRequirements = try HostRequirements.parse(raw["hostRequirements"])
 
-        var hasVscode = false
-        if let customizations = raw["customizations"] as? [String: Any],
-           customizations["vscode"] != nil {
-            hasVscode = true
-        }
+        let vscode = parseVscodeCustomizations(raw["customizations"])
 
         let features = try FeatureAdmission.parse(raw["features"])
 
@@ -220,8 +216,80 @@ public enum ConfigResolver {
             postAttachCommand: postAttach,
             runArgs: runArgs,
             hostRequirements: hostRequirements,
-            hasVscodeCustomizations: hasVscode,
+            hasVscodeCustomizations: vscode.hasVscode,
+            vscodeExtensions: vscode.extensions,
+            vscodeSettingsJSON: vscode.settingsJSON,
             features: features
         )
+    }
+
+    /// Parse `customizations.vscode` for apply payload. Never fails resolve for nested type issues.
+    private static func parseVscodeCustomizations(_ raw: Any?) -> (
+        hasVscode: Bool,
+        extensions: [String],
+        settingsJSON: Data
+    ) {
+        let emptySettings = Data("{}".utf8)
+        guard let customizations = raw as? [String: Any] else {
+            return (false, [], emptySettings)
+        }
+        guard let vscodeRaw = customizations["vscode"] else {
+            return (false, [], emptySettings)
+        }
+        // vscode key present → intent flag; non-object → no applyable payload (MAY warn).
+        guard let vscode = vscodeRaw as? [String: Any] else {
+            StatusPrinter.warning(
+                "customizations.vscode is not an object; vscode customizations apply skipped"
+            )
+            return (true, [], emptySettings)
+        }
+
+        var extensions: [String] = []
+        if let extRaw = vscode["extensions"] {
+            if let arr = extRaw as? [Any] {
+                var skippedNonString = false
+                for item in arr {
+                    if let s = item as? String {
+                        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty {
+                            extensions.append(trimmed)
+                        }
+                    } else {
+                        skippedNonString = true
+                    }
+                }
+                if skippedNonString {
+                    StatusPrinter.warning(
+                        "customizations.vscode.extensions contains non-string entries; those entries were skipped"
+                    )
+                }
+            } else {
+                StatusPrinter.warning(
+                    "customizations.vscode.extensions is not an array; extensions apply soft-skipped"
+                )
+            }
+        }
+
+        var settingsJSON = emptySettings
+        if let settingsRaw = vscode["settings"] {
+            if let obj = settingsRaw as? [String: Any] {
+                if let data = try? JSONSerialization.data(
+                    withJSONObject: obj,
+                    options: [.sortedKeys]
+                ) {
+                    settingsJSON = data
+                } else {
+                    StatusPrinter.warning(
+                        "customizations.vscode.settings could not be serialized; settings apply soft-skipped"
+                    )
+                }
+            } else {
+                StatusPrinter.warning(
+                    "customizations.vscode.settings is not an object; settings apply soft-skipped"
+                )
+            }
+        }
+
+        return (true, extensions, settingsJSON)
     }
 }

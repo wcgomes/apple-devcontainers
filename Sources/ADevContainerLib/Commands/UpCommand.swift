@@ -5,17 +5,21 @@ public struct UpOptions: Sendable {
     public var jsonOutput: Bool
     public var recreate: Bool
     public var skipPull: Bool
+    /// Best-effort open of VS Code on the remote workspace after lifecycle success.
+    public var openVSCode: Bool
 
     public init(
         workspacePath: String,
         jsonOutput: Bool = false,
         recreate: Bool = false,
-        skipPull: Bool = false
+        skipPull: Bool = false,
+        openVSCode: Bool = false
     ) {
         self.workspacePath = workspacePath
         self.jsonOutput = jsonOutput
         self.recreate = recreate
         self.skipPull = skipPull
+        self.openVSCode = openVSCode
     }
 }
 
@@ -60,11 +64,21 @@ public enum UpCommand {
             } else if options.recreate {
                 try runtime.delete(nameOrId: existing.id, force: true)
             } else if existing.isRunning {
-                // Reuse running: no feature fetch/build, no lifecycle hooks.
+                // Reuse running: no feature fetch/build; settings repair on marker drift; postAttach gated after open.
                 StatusPrinter.status("Reusing running container \(existing.name)")
-                LifecycleRunner.emitPostAttachSkipIfNeeded(config: resolved.config)
-                StatusPrinter.status("Ready")
-                return successResult(id: existing.id, name: existing.name, config: resolved.config)
+                _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
+                    containerId: existing.id,
+                    config: resolved.config,
+                    runtime: runtime
+                )
+                return try finish(
+                    options: options,
+                    id: existing.id,
+                    name: existing.name,
+                    config: resolved.config,
+                    image: existing.image ?? resolved.config.image,
+                    runtime: runtime
+                )
             } else {
                 // Start stopped: no rebuild (features already baked on create).
                 StatusPrinter.status("Starting container")
@@ -74,9 +88,19 @@ public enum UpCommand {
                     config: resolved.config,
                     runtime: runtime
                 )
-                LifecycleRunner.emitPostAttachSkipIfNeeded(config: resolved.config)
-                StatusPrinter.status("Ready")
-                return successResult(id: existing.id, name: existing.name, config: resolved.config)
+                _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
+                    containerId: existing.id,
+                    config: resolved.config,
+                    runtime: runtime
+                )
+                return try finish(
+                    options: options,
+                    id: existing.id,
+                    name: existing.name,
+                    config: resolved.config,
+                    image: existing.image ?? resolved.config.image,
+                    runtime: runtime
+                )
             }
         }
 
@@ -158,9 +182,67 @@ public enum UpCommand {
             runtime: runtime
         )
 
-        LifecycleRunner.emitPostAttachSkipIfNeeded(config: effectiveConfig)
+        // Settings apply after create-path hooks; not gated on --vscode.
+        _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
+            containerId: id,
+            config: effectiveConfig,
+            runtime: runtime
+        )
+
+        return try finish(
+            options: options,
+            id: id,
+            name: resolved.containerName,
+            config: effectiveConfig,
+            image: effectiveConfig.image,
+            runtime: runtime
+        )
+    }
+
+    /// Open (optional) → extensions apply (open success) → postAttach gate → Ready.
+    /// postAttach is never before open when `--vscode`. Extensions never fold into postAttachCommand.
+    private static func finish(
+        options: UpOptions,
+        id: String,
+        name: String,
+        config: ResolvedDevContainerConfig,
+        image: String,
+        runtime: AppleContainerRuntime
+    ) throws -> UpResult {
+        let result = successResult(id: id, name: name, config: config)
+        let openOutcome = VSCodeOpen.openIfRequested(
+            options.openVSCode,
+            target: VSCodeOpenTarget(
+                containerId: result.containerId,
+                image: image,
+                remoteWorkspaceFolder: result.remoteWorkspaceFolder,
+                containerName: result.containerName ?? name,
+                remoteUser: result.remoteUser
+            )
+        )
+        // Extensions only after successful open (same CLI attach hook as postAttach).
+        if openOutcome.isOpenSuccess {
+            _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
+                containerId: id,
+                config: config,
+                runtime: runtime
+            )
+        }
+        // Reuse/restart never re-runs Features; merge feature postAttach from image metadata.
+        var postAttachConfig = config
+        PostAttachConfigLoader.mergeFeaturePostAttach(
+            into: &postAttachConfig,
+            imageRef: image.isEmpty ? nil : image,
+            runtime: runtime
+        )
+        try LifecycleRunner.applyPostAttachGate(
+            openOutcome: openOutcome,
+            containerId: id,
+            config: postAttachConfig,
+            runtime: runtime
+        )
         StatusPrinter.status("Ready")
-        return successResult(id: id, name: resolved.containerName, config: effectiveConfig)
+        return result
     }
 
     private static func enforceHostRequirements(

@@ -46,17 +46,17 @@ devcontainer.json → Config resolver → [Features runner] → AppleContainerRu
 | **Bind** | `up` from host workspace | Host dir via virtiofs (APFS) | Real path on Mac |
 | **Volume** | `clone <git-url>` | Named volume via virtio-blk (`volume.img` ext4) | No durable host checkout; label `local_folder=volume://…` |
 
-Volume mode exists for better metadata I/O (git status, node_modules, many small files) vs virtiofs binds. Contract: [`specs/adevcontainer/spec.md`](../specs/adevcontainer/spec.md) (archived change `20260808-clone-in-volume`).
+Volume mode exists for better metadata I/O (git status, node_modules, many small files) vs virtiofs binds. Contract: [`specs/clone.md`](../specs/clone.md) (archived change `20260808-clone-in-volume`).
 
 ## Commands (product surface)
 
 | Command | Role |
 |---------|------|
 | `doctor` | Host/runtime readiness checks |
-| `up` | **Bind-mode** only: resolve config from host workspace, create/start/reuse; ensure named volumes; workspace bind; Features; lifecycle hooks in scope |
-| `clone <git-url>` | **Volume-mode** workspace (VS Code clone-in-volume analogue): host sparse/shallow **config-only** fetch → resolve (workspaceFolder default + `${localWorkspaceFolderBasename}` = **git URL repo basename**, not temp dir name) → **author identity before Features/create:** host `git -C <sparse-temp> config --get user.name/email` (includeIf-aware; env `ADEVCONTAINER_GIT_AUTHOR_*`); both env → skip prompt; TTY confirm/override or collect; non-TTY silent + warn if incomplete → **ensure Features `ghcr.io/devcontainers/features/git:1` when no `git`/`common-utils`** (Features path, not apt; `up` unchanged) → ensure workspace volume → create + start (**SSH:** inject `create --ssh` when `SSH_AUTH_SOCK` set) → **in-container full `git clone`** + verify `.git` (**HTTPS:** host `git credential fill` one-shot → guest `credential.helper store`; no GCM-in-guest; no host full+tar happy path) → author both → guest `--local`; else warn, no partial → create-path hooks; always clean config temps |
+| `up` | **Bind-mode** only: resolve config from host workspace, create/start/reuse; ensure named volumes; workspace bind; Features; lifecycle hooks in scope. Optional `--vscode` after success (see [VS Code flow](#vs-code-flow)) |
+| `clone <git-url>` | **Volume-mode** workspace (VS Code clone-in-volume analogue): host sparse/shallow **config-only** fetch → resolve (workspaceFolder default + `${localWorkspaceFolderBasename}` = **git URL repo basename**, not temp dir name) → **author identity before Features/create:** host `git -C <sparse-temp> config --get user.name/email` (includeIf-aware; env `ADEVCONTAINER_GIT_AUTHOR_*`); both env → skip prompt; TTY confirm/override or collect; non-TTY silent + warn if incomplete → **ensure Features `ghcr.io/devcontainers/features/git:1` when no `git`/`common-utils`** (Features path, not apt; `up` unchanged) → ensure workspace volume → create + start (**SSH:** inject `create --ssh` when `SSH_AUTH_SOCK` set) → **in-container full `git clone`** + verify `.git` (**HTTPS:** host `git credential fill` one-shot → guest `credential.helper store`; no GCM-in-guest; no host full+tar happy path) → author both → guest `--local`; else warn, no partial → create-path hooks; always clean config temps. Optional `--vscode` after success |
 | `list [--json]` | Managed containers only (`devcontainer.managed=adevcontainer`) |
-| `start [--name]` | Start a managed stopped container via `--name` or interactive picker; **volume-mode: no lifecycle hooks**; bind start-stopped `postStart` only via `up` path (not bare `start`) |
+| `start [--name]` | Start a managed stopped container via `--name` or interactive picker; **no create-path / postStart hooks** (bind start-stopped `postStart` only via `up`). Optional `--vscode` after success; for postAttach, loads config from labels (bind: host `local_folder`+`config_file`; volume: in-container config path) and merges feature postAttach from image `devcontainer.metadata` (load errors → treat absent, do not fail start) |
 | `exec [--name]` | Run command/shell in running managed container (`-it` / empty cmd → interactive TTY, default `bash`). Selection: `--name` or picker (no `-w`). User/workdir from labels `devcontainer.remote_user` / `devcontainer.workspace_folder` when set |
 | `stop [--name]` | Stop managed container (`--name` or picker; no `-w`) |
 | `delete [--name]` | Remove **container only** (`--name` or picker; no `-w`) |
@@ -89,12 +89,13 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
   | Path | Hooks |
   |------|--------|
   | Fresh create (`up` bind or `clone` volume) | `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand`; delete container if any create-path hook fails |
-  | Reuse running | no lifecycle hooks |
+  | Reuse running | no create-path hooks; settings repair on marker drift; feature postAttach mergeable from image metadata when `--vscode` open succeeds |
   | Bind start-stopped (`up`) | `postStartCommand` only; failure fails `up` but does **not** delete |
-  | Volume-mode `start` | **no hooks** |
-  | `postAttachCommand` | admitted; **not** run on `up`/`clone`/`start` (status: skipped — no attach hook) |
+  | Bare `start` | no create-path / postStart; settings repair on marker drift when config loadable; extensions + postAttach only if gated open succeeds (config from labels; feature hooks from image metadata) |
+  | `customizations.vscode` | **CLI apply** (config-file v1): settings after create-path hooks / drift repair (**not** gated on `--vscode`); extensions after successful open only; soft-fail; marker idempotency — see [VS Code flow](#vs-code-flow) |
+  | `postAttachCommand` | **implemented** gate on `up`/`start`/`clone`: **RUNS** config then feature postAttach only after successful `--vscode` open **and after** extensions apply; **SKIP** (+ status when any present) if flag absent or open soft-fails; non-zero → fail command, **keep** container. Soft-fail apply ≠ postAttach fail-keep. Contract: [`specs/vscode.md`](../specs/vscode.md); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../specs/changes/archive/20260808-vscode-customizations-apply/) |
 
-- **runArgs allowlist** and **hostRequirements** enforce+apply: [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md). Contract: [`specs/adevcontainer/spec.md`](../specs/adevcontainer/spec.md).
+- **runArgs allowlist** and **hostRequirements** enforce+apply: [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md). Contract: [`specs/runargs-host.md`](../specs/runargs-host.md).
 - Long-lived devcontainers use keep-alive entrypoint **`/bin/sleep` infinity** so the container stays up for `exec`/attach.
 
 ## Features
@@ -113,8 +114,53 @@ Full runner steps, reject list, and progress lines: [cli-runtime-boundary.md](co
 
 ## VS Code flow
 
-1. CLI `up` brings the container up.
-2. User attaches with experimental **Attach to Running Apple Container** (not full Dev Containers extension parity).
+**Product (implemented):** after successful lifecycle on `up`, `start`, or `clone`, optional **`--vscode`** best-effort opens VS Code on the host. Without the flag, manual attach (same URI recipe) remains valid and does **not** run postAttach or CLI extension install. **Apple `apple-container+` attach does not auto-install** config `customizations.vscode` — the CLI applies them (below).
+
+**Behavior (`--vscode`):**
+- Runs only after lifecycle success (create/start/reuse path completed).
+- Invokes: `code --new-window --folder-uri "vscode-remote://apple-container+${HEX}${FOLDER}"`.
+- **Soft-fail open:** missing `code` on PATH or launch failure → stderr warn; open alone does not fail the command and must **not** run extensions apply or postAttach.
+- **Order after open success:** extensions apply (soft-fail) → **config** then **feature** `postAttachCommand` (fail-keep). Apply is a dedicated step (`VSCodeCustomizationsApply`), not folded into postAttach.
+- **postAttach gate (shipped):** successful open is the CLI attach approximation. **Skip** (one status line when any postAttach present) if flag absent or open soft-fails. postAttach non-zero → fail command, **keep** container. Approximation only — no wait for VS Code Server / IDE-confirmed attach; manual UI attach does not trigger postAttach or extensions apply.
+- **Config source for postAttach / apply on start:**
+  - `up` / `clone`: in-memory resolved config; on **reuse/restart**, merge feature postAttach from image `devcontainer.metadata` (Features not re-run); vscode customizations from resolved/loadable config.
+  - bare `start`: load from labels — bind: host paths `local_folder` + `config_file`; volume: cat stamped config in-container; then merge feature postAttach from image metadata. Load failure → treat postAttach/customizations absent (start success preserved).
+- **Folder:** resolved `remoteWorkspaceFolder` / label `devcontainer.workspace_folder`; when config omits `workspaceFolder`, default is `/workspaces/<basename>`.
+
+### customizations.vscode (CLI apply, shipped)
+
+v1: **config-file only** (not feature-contributed / image `devcontainer.metadata` merge; not Features Dockerfile / image build). Outside create identity hash — edits apply in-place via marker drift.
+
+| Piece | When | Detail |
+|-------|------|--------|
+| **settings** | After create-path hooks on fresh `up`/`clone`; repair on `start`/reuse when marker drifts | Merge into `~/.vscode-server/data/Machine/settings.json` under effective remote user. **Not** gated on `--vscode` or open success. Empirically validated (e.g. `editor.tabSize`, `files.insertFinalNewline`) |
+| **extensions** | Only after **successful** `--vscode` open on `up`/`start`/`clone` | Host marketplace VSIX → tar-pipe (`copyTreeIntoContainer`) into guest `/tmp` → unzip under `~/.vscode-server/extensions` (not base64-in-argv). **Install complete only after** upsert into Server registry `~/.vscode-server/extensions/extensions.json` (folder-only → UI shows 0 installed). Best-effort delete `…/CachedProfilesData/__default__profile__/extensions.user.cache` when registry dirty. BFS `package.json` `extensionDependencies` with cycle guard; soft-fail per ID (e.g. Swift → `llvm-vs-code-extensions.lldb-dap`). Skip without flag / open soft-fail / matching marker. Reload Window may be needed once |
+| **Idempotency** | Guest marker `$HOME/.adevcontainer/vscode-customizations.applied` | Content hash of normalized (sorted) **config-file** extension IDs + canonical settings JSON only — transitive deps are side effects, not hash inputs. Match → skip; drift → re-apply. Full hash written only after full payload success; settings-only (no open yet) leaves marker pending so first successful open still installs extensions |
+| **Soft-fail** | All apply I/O/network/exec | Warn stderr; never fail lifecycle exit; never delete/stop solely due to apply. **≠** postAttach fail-keep |
+
+Malformed nested `extensions`/`settings` types soft-skip apply with warn (do not fail whole-config resolve when `customizations.vscode` is an object). Other `customizations.*` namespaces remain non-applied metadata. **Apple attach does not auto-install** — CLI apply does.
+
+**Prereqs (host):** VS Code + extension `ms-vscode-remote.remote-containers`; setting `dev.containers.experimentalAppleContainerSupport: true`.
+
+**Inputs from a running managed container** (name = id on Apple container): container id/name, image ref, remote workspace folder (as above).
+
+**Remote authority:** scheme `apple-container` with hex-encoded UTF-8 compact JSON authority payload `{"id":"<containerId>","image":"<imageRef>"}` — no spaces. Full folder URI:
+
+```text
+vscode-remote://apple-container+<hex(json)><remoteWorkspaceFolder>
+```
+
+**Open recipe (host or CLI):**
+
+```bash
+code --new-window --folder-uri "vscode-remote://apple-container+${HEX}${FOLDER}"
+```
+
+- Prefer `code --new-window --folder-uri …` so the folder is in the window. `open vscode://…` may **reuse** an existing window.
+- Extension UI command `remote-containers.attachToAppleContainer` opens the **remote authority only** (no folder) → empty/no-folder window UX gap; the `--folder-uri` recipe avoids that.
+- **Optional nameConfig** (improves attach defaults): `~/Library/Application Support/Code/User/globalStorage/ms-vscode-remote.remote-containers/nameConfigs/<containerName>.json` with `workspaceFolder` + `remoteUser` (from labels/`remoteUser`). Not required if the folder path is already in the URI.
+
+Not full Dev Containers up/rebuild or IDE-owned customizations parity; volume-mode is product `clone`, not the extension’s clone-in-volume. Contract: [`specs/vscode.md`](../specs/vscode.md); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../specs/changes/archive/20260808-vscode-customizations-apply/). Gaps: [devcontainer-apple-gaps.md](domain/devcontainer-apple-gaps.md).
 
 ## Reference config
 

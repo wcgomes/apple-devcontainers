@@ -9,7 +9,7 @@ Core ships a usable Apple-container devcontainer path through `postCreateCommand
 - Change id: **`lifecycle-runargs-host`**
 - Package root: `/Users/wyller/Repos/dev-containerization/`
 - Library paths under `Sources/ADevContainerLib/`; suite under `Tests/adevcontainerTests/`; fixtures under `Tests/Fixtures/`
-- Realized base contract remains `specs/adevcontainer/spec.md` (core). This delta **adds** lifecycle / runArgs / hostRequirements requirements and **modifies** runArgs admission + `hostRequirements` policy.
+- Realized base contract remains union of `specs/<domain>.md` (core in `specs/core.md`). This delta **adds** lifecycle / runArgs / hostRequirements requirements and **modifies** runArgs admission + `hostRequirements` policy.
 
 ### A. Lifecycle hooks (first-class, via `container exec`)
 

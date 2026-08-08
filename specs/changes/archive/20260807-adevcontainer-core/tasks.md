@@ -1,6 +1,6 @@
 # Tasks: adevcontainer-core
 
-Spec ref: `specs/changes/archive/20260807-adevcontainer-core/` (archived; realized source: `specs/adevcontainer/spec.md`)  
+Spec ref: `specs/changes/archive/20260807-adevcontainer-core/` (archived; live contract: union of `specs/<domain>.md`)  
 Binary: `adevcontainer`  
 Package root: `/Users/wyller/Repos/dev-containerization/`  
 Assume Swift 6.x / SPM and Apple `container` already on the host. Do **not** install toolchains or run network package installs beyond SPM resolution of declared dependencies if any (prefer stdlib-only).

@@ -11,7 +11,7 @@ On Apple `container`, named volumes sit on ext4/virtio-blk rather than virtiofs 
 - Change id: **`clone-in-volume`**
 - Package root: repository root (Swift SPM `adevcontainer`)
 - Library under `Sources/ADevContainerLib/`; suite under `Tests/adevcontainerTests/`; fixtures under `Tests/Fixtures/` as needed
-- Realized base contract: `specs/adevcontainer/spec.md`. This delta **adds** clone / start / list and volume-mode workspace semantics, and **modifies** managed selection (managed-only for `exec`/`stop`/`delete`/`prune`/`inspect`/`start`), prune resource set, bind-mode managed labels, and identity/labels for volume-mode containers.
+- Realized base contract: union of `specs/<domain>.md`. This delta **adds** clone / start / list and volume-mode workspace semantics, and **modifies** managed selection (managed-only for `exec`/`stop`/`delete`/`prune`/`inspect`/`start`), prune resource set, bind-mode managed labels, and identity/labels for volume-mode containers.
 
 ### A. Commands (product surface)
 

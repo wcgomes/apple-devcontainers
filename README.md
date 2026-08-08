@@ -6,7 +6,7 @@
 
 Native Swift CLI that reads `devcontainer.json` and runs workspaces on **Apple `container`**.
 
-Clone a git repo into a named container volume (faster disk I/O than bind mounts), or `up` an existing checkout. Applies a practical subset—lifecycle hooks and Features included.
+Bring up a workspace with `clone <git-url>` (named volume, faster I/O) or `up` on an existing checkout. Use the terminal (or AI agents) as-is, or pass `--vscode` to open VS Code with extensions and settings applied. Lifecycle hooks and Features included.
 
 ## Install
 
@@ -50,10 +50,10 @@ adevcontainer doctor
 | Command | Purpose |
 |---------|---------|
 | `adevcontainer doctor` | Check Apple `container` readiness |
-| `adevcontainer up [-w path]` | Create/start workspace from a **host** checkout (only command that uses `-w`; default cwd) |
-| `adevcontainer clone <git-url>` | Clone a git repo into a **named volume** and start the devcontainer (HTTPS or SSH) |
+| `adevcontainer up [-w path] [--vscode]` | Create/start workspace from a **host** checkout (only command that uses `-w`; default cwd) |
+| `adevcontainer clone <git-url> [--vscode]` | Clone a git repo into a **named volume** and start the devcontainer (HTTPS or SSH) |
 | `adevcontainer list [--json]` | List managed containers |
-| `adevcontainer start \| stop \| delete \| prune \| inspect [--name]` | Lifecycle by container name (or interactive picker) |
+| `adevcontainer start [--vscode] \| stop \| delete \| prune \| inspect [--name]` | Lifecycle by container name (or interactive picker) |
 | `adevcontainer exec [-it] [--name] [--] [cmd…]` | Shell or command in a running managed container |
 
 ### Quick start
@@ -61,7 +61,7 @@ adevcontainer doctor
 **Local checkout** (`up`):
 
 ```bash
-adevcontainer up
+adevcontainer up --vscode
 adevcontainer exec -it
 adevcontainer stop
 ```
@@ -69,11 +69,13 @@ adevcontainer stop
 **Clone a repository** (no local checkout required — source lives in a volume for better I/O on Apple `container`):
 
 ```bash
-adevcontainer clone https://github.com/org/repo.git   # or git@github.com:org/repo.git
+adevcontainer clone https://github.com/org/repo.git --vscode   # or git@github.com:org/repo.git
 adevcontainer list
 adevcontainer exec --name <name> -it
 adevcontainer prune --name <name>
 ```
+
+`--vscode` opens VS Code on the remote workspace and runs `postAttachCommand`. Omit it if you only need the container (manual attach or `exec`).
 
 Uses your Mac git credentials (HTTPS helpers / SSH agent), confirms author identity on a TTY, and ensures `git` in the image when needed. Work, commit, and push inside the container.
 
@@ -98,7 +100,7 @@ Fresh create (`up` or `clone`, after the tree exists):
 | Reuse running | none |
 | `up` start stopped | `postStartCommand` only |
 | `start` (managed) | none |
-| `postAttachCommand` | admitted, not run by this CLI |
+| `postAttachCommand` | runs only after successful `--vscode` open; otherwise skipped (status when present); failure fails command, keeps container |
 
 ### runArgs allowlist
 
@@ -126,26 +128,29 @@ Preflight on **`up` and `clone`** parses `memory` (`8gb` / `8192mb`) and `cpus`:
 
 ### Features (OCI + local path)
 
-`up` and `clone` admit a top-level `features` object map of **feature ref → options**. Refs may be:
+Top-level `features` map (ref → options) on **`up` / `clone`**. Builds a derived image on **native arm64**.
 
 - **OCI** — e.g. `ghcr.io/devcontainers/features/node:1`
-- **Local path** — `./…`, `../…`, absolute `/…`, or `file://…` (resolved relative to the **workspace root**; directory must contain `devcontainer-feature.json` + `install.sh`)
+- **Local path** — `./…`, `../…`, absolute, or `file://…` (relative to **workspace root**; needs `devcontainer-feature.json` + `install.sh`)
+- **Forever-reject:** refs containing `docker-in-docker` / `docker-outside-of-docker` / `docker-from-docker`, or feature metadata with `privileged` / `securityOpt`
+- **Rosetta / BuildKit:** if prompted once to set `build.rosetta=false`, accept — or set `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1` for CI
 
-The Features path mirrors official Dev Containers (Dockerfile + `container build`) on **native arm64** — never `--rosetta` by default:
+### VS Code (`--vscode` + config customizations)
 
-1. **One-time consent** (only if needed): when Apple BuildKit still has `build.rosetta=true` (or the key is missing), `up` / `clone` explains and asks once to set `build.rosetta=false` so feature image builds do not require Rosetta. Already `false` → silent. Decline → fail. Non-interactive: set `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1` to auto-accept, or set the config yourself.
-2. Loads local path packages from disk into the feature cache, or fetches OCI artifacts over HTTPS (embedded registry client — **not** `container image pull`, ORAS, or Node).
-3. Orders installs via `dependsOn` / `installsAfter` (id last-segment match so `./x/sample-a` satisfies `…/sample-a:1`) and merges runtime contributions (`init`, `capAdd`, `containerEnv` with **config wins**, mounts, lifecycle hooks). On create, `${PATH}` / `$PATH` in env values are expanded (Apple `container` does not expand them).
-4. Generates a Dockerfile and runs `container build --platform linux/arm64` to a deterministic `adev-{base}:{hash12}` tag (empty base → `adevcontainer:{hash12}`; no `adevcontainer/features:` prefix; reuse when the tag already exists).
-5. Creates from the **derived image** with the same platform flag, then runs lifecycle hooks.
+Recommended: pass **`--vscode`** on `up`, `start`, or `clone` to open a new VS Code window on the remote workspace folder.
 
-**Forever-reject:** any feature ref containing `docker-outside-of-docker`, `docker-in-docker`, or `docker-from-docker` (OCI or local path); feature metadata with `privileged: true` or `securityOpt`.
+- Runs config + feature **`postAttachCommand`** only after a successful open. Without `--vscode`, or if open soft-fails, postAttach is skipped.
+- Soft-fail: missing VS Code/`code` → warn on stderr; container still succeeds.
+- Prereqs: VS Code + Remote - Containers + `dev.containers.experimentalAppleContainerSupport: true` (and a discoverable `code` CLI).
+- Manual attach (experimental **Attach to Running Apple Container**) works without the flag.
+- Not full Dev Containers extension parity — convenience open only.
 
-**Hash note (v1):** local path identity uses the path string + options; editing files under the same path may not invalidate the derived tag until the path or options change.
+**Config-file `customizations.vscode`:**
 
-### VS Code attach
-
-After `up` or `clone`, the container is running and listable (`adevcontainer list`). Attach manually with experimental **Attach to Running Apple Container**. This CLI does not auto-attach.
+- **`settings`** — applied into the container on create (`up`/`clone`); not gated on `--vscode`
+- **`extensions`** — installed only after a successful `--vscode` open; dependency extensions installed automatically. Without `--vscode`, the CLI does not auto-install extensions
+- Apply failures warn on stderr but do not fail the command
+- After first extension install you may need **Developer: Reload Window** once
 
 ### Non-goals (current)
 

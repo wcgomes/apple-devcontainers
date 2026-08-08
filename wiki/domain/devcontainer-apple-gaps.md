@@ -13,7 +13,7 @@ Facts that constrain the CLI. Not a full Apple container manual — only gaps th
 | Features | OCI + local path feature packages + image build | **Supported** (OCI + local path runner); forever-reject `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker`; native arm64 build (no Rosetta by default) |
 | Events / rich watch APIs | Engine events often used by tools | Do not assume Docker-equivalent event stream |
 | List + label filter | `docker ps --filter label=…` | **No label filter on list** — client-side filter after JSON; prefer deterministic name + inspect; product `list` keeps `devcontainer.managed=adevcontainer` only |
-| VS Code | Dev Containers full up/rebuild + clone-in-volume | **Attach-only** after CLI bring-up (experimental Attach to Running Apple Container); volume-mode via product `clone` (not the VS Code extension) |
+| VS Code | Dev Containers full up/rebuild + clone-in-volume + IDE-owned customizations apply | **Attach** after CLI bring-up (experimental Apple Container support in Remote - Containers). Product `--vscode` on `up`/`start`/`clone` best-effort opens via `code --folder-uri` (soft-fail). **Apple attach does not auto-install** `customizations.vscode` — CLI applies config-file settings/extensions (see below). Manual attach without flag still valid. Not full Dev Containers parity. Volume-mode via product `clone` (not extension clone-in-volume) |
 | Default process | Often long-running or sleep entry | Keep-alive `--entrypoint /bin/sleep` + `infinity` for long-lived devcontainers |
 | Create identity | Name vs id often distinct | `create --name` **is** the id (`configuration.id`) |
 | Bind mounts | File or directory host source OK | **Directory sources only** — file binds rejected by runtime |
@@ -32,7 +32,7 @@ Facts that constrain the CLI. Not a full Apple container manual — only gaps th
 | Auth for git | N/A (host tree already present) | **SSH:** `SSH_AUTH_SOCK` + `create --ssh`. **HTTPS:** host `git credential fill` one-shot → guest `credential.helper store`. No GCM-in-guest; no host `~/.git-credentials` mount; no PAT CLI primary UX |
 | Populate | N/A (host tree) | **In-container full `git clone`** + verify `.git` (host = config-only sparse/shallow only; no host full+tar happy path) |
 
-Detail: [architecture.md](../architecture.md), [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md). Contract: [`specs/adevcontainer/spec.md`](../../specs/adevcontainer/spec.md).
+Detail: [architecture.md](../architecture.md), [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md). Contract: [`specs/clone.md`](../../specs/clone.md) (volume vs bind); union of [`specs/<domain>.md`](../../specs/).
 
 ### File bind mounts
 
@@ -54,12 +54,38 @@ Useful machine-JSON paths documented against Apple container **1.2.x**: `configu
 
 Apple BuildKit with `build.rosetta=true` can require Rosetta even for native arm64 image builds. Product ensures `build.rosetta=false` (one-time consent) and passes `--platform linux/arm64` on Features pull/build/create. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
 
+### VS Code attach (`--vscode` + manual)
+
+After lifecycle success, `up` / `start` / `clone` accept **`--vscode`**: best-effort host `code --new-window --folder-uri …`. Missing `code` or launch fail → stderr warn; open alone does not fail the command. Without the flag, same URI recipe works manually (does not run postAttach or CLI extension install). Successful open gates **extensions apply** then **`postAttachCommand`** (CLI attach approximation). Full recipe + apply policy: [architecture.md — VS Code flow](../architecture.md#vs-code-flow). Contract: [`specs/vscode.md`](../../specs/vscode.md); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../../specs/changes/archive/20260808-vscode-customizations-apply/).
+
+| Piece | Fact |
+|-------|------|
+| Flag | `--vscode` on `up`, `start`, `clone` (post-success only; open soft-fail) |
+| Prereq | VS Code + `ms-vscode-remote.remote-containers`; `dev.containers.experimentalAppleContainerSupport: true` |
+| Authority | `apple-container+` + hex(UTF-8 compact JSON `{"id","image"}`) — id = create `--name` |
+| Open | `code --new-window --folder-uri "vscode-remote://apple-container+${HEX}${FOLDER}"` |
+| Folder | `remoteWorkspaceFolder` from labels/resolve; default if config omits `workspaceFolder`: `/workspaces/<basename>` |
+| Apple attach spike | `apple-container+` attach does **not** install `customizations.vscode.extensions` (e.g. `swiftlang.swift-vscode`) — product must apply via CLI |
+| customizations.vscode | **CLI applies** config-file only (v1; not feature/metadata merge; not image build). Helper: `VSCodeCustomizationsApply` |
+| settings | Merge into `~/.vscode-server/data/Machine/settings.json` under effective remote user — **create-path** after hooks on fresh `up`/`clone`; repair on `start`/reuse marker drift. **Not** gated on `--vscode`. Validated: Machine settings take effect (e.g. tabSize / insertFinalNewline) |
+| extensions | After **successful** `--vscode` open only; host VSIX → tar-pipe → guest unzip under `~/.vscode-server/extensions` (not base64-in-argv). **Registry required:** upsert `extensions.json` — folder unpack alone leaves UI at 0 installed. Cache invalidate: best-effort rm `extensions.user.cache`. BFS `extensionDependencies` (cycle guard; soft-fail per ID; e.g. Swift pulls `lldb-dap`). Skip if no flag or open soft-fails; manual UI attach without flag does not install. Reload Window may be needed once |
+| Order after open | extensions apply (soft-fail) → postAttach (fail-keep). Apply is **not** delivered via `postAttachCommand` |
+| Soft-fail apply | Warn stderr; never fail lifecycle exit; never delete/stop container solely due to apply. **≠** postAttach fail-keep |
+| Idempotency | Guest marker `$HOME/.adevcontainer/vscode-customizations.applied` = hash of normalized **config** extensions+settings only (transitive deps side effects); skip on match; re-apply on drift; full hash only after full payload success (settings-only leaves extensions pending) |
+| Identity | `customizations` stay out of create identity / config hash |
+| postAttach | **Implemented:** **RUNS** config then feature postAttach only after successful `--vscode` open; **SKIP** if no flag or open soft-fails (status when any present); fail-keep; not IDE-confirmed ready |
+| postAttach sources | `start`: config from labels (bind host paths / volume in-container cat); reuse/`start`: feature hooks from image `devcontainer.metadata` |
+| nameConfigs (optional) | `…/globalStorage/ms-vscode-remote.remote-containers/nameConfigs/<containerName>.json` → `workspaceFolder` + `remoteUser` |
+| UI gap | `remote-containers.attachToAppleContainer` attaches authority **without** folder → empty window; folder-uri avoids it |
+| `open vscode://` | May reuse window; prefer `code --new-window --folder-uri` |
+| Parity | Not full Dev Containers up/rebuild / IDE-owned apply; manual attach without `--vscode` still valid |
+
 ## Config surface implications
 
 - **Hard errors** for unsupported props/flags — never silent ignore.
 - **`forwardPorts`**: map to publish ports; do not promise IDE auto-forward behavior.
 - **`portsAttributes`**: metadata only; no IDE auto-forward.
-- **Lifecycle**: run via `container exec` (hook matrix: create-path full order on `up`/`clone`; bind start-stopped `postStart` only; volume-mode `start` none; reuse none; `postAttach` admit + skip). Exec must expand `containerEnv` PATH refs (same as create) or login-shell hooks fail (`id`/`bash` not found). Not Docker entrypoint injection parity. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
+- **Lifecycle**: run via `container exec` (hook matrix: create-path full order on `up`/`clone`; bind start-stopped `postStart` only; bare `start` no create-path/postStart; reuse none for create-path; **postAttach implemented** — runs after successful `--vscode` open only, skip otherwise, fail-keep; `start` loads config from labels; feature postAttach from image metadata on reuse/`start`). Exec must expand `containerEnv` PATH refs (same as create) or login-shell hooks fail (`id`/`bash` not found). Not Docker entrypoint injection parity. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
 - **`runArgs`**: allowlist (`--init`, `--cap-add`/`--cap-drop`, …); privileged/tun/device and unknown flags fail closed.
 - **`hostRequirements`**: preflight — fail on memory/cpus shortfall; map requested limits to create `-m`/`-c` when host OK; warn unsupported `gpu`; fail on unparseable/unknown keys.
 - **Features**: OCI + local path fetch/load + derived image build on `up` (see [cli-runtime-boundary](../conventions/cli-runtime-boundary.md)); forever-reject `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker` and privileged/securityOpt metadata ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)).
@@ -73,7 +99,7 @@ Apple BuildKit with `build.rosetta=true` can require Rosetta even for native arm
 - Bind + named volume mounts — supported
 - `postCreateCommand` — supported
 - Large `forwardPorts` / `portsAttributes` — publish + metadata
-- `customizations.vscode` — editor-side; CLI does not replace VS Code extension install
+- `customizations.vscode` — **CLI applies** (settings create-path; extensions after successful `--vscode` open); Apple attach does not auto-install — see VS Code attach table above
 
 ## Identity workaround
 

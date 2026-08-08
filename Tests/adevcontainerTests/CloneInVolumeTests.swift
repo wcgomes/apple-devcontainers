@@ -716,7 +716,7 @@ nonisolated(unsafe) let featureGitEnsureTests: [(String, () throws -> Void)] = [
 // MARK: - Clone Features test support (auto-injected git)
 
 /// Installs CloneCommand Features overrides so injected `git:1` is satisfied without network.
-private enum CloneGitFeatureTestSupport {
+enum CloneGitFeatureTestSupport {
     static var gitFixturePath: String {
         TestRepo.root().appendingPathComponent("Tests/Fixtures/features-sample/git").path
     }

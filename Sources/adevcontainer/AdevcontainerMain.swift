@@ -55,7 +55,8 @@ struct AdevcontainerMain {
                 workspacePath: defaultWorkspace,
                 jsonOutput: parsed.flags.contains("json"),
                 recreate: parsed.flags.contains("recreate"),
-                skipPull: parsed.flags.contains("skip-pull")
+                skipPull: parsed.flags.contains("skip-pull"),
+                openVSCode: parsed.flags.contains("vscode")
             )
             let result = try UpCommand.run(options: opts, runtime: runtime)
             if opts.jsonOutput {
@@ -85,7 +86,8 @@ struct AdevcontainerMain {
             let result = try CloneCommand.run(
                 options: CloneOptions(
                     gitURL: parsed.passthrough[0],
-                    skipPull: parsed.flags.contains("skip-pull")
+                    skipPull: parsed.flags.contains("skip-pull"),
+                    openVSCode: parsed.flags.contains("vscode")
                 ),
                 runtime: runtime
             )
@@ -103,7 +105,10 @@ struct AdevcontainerMain {
 
         case "start":
             try StartCommand.run(
-                options: StartOptions(name: parsed.name),
+                options: StartOptions(
+                    name: parsed.name,
+                    openVSCode: parsed.flags.contains("vscode")
+                ),
                 runtime: runtime
             )
             return 0
@@ -240,6 +245,11 @@ struct AdevcontainerMain {
                 i += 1
                 continue
             }
+            if a == "--vscode" {
+                flags.insert("vscode")
+                i += 1
+                continue
+            }
             if a == "-i" || a == "--interactive" {
                 flags.insert("i")
                 flags.insert("interactive")
@@ -318,6 +328,7 @@ struct AdevcontainerMain {
           --json                   Machine-readable output (up, list)
           --recreate               Delete and recreate on up if exists / hash mismatch
           --skip-pull              Skip image pull on up/clone
+          --vscode                 Best-effort open VS Code; gates postAttach + extensions apply
           -h, --help               Show help
 
         Identity:
@@ -325,6 +336,20 @@ struct AdevcontainerMain {
           - Lifecycle commands resolve via --name or an interactive picker among
             containers labeled devcontainer.managed=adevcontainer (both bind and volume).
           - Passing -w to a non-up command is a usage error.
+
+        VS Code (--vscode on up/start/clone):
+          - Best-effort open of a new window on the resolved remote workspace folder.
+          - Requires host VS Code + Remote - Containers + experimental Apple support
+            (dev.containers.experimentalAppleContainerSupport) and a discoverable `code` CLI.
+          - Missing `code` or launch failure warns on stderr; open alone does not fail lifecycle.
+          - postAttachCommand runs only after successful open; skipped without flag or on open
+            soft-fail (status when present). postAttach non-zero fails command but keeps container.
+          - customizations.vscode.settings: merged on create-path (not gated on --vscode).
+          - customizations.vscode.extensions: installed after successful --vscode open only
+            (soft-fail; marker idempotency; Server extensions.json + transitive
+            extensionDependencies). Manual attach without flag does not install.
+            May need Developer: Reload Window once so the UI refreshes the registry.
+          - CLI attach approximation only — not IDE remote-ready. Not full extension parity.
 
         Clone notes:
           - Requires host git on PATH (config fetch + HTTPS credential fill)
@@ -343,15 +368,24 @@ struct AdevcontainerMain {
         switch subcommand {
         case "up":
             print("""
-            adevcontainer up [-w <path>] [--json] [--recreate] [--skip-pull]
+            adevcontainer up [-w <path>] [--json] [--recreate] [--skip-pull] [--vscode]
 
             Create/start/reuse a bind-mode workspace container for a host checkout.
             -w/--workspace defaults to the current directory. Stamps managed labels
             so the container appears in list and lifecycle commands (--name / picker).
+
+            --vscode: best-effort open a new VS Code window on the remote workspace
+            (requires VS Code + Remote - Containers + experimental Apple support and
+            a `code` CLI). Soft-fails with a stderr warning; open alone does not fail up.
+            postAttachCommand runs only after successful open; skipped without flag /
+            open soft-fail; postAttach failure fails up but keeps the container.
+            customizations.vscode.settings apply on create-path (not gated on open);
+            extensions apply after successful open (soft-fail; marker skip when matched).
+            Not full Dev Containers parity — manual attach remains valid.
             """)
         case "clone":
             print("""
-            adevcontainer clone <git-url>
+            adevcontainer clone <git-url> [--skip-pull] [--vscode]
 
             Create a managed container whose workspace is a named volume.
             Host git fetches config only; full clone runs inside the container.
@@ -361,6 +395,11 @@ struct AdevcontainerMain {
             Optional: ADEVCONTAINER_GIT_TOKEN. No PAT flags / GCM-in-guest.
             If the config has no git/common-utils feature, clone injects
             ghcr.io/devcontainers/features/git:1 for in-container git.
+
+            --vscode: best-effort open VS Code on the resolved remote folder after
+            success (same prereqs/soft-fail/postAttach + extensions gate as up --vscode).
+            Settings from customizations.vscode still apply on create-path without the flag.
+            Not full extension parity.
             """)
         case "list":
             print("""
@@ -371,10 +410,15 @@ struct AdevcontainerMain {
             """)
         case "start":
             print("""
-            adevcontainer start [--name <container>]
+            adevcontainer start [--name <container>] [--vscode]
 
             Start a stopped managed container. Volume-mode: runtime start only
             (no lifecycle hooks). Already running is success no-op.
+
+            --vscode: best-effort open VS Code on the labeled remote workspace after
+            start (inspect for id/image/folder). Soft-fail open; postAttach and pending
+            extensions only after successful open (same gate as up). Settings repair on
+            marker drift does not require the flag. Not full extension parity.
             """)
         case "exec":
             print("""

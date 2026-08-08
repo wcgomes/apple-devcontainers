@@ -1,13 +1,13 @@
 # Tasks: clone-in-volume
 
 Spec ref: `specs/changes/clone-in-volume/`  
-Base contract: `specs/adevcontainer/spec.md`  
+Base contract: union of `specs/<domain>.md`  
 Binary: `adevcontainer`  
 Library: `Sources/ADevContainerLib/`  
 Tests: `Tests/adevcontainerTests/` (MiniTest; run with `swift run adevcontainerTests`)  
 Package root: repository root  
 
-> **Supersession note:** Early sections (§2–4) describe tar-pipe populate and `stop -w` selection. Those checkpoints were completed then **superseded** by §9 (in-container full clone + guest auth) and §10 (unified managed-only; `-w` only on `up`). Do not uncheck completed work. **Current contract is `spec.md`** (and the updated proposal). Treat §2 full-clone staging, §3 tar-pipe populate, and §4 `stop -w` items as historical completed steps, not live product behavior.
+> **Supersession note:** Early sections (§2–4) describe tar-pipe populate and `stop -w` selection. Those checkpoints were completed then **superseded** by §9 (in-container full clone + guest auth) and §10 (unified managed-only; `-w` only on `up`). Do not uncheck completed work. **Current live contract is the union of `specs/<domain>.md`** (clone requirements in `specs/clone.md`; this archive’s delta was realized at archive time into the former monolitih). Treat §2 full-clone staging, §3 tar-pipe populate, and §4 `stop -w` items as historical completed steps, not live product behavior.
 
 Assume Swift 6.x / SPM, Apple `container`, and host `git` already available where E2E needs them. Do **not** install toolchains, GCM, or run network package installs as task steps. Test-first: write failing tests before implementation in each section. Mock git and AppleContainerRuntime boundaries so the default suite needs no network.
 
