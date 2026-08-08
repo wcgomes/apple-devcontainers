@@ -36,9 +36,9 @@ formula=$(cat <<EOF
 
 class Adevcontainer < Formula
   desc "Native Swift CLI for devcontainer.json on Apple container"
-  homepage "https://github.com/wcgomes/apple-dev-containers"
+  homepage "https://github.com/wcgomes/apple-devcontainers"
   version "${version}"
-  url "https://github.com/wcgomes/apple-dev-containers/releases/download/v#{version}/adevcontainer-macos-arm64.tar.gz"
+  url "https://github.com/wcgomes/apple-devcontainers/releases/download/v#{version}/adevcontainer-macos-arm64.tar.gz"
   sha256 "${sha256}"
   license "MIT"
 
