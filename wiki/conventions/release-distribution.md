@@ -4,7 +4,7 @@ How `adevcontainer` binaries are built, versioned, and installed. Decided 2026-0
 
 ## Repo identity
 
-- **GitHub:** [wcgomes/apple-dev-containers](https://github.com/wcgomes/apple-dev-containers) (renamed 2026-08 from `wcgomes/dev-containerization`; old URLs 301).
+- **GitHub:** [wcgomes/apple-devcontainers](https://github.com/wcgomes/apple-devcontainers) (renamed 2026-08 from `wcgomes/apple-dev-containers`, previously `wcgomes/dev-containerization`; old URLs 301).
 - **Product/binary:** still `adevcontainer`. Local clone folder may still be named `dev-containerization`.
 - **Homebrew tap:** unchanged (`wcgomes/homebrew-tap`); formula homepage/url point at the new repo.
 

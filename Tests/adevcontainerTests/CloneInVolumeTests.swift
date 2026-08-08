@@ -1048,7 +1048,7 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         let result = try CloneCommand.run(
             options: CloneOptions(
-                gitURL: "https://github.com/wcgomes/apple-dev-containers.git",
+                gitURL: "https://github.com/wcgomes/apple-devcontainers.git",
                 skipPull: true
             ),
             runtime: runtime,
@@ -1056,16 +1056,16 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
             credentials: MockGitCredential(),
             localEnv: [:]
         )
-        try MiniTest.expectEqual(result.remoteWorkspaceFolder, "/workspaces/apple-dev-containers")
+        try MiniTest.expectEqual(result.remoteWorkspaceFolder, "/workspaces/apple-devcontainers")
         try MiniTest.expect(!result.remoteWorkspaceFolder.contains("adev-clone-cfg"))
         try MiniTest.expect(!result.remoteWorkspaceFolder.contains("tmp"))
         let createCall = mock.calls.first { $0.arguments.first == "create" }!
         if let wIdx = createCall.arguments.firstIndex(of: "-w"), wIdx + 1 < createCall.arguments.count {
-            try MiniTest.expectEqual(createCall.arguments[wIdx + 1], "/workspaces/apple-dev-containers")
+            try MiniTest.expectEqual(createCall.arguments[wIdx + 1], "/workspaces/apple-devcontainers")
         } else {
             try MiniTest.expect(false, "expected -w workdir on create")
         }
-        try MiniTest.expect(result.containerName?.hasPrefix("adev-apple-dev-containers-") == true)
+        try MiniTest.expect(result.containerName?.hasPrefix("adev-apple-devcontainers-") == true)
     }),
     ("cloneHonorsExplicitWorkspaceFolder", {
         let restore = CloneGitFeatureTestSupport.installOverrides()

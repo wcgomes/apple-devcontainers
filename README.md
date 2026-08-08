@@ -1,12 +1,12 @@
 # Apple Dev Container CLI (adevcontainer)
 
-[![CI](https://github.com/wcgomes/apple-dev-containers/actions/workflows/ci.yml/badge.svg)](https://github.com/wcgomes/apple-dev-containers/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-245%2B-brightgreen)](https://github.com/wcgomes/apple-dev-containers)
+[![CI](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml/badge.svg)](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml)
+[![tests](https://img.shields.io/badge/tests-245%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Native Swift CLI that reads `devcontainer.json` and runs workspaces on **Apple `container`**. 
+Native Swift CLI that reads `devcontainer.json` and runs workspaces on **Apple `container`**.
 
-Supports clone a git repo straight into a container volume (faster disk I/O than bind mounts), or `up` an existing checkout; plus lifecycle hooks and Dev Container Features.
+Clone a git repo into a named container volume (faster disk I/O than bind mounts), or `up` an existing checkout. Applies a practical subset—lifecycle hooks and Features included.
 
 ## Install
 
@@ -25,7 +25,7 @@ Tap: [`github.com/wcgomes/homebrew-tap`](https://github.com/wcgomes/homebrew-tap
 
 ### GitHub Release binary
 
-From [Releases](https://github.com/wcgomes/apple-dev-containers/releases), download `adevcontainer-macos-arm64.tar.gz` and `adevcontainer-macos-arm64.tar.gz.sha256`, then:
+From [Releases](https://github.com/wcgomes/apple-devcontainers/releases), download `adevcontainer-macos-arm64.tar.gz` and `adevcontainer-macos-arm64.tar.gz.sha256`, then:
 
 ```bash
 shasum -a 256 -c adevcontainer-macos-arm64.tar.gz.sha256
