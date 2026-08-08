@@ -36,7 +36,7 @@ Do not paste workflow YAML into the wiki — edit the files under `.github/workf
 | Homebrew | After release: set `sha256` in `wcgomes/homebrew-tap` `Formula/adevcontainer.rb` **and** `packaging/homebrew/adevcontainer.rb` |
 
 - **Release trigger / source of truth:** git tag `vMAJOR.MINOR.PATCH` (or prerelease with `-`). Only tags (or dispatch + version) publish.
-- **Branch protection (recommended):** require PR + CI on `main` so contributors cannot push directly; maintainers still release only via tags. Confirm repo settings before claiming it is enforced.
+- **Branch protection (configured 2026-08 on `main`):** require PR before merge (0 approving reviews — solo OK); require status check `build-and-test` (strict, branch up to date); `enforce_admins: true`; no force push, no branch deletion. Tags remain free for release.
 - No extra process (no changelog tooling, no notarize) unless this page is updated.
 
 ## Versioning
