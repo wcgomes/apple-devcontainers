@@ -1,6 +1,6 @@
 # Change Spec: vscode-open-flag
 
-Delta against realized contract `specs/adevcontainer/spec.md`. RFC 2119 keywords apply.
+Delta against realized contract (union of `specs/<domain>.md`). RFC 2119 keywords apply.
 
 ## ADDED Requirements
 

@@ -1,7 +1,7 @@
 # Tasks: features-runner
 
-Spec ref: `specs/changes/archive/20260807-features-runner/` (archived; realized source: `specs/adevcontainer/spec.md`)  
-Base contract: `specs/adevcontainer/spec.md`  
+Spec ref: `specs/changes/archive/20260807-features-runner/` (archived; live contract: union of `specs/<domain>.md`)  
+Base contract: union of `specs/<domain>.md`  
 Binary: `adevcontainer`  
 Library: `Sources/ADevContainerLib/`  
 Tests: `Tests/adevcontainerTests/` (MiniTest; run with `swift run adevcontainerTests`)  
@@ -163,7 +163,7 @@ Assume Swift 6.x / SPM and Apple `container` already on the host. Do **not** ins
 
 ## 10. Realized contract + docs touchpoints (no scope creep)
 
-- [x] 10.1 Merge Features delta into realized contract after implementation lands (path: `specs/adevcontainer/spec.md`)
+- [x] 10.1 Merge Features delta into realized contract after implementation lands (path: `specs/features.md`)
 - [x] 10.2 README + wiki: OCI **and** local path Features runner, docker-* forever-reject markers, build.rosetta consent, native arm64 `container build`, fixtures, test guidance (path: `README.md`, `wiki/**`)
 - [x] 10.3 Do **not** implement: docker-ood / docker-in-docker / docker-from-docker install path, privileged/device, Compose, feature publish CLI, ORAS install, Node runtime. **Local path features are supported** (shipped).
 

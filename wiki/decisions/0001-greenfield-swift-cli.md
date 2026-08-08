@@ -15,6 +15,6 @@ Need a macOS CLI that reads `devcontainer.json` and runs dev workspaces on Apple
 
 - Full control of supported `devcontainer.json` surface and error policy; no Node/Docker assumptions inherited from upstream.
 - Must reimplement config resolve, identity, lifecycle, and command UX (cost accepted).
-- Supported surface is the contract in [`specs/adevcontainer/spec.md`](../../specs/adevcontainer/spec.md); unsupported properties hard-error — see [0002](0002-reject-docker-ood-privileged-tun.md).
+- Supported surface is the contract union of [`specs/<domain>.md`](../../specs/); unsupported properties hard-error — see [0002](0002-reject-docker-ood-privileged-tun.md).
 - Portability beyond Apple container / non-arm64 macOS is out of scope until a later redesign.
 - VS Code integration path is CLI `up` + attach-to-running-container, not full upstream extension driver parity.

@@ -2,7 +2,7 @@
 
 Spec ref: `specs/changes/vscode-open-flag/`  
 Design ref: `specs/changes/vscode-open-flag/design.md`  
-Base contract: `specs/adevcontainer/spec.md`  
+Base contract: union of `specs/<domain>.md`  
 Binary: `adevcontainer`  
 Library: `Sources/ADevContainerLib/`  
 Tests: `Tests/adevcontainerTests/` (MiniTest; run with `swift run adevcontainerTests`)  
@@ -10,7 +10,7 @@ Package root: repository root
 
 Assume Swift 6.x / SPM already available. Do **not** install VS Code or extensions as task steps. Test-first: write failing tests before implementation in each section. Mock the host `code` launcher so the default suite needs no real VS Code.
 
-**Status note:** All sections complete. Open flag, best-effort VS Code open, gated postAttach, docs, and suite verification are **done**. Change archived into realized contract `specs/adevcontainer/spec.md`.
+**Status note:** All sections complete. Open flag, best-effort VS Code open, gated postAttach, docs, and suite verification are **done**. Change archived into the live contract (now feature-scoped under `specs/`; union of `specs/<domain>.md`, VS Code requirements in `specs/vscode.md`).
 
 ---
 

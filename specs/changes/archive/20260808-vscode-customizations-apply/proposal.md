@@ -9,7 +9,7 @@ Official Dev Containers applies `customizations.vscode.extensions` and `settings
 - Change id: **`vscode-customizations-apply`**
 - Package root: repository root (Swift SPM `adevcontainer`)
 - Library under `Sources/ADevContainerLib/`; CLI entry `Sources/adevcontainer/AdevcontainerMain.swift`; tests under `Tests/adevcontainerTests/`
-- Realized base contract: `specs/adevcontainer/spec.md`. Prior related archive: `specs/changes/archive/20260808-vscode-open-flag/` (open soft-fail; postAttach after successful `--vscode` open only)
+- Realized base contract: union of `specs/<domain>.md`. Prior related archive: `specs/changes/archive/20260808-vscode-open-flag/` (open soft-fail; postAttach after successful `--vscode` open only)
 - **Parse and retain** config-file `customizations.vscode.extensions` (string extension IDs) and `customizations.vscode.settings` (JSON object). Presence of a parseable vscode customizations object continues to signal VS Code intent; well-formed extensions/settings MUST be retained for apply
 - **Settings apply** on create-path after create-path lifecycle hooks complete on fresh `up` / `clone` create — **not** gated on `--vscode`. Merge into guest remote Machine settings under the effective `remoteUser` home. Soft-fail (warn; never fail lifecycle; never delete/stop container solely due to apply failure)
 - **Extensions apply** on first successful `--vscode` open (same CLI attach open success gate as postAttach). Install missing IDs into the remote extension directory under effective `remoteUser` home. Soft-fail. Prefer mechanisms that do not require full VS Code Server ready when possible

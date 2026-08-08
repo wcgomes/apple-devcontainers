@@ -1,7 +1,7 @@
 # Tasks: lifecycle-runargs-host
 
-Spec ref: `specs/changes/archive/20260807-lifecycle-runargs-host/` (archived; realized source: `specs/adevcontainer/spec.md`)  
-Base contract: `specs/adevcontainer/spec.md`  
+Spec ref: `specs/changes/archive/20260807-lifecycle-runargs-host/` (archived; live contract: union of `specs/<domain>.md`)  
+Base contract: union of `specs/<domain>.md`  
 Binary: `adevcontainer`  
 Library: `Sources/ADevContainerLib/`  
 Tests: `Tests/adevcontainerTests/` (MiniTest; run with `swift run adevcontainerTests`)  
@@ -124,7 +124,7 @@ Assume Swift 6.x / SPM and Apple `container` already on the host. Do **not** ins
 
 ## 8. Realized contract + docs touchpoints (no scope creep)
 
-- [x] 8.1 Merge lifecycle / runArgs / hostRequirements delta into realized contract after implementation lands (path: `specs/adevcontainer/spec.md`)
+- [x] 8.1 Merge lifecycle / runArgs / hostRequirements delta into realized contract after implementation lands (paths: `specs/lifecycle-hooks.md`, `specs/runargs-host.md`)
 - [x] 8.2 README: mention lifecycle / runArgs allowlist / hostRequirements enforce+apply if command surface docs list capabilities (path: `README.md`)
 - [x] 8.3 Do **not** implement features, Compose, privileged, device, or postAttach execution in this change
 

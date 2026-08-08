@@ -131,7 +131,7 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 9. Create-path lifecycle hooks (same order as fresh `up`). On start/populate/hook failure after create: delete container **and** workspace `*-ws` volume.
 10. **Always** clean config-fetch temps (success or failure). No host full-clone staging temp on the happy path.
 
-`up` remains bind-mode host workspace only (no auto git Feature). Detail: [architecture.md](../architecture.md); contract [`specs/adevcontainer/spec.md`](../../specs/adevcontainer/spec.md).
+`up` remains bind-mode host workspace only (no auto git Feature). Detail: [architecture.md](../architecture.md); contract [`specs/clone.md`](../../specs/clone.md).
 
 ## Managed selection (`list` / lifecycle commands)
 
@@ -222,7 +222,7 @@ Hooks run via runtime **exec** into the running container (effective user + work
 | Bind start-stopped (`up`) | `postStartCommand` only |
 | Bare `start` | no create-path / postStart; settings repair on marker drift when config loadable; extensions + postAttach only via gate below |
 | `customizations.vscode` | **CLI apply** config-file v1 (`VSCodeCustomizationsApply`): settings create-path / drift repair; extensions after successful `--vscode` open only (host VSIX → tar-pipe → unzip → **`extensions.json` registry upsert** + cache invalidate; BFS `extensionDependencies`; soft-fail per ID); then postAttach. Soft-fail apply ≠ postAttach fail-keep. Marker `$HOME/.adevcontainer/vscode-customizations.applied` (config payload hash only). Not image build; not feature/metadata merge; Apple attach does not auto-install. Detail: [architecture.md — VS Code flow](../architecture.md#vs-code-flow) |
-| `postAttachCommand` | **implemented** on `up`/`start`/`clone`: after open success and after extensions apply — **RUNS** config then feature postAttach; **SKIP** + status if no flag or open soft-fails (no status line if absent). Not always-skip-forever. Contract: [`specs/adevcontainer/spec.md`](../../specs/adevcontainer/spec.md); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../../specs/changes/archive/20260808-vscode-customizations-apply/) |
+| `postAttachCommand` | **implemented** on `up`/`start`/`clone`: after open success and after extensions apply — **RUNS** config then feature postAttach; **SKIP** + status if no flag or open soft-fails (no status line if absent). Not always-skip-forever. Contract: [`specs/vscode.md`](../../specs/vscode.md); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../../specs/changes/archive/20260808-vscode-customizations-apply/) |
 
 - Capture exit codes; failed hook fails the command — do not pretend success.
 - **Create-path failure** (any of onCreate / updateContent / postCreate / postStart on fresh create): delete the container **before** returning failure, so reuse cannot treat a half-bootstrapped container as healthy. Customizations apply is **not** part of create-path delete-on-fail.

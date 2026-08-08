@@ -46,7 +46,7 @@ devcontainer.json → Config resolver → [Features runner] → AppleContainerRu
 | **Bind** | `up` from host workspace | Host dir via virtiofs (APFS) | Real path on Mac |
 | **Volume** | `clone <git-url>` | Named volume via virtio-blk (`volume.img` ext4) | No durable host checkout; label `local_folder=volume://…` |
 
-Volume mode exists for better metadata I/O (git status, node_modules, many small files) vs virtiofs binds. Contract: [`specs/adevcontainer/spec.md`](../specs/adevcontainer/spec.md) (archived change `20260808-clone-in-volume`).
+Volume mode exists for better metadata I/O (git status, node_modules, many small files) vs virtiofs binds. Contract: [`specs/clone.md`](../specs/clone.md) (archived change `20260808-clone-in-volume`).
 
 ## Commands (product surface)
 
@@ -93,9 +93,9 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
   | Bind start-stopped (`up`) | `postStartCommand` only; failure fails `up` but does **not** delete |
   | Bare `start` | no create-path / postStart; settings repair on marker drift when config loadable; extensions + postAttach only if gated open succeeds (config from labels; feature hooks from image metadata) |
   | `customizations.vscode` | **CLI apply** (config-file v1): settings after create-path hooks / drift repair (**not** gated on `--vscode`); extensions after successful open only; soft-fail; marker idempotency — see [VS Code flow](#vs-code-flow) |
-  | `postAttachCommand` | **implemented** gate on `up`/`start`/`clone`: **RUNS** config then feature postAttach only after successful `--vscode` open **and after** extensions apply; **SKIP** (+ status when any present) if flag absent or open soft-fails; non-zero → fail command, **keep** container. Soft-fail apply ≠ postAttach fail-keep. Contract: [`specs/adevcontainer/spec.md`](../specs/adevcontainer/spec.md); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../specs/changes/archive/20260808-vscode-customizations-apply/) |
+  | `postAttachCommand` | **implemented** gate on `up`/`start`/`clone`: **RUNS** config then feature postAttach only after successful `--vscode` open **and after** extensions apply; **SKIP** (+ status when any present) if flag absent or open soft-fails; non-zero → fail command, **keep** container. Soft-fail apply ≠ postAttach fail-keep. Contract: [`specs/vscode.md`](../specs/vscode.md); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../specs/changes/archive/20260808-vscode-customizations-apply/) |
 
-- **runArgs allowlist** and **hostRequirements** enforce+apply: [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md). Contract: [`specs/adevcontainer/spec.md`](../specs/adevcontainer/spec.md).
+- **runArgs allowlist** and **hostRequirements** enforce+apply: [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md). Contract: [`specs/runargs-host.md`](../specs/runargs-host.md).
 - Long-lived devcontainers use keep-alive entrypoint **`/bin/sleep` infinity** so the container stays up for `exec`/attach.
 
 ## Features
@@ -160,7 +160,7 @@ code --new-window --folder-uri "vscode-remote://apple-container+${HEX}${FOLDER}"
 - Extension UI command `remote-containers.attachToAppleContainer` opens the **remote authority only** (no folder) → empty/no-folder window UX gap; the `--folder-uri` recipe avoids that.
 - **Optional nameConfig** (improves attach defaults): `~/Library/Application Support/Code/User/globalStorage/ms-vscode-remote.remote-containers/nameConfigs/<containerName>.json` with `workspaceFolder` + `remoteUser` (from labels/`remoteUser`). Not required if the folder path is already in the URI.
 
-Not full Dev Containers up/rebuild or IDE-owned customizations parity; volume-mode is product `clone`, not the extension’s clone-in-volume. Contract: [`specs/adevcontainer/spec.md`](../specs/adevcontainer/spec.md); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../specs/changes/archive/20260808-vscode-customizations-apply/). Gaps: [devcontainer-apple-gaps.md](domain/devcontainer-apple-gaps.md).
+Not full Dev Containers up/rebuild or IDE-owned customizations parity; volume-mode is product `clone`, not the extension’s clone-in-volume. Contract: [`specs/vscode.md`](../specs/vscode.md); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../specs/changes/archive/20260808-vscode-customizations-apply/). Gaps: [devcontainer-apple-gaps.md](domain/devcontainer-apple-gaps.md).
 
 ## Reference config
 

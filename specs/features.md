@@ -1,8 +1,10 @@
-# Change Spec: features-runner
+# adevcontainer — Features Runner Specification
 
-Delta against realized contract (union of `specs/<domain>.md`). Requirements below are **ADDED** unless marked **MODIFIED**.
+## Purpose
 
-## ADDED Requirements
+OCI and local-path Features runner: admission, forever-reject policies, metadata resolve and dependency order, artifact fetch, derived image build on native arm64, build.rosetta consent, contribution merge, progress status, fixtures, and test strategy.
+
+## Requirements
 
 ### Requirement: Features object admission (OCI + local path)
 
@@ -19,7 +21,7 @@ Options object MAY supply feature options (e.g. `"version": "lts"`).
 
 - Non-object `features` value (array, string, number, boolean).
 - Non-object option values for a feature entry (unless the entry value is explicitly empty object).
-- Forever-rejected docker-* feature markers (see below) even when expressed as a local path.
+- Forever-rejected docker-* feature markers (see forever-reject requirement) even when expressed as a local path.
 
 Error messages MUST name the feature key (when applicable) and indicate supported OCI and/or local path forms.
 
@@ -58,7 +60,7 @@ Omitted `features` MUST NOT fail validation solely for absence.
 
 Independent of general Features support, the CLI MUST forever-reject:
 
-1. **docker-outside-of-docker** — any feature reference whose id/path contains the segment or substring `docker-outside-of-docker` (case-sensitive match on the conventional id), regardless of registry host or tag (e.g. `ghcr.io/devcontainers/features/docker-outside-of-docker:1`, alternate registries, any version tag).
+1. **docker-outside-of-docker** — any feature reference whose id/path contains the segment or substring `docker-outside-of-docker` (case-sensitive match on the conventional id), regardless of registry host or tag (e.g. `ghcr.io/devcontainers/features/docker-outside-of-docker:1`, alternate registries, any version tag). Also forever-reject refs containing `docker-in-docker` or `docker-from-docker` (any registry/tag or local path).
 2. **Privileged / securityOpt contributions** — after metadata resolve, any feature whose `devcontainer-feature.json` (or merged effective contribution) requires `privileged: true`, non-empty `securityOpt` / equivalent security-opt list, or an install posture that mandatorily needs them.
 3. **Compose** — unchanged; Compose keys remain forever-rejected.
 
@@ -165,9 +167,11 @@ When `features` is non-empty after admission, on a fresh create path the product
    - `linux/arm64` when the host is arm64 / aarch64 (product default on Apple Silicon)
    - `linux/amd64` only when the host is x86_64
 4. **Build** a derived image with Apple `container build` from a **generated Dockerfile** that `FROM`s the base image and `RUN`s each feature `install.sh` **as root** (options / `_REMOTE_USER` / `_CONTAINER_USER` env). Build argv MUST include the same host-native **`--platform`**.
-5. **Tag** a deterministic local image (`adevcontainer/features:<hash>`); **reuse** when that tag already exists locally (skip rebuild).
+5. **Tag** a deterministic local image as `adev-{base}:{hash12}`, where `base` is the same human base as container identity and `hash12` is a 12-character content hash of base image + features (unchanged material). If `base` is empty → `adevcontainer:{hash12}`. MUST NOT use an `adevcontainer/features:` prefix or a `/features` path segment. **Reuse** when that tag already exists locally (skip rebuild).
 6. **Create** the workspace container **from the derived image** (not the raw config `image`) with the same **`--platform`**. Contributions that affect create flags (`init`, `capAdd`, env, mounts) MUST be merged **before** create.
 7. **Start** the container, then run lifecycle hooks (onCreate → …) as today.
+
+When `features` is absent or empty, create MUST continue to use the config `image` reference as written (no derived tag).
 
 **MUST NOT** pass `--rosetta` on Features pull/build/create unless the user opted in via `runArgs`.
 
@@ -178,7 +182,12 @@ Reuse running / start stopped: MUST NOT re-fetch/rebuild features (already baked
 #### Scenario: Create uses derived image after build
 - Given a config with `image` and one OCI feature
 - When the user runs `up` on a fresh create path (fetch/build available or mocked success)
-- Then `container build` runs with `--platform linux/arm64` on arm64 hosts, create uses `adevcontainer/features:<hash>`, and lifecycle hooks run after start
+- Then `container build` runs with `--platform linux/arm64` on arm64 hosts, create uses the derived tag `adev-{base}:{hash12}` (or `adevcontainer:{hash12}` when base is empty), and lifecycle hooks run after start
+
+#### Scenario: Derived tag has no features path prefix
+- Given a Features build with a non-empty human base
+- When the derived image tag is computed
+- Then the tag is `adev-{base}:{hash12}` and MUST NOT contain `adevcontainer/features` or a `/features` path segment
 
 #### Scenario: Build and pull never pass --rosetta by default
 - Given Features pull/build on the up path
@@ -260,7 +269,7 @@ After features are resolved (and before create for flag contributions; lifecycle
 | mounts | Bind and volume only; sources normalized with **MountNormalizer** for file→dir promotion; incompatible mount types fail structured |
 | lifecycle hooks contributed by features | Appended/merged into the create-path exec order after start (installs already in derived image); same string/argv forms and failure/delete-on-fail policy as config hooks for create-path failures |
 
-Privileged / `securityOpt` contributions remain forever-rejected (see above).
+Privileged / `securityOpt` contributions remain forever-rejected (see forever-reject requirement).
 
 **SHOULD:** If the base or derived image inspect shows a `devcontainer.metadata` label with JSON metadata, parse and merge compatible fields into the effective model. Absence of the label MUST NOT fail `up`.
 
@@ -365,125 +374,3 @@ Fixtures MUST NOT include `docker-outside-of-docker`, privileged `runArgs`, devi
 - When `fixtureE2E_featuresLocal` runs
 - Then `up` builds with sample-a then sample-b and smoke finds both in `/usr/local/etc/adev-features/installed.txt`
 
----
-
-## MODIFIED Requirements
-
-### Requirement: Supported property surface (MODIFIED)
-
-**Modify** the realized requirement **Supported property surface (core + lifecycle/runArgs/host)** as follows:
-
-- **Add** under a new **Features** bullet group:
-  - `features` — object map of OCI or local path feature ref → options; processed by the Features runner (see ADDED requirements).
-
-All prior bullets (image & workspace, env & user, mounts & ports, lifecycle, runArgs + hostRequirements) remain in force.
-
-#### Scenario: features is on the supported surface
-- Given a config that includes only previously supported keys plus an OCI `features` map without forever-rejected entries
-- When config is validated
-- Then validation does not fail with unsupported-property for `features`
-
----
-
-### Requirement: Unsupported property policy (MODIFIED)
-
-**Replace** the policy text that rejects **any** `features` entry until Features land with the following:
-
-**Forever reject (v1) — Features-aware**
-
-- Feature refs containing `docker-outside-of-docker` / `docker-in-docker` / `docker-from-docker` (any registry/tag or local path)
-- Feature metadata requiring `privileged: true` or `securityOpt` (or equivalent)
-- `runArgs` containing `--privileged` or `--device…` (unchanged)
-- `runArgs` entries not on the runArgs allowlist (unchanged)
-- Docker Compose keys / compose-file driven multi-service config (unchanged)
-
-**No longer reject**
-
-- Non-ood OCI `features` entries solely for being features — they MUST enter the Features runner path
-- Local path feature refs — they MUST enter the Features runner path (load from disk relative to workspace)
-
-**May ignore or store as metadata (unchanged)**
-
-- `customizations.vscode`
-- Optional `name` as today
-
-**Unknown non-metadata top-level properties**
-
-- MUST hard-error, except keys explicitly supported in core + lifecycle + runArgs + hostRequirements + **`features`**.
-
-#### Scenario: Reject docker-outside-of-docker (policy retained)
-- Given a config with `features` including a docker-outside-of-docker ref
-- When config is validated
-- Then the CLI fails with a structured error naming the feature and the reject policy
-
-#### Scenario: Non-ood features no longer rejected as blanket-unsupported
-- Given `features` with only `ghcr.io/devcontainers/features/node:1`
-- When config is validated at admission
-- Then the CLI does not fail with a blanket “features are not supported” error
-
-#### Scenario: Reject privileged runArgs (unchanged)
-- Given `runArgs` including `--privileged`
-- When config is validated
-- Then the CLI fails naming `--privileged`
-
-#### Scenario: Reject Compose keys (unchanged)
-- Given a config with `dockerComposeFile` set
-- When config is validated
-- Then the CLI fails indicating Compose is unsupported
-
----
-
-### Requirement: Up lifecycle create image selection (MODIFIED)
-
-**Modify** **Up lifecycle (create, start, reuse)** so that on paths that create a new container (fresh create or recreate):
-
-- **Before create**, if resolved `features` is non-empty: ensure **build.rosetta=false** (consent), then **resolve → fetch → order → contribution merge → Dockerfile generate → `container build`** (or reuse derived tag). Create uses the **derived image** with contributions merged and **`--platform`** host-native.
-- Then start and lifecycle hooks (onCreate → updateContent → postCreate → postStart, etc.); feature-contributed hooks merge per ADDED merge requirement (installs are already in the derived image).
-- If `features` is absent or empty: create uses config `image` as today (still with default platform); Features build path is not required.
-- Reuse running / start stopped paths MUST NOT re-fetch/rebuild features unless product identity says config/features hash drift requires recreate (existing drift/recreate policy applies; features hash is part of config identity material when features present).
-
-Success JSON fields remain required (`outcome`, `containerId`, `remoteUser`, `remoteWorkspaceFolder`).
-
-#### Scenario: Up with features builds then hooks
-- Given fixture-equivalent config with OCI node feature
-- When the user runs `up` (fresh create) with fetch/build available or mocked success
-- Then resolve/fetch/build run before create, create uses the derived image, then lifecycle hooks
-
-#### Scenario: Up without features unchanged image path
-- Given a config with no `features` key
-- When the user runs `up` fresh create
-- Then create uses config `image` and the Features build path is not required
-
-#### Scenario: Reuse running does not re-fetch features
-- Given a matching container already running with features identity satisfied
-- When the user runs `up` without recreate
-- Then no feature fetch/build is required and lifecycle hooks are not re-run
-
----
-
-### Requirement: Capability fixtures table (MODIFIED)
-
-**Modify** **Capability fixtures** to **add** the Features fixture row:
-
-| Path | Capability |
-|------|------------|
-| `Tests/Fixtures/features-node.json` | OCI Features runner (node only; no docker-ood) |
-| `Tests/Fixtures/features-local.json` | Local path Features runner (sample-a + sample-b) |
-
-Existing fixture rows remain required and MUST remain valid under Features-aware admission (configs without `features` behave as today).
-
-#### Scenario: All listed fixtures still admit for their capability
-- Given each file under `Tests/Fixtures/` listed in the capability table including `features-node.json` and `features-local.json`
-- When parsed and validated against admission
-- Then each fixture is admitted for its capability without unexpected unsupported-property errors
-
----
-
-### Requirement: Config hash identity includes features (MODIFIED)
-
-**Modify** deterministic identity / config hash behavior so that when `features` is present, hash material MUST include the selected feature refs, options, and ordered identity inputs. Changing features MUST change config hash so reuse and drift detection remain correct (recreate when features change).
-
-#### Scenario: Features participate in identity hash
-- Given two configs identical except for a feature option value
-- When config hashes are computed
-- Then the hashes differ

@@ -2,7 +2,7 @@
 
 Spec ref: `specs/changes/vscode-customizations-apply/`  
 Design ref: `specs/changes/vscode-customizations-apply/design.md`  
-Base contract: `specs/adevcontainer/spec.md`  
+Base contract: union of `specs/<domain>.md`  
 Prior archive: `specs/changes/archive/20260808-vscode-open-flag/`  
 Binary: `adevcontainer`  
 Library: `Sources/ADevContainerLib/`  
