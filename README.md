@@ -16,6 +16,37 @@ Install these on the host before building or running (not bundled with this proj
 
 Compatibility note: integration is tested against Apple container **1.2.x** machine JSON. `adevcontainer doctor` checks that the binary is present, reports version, and that the system is running.
 
+## Install
+
+**Requirements:** macOS 26+ on Apple Silicon. Install Apple [`container`](https://github.com/apple/container) separately (not bundled). Swift is only needed if you build from source.
+
+### Homebrew
+
+```bash
+brew tap wcgomes/tap
+brew install adevcontainer
+```
+
+`brew tap wcgomes/tap` uses `github.com/wcgomes/homebrew-tap` (standard Homebrew naming). Formula template: [`packaging/homebrew/`](packaging/homebrew/).
+
+### GitHub Release binary
+
+Download the arm64 tarball from [Releases](https://github.com/wcgomes/dev-containerization/releases). Example for `v0.1.0` — replace the version as needed:
+
+```bash
+curl -fsSL -o adevcontainer-macos-arm64.tar.gz \
+  https://github.com/wcgomes/dev-containerization/releases/download/v0.1.0/adevcontainer-macos-arm64.tar.gz
+curl -fsSL -o adevcontainer-macos-arm64.tar.gz.sha256 \
+  https://github.com/wcgomes/dev-containerization/releases/download/v0.1.0/adevcontainer-macos-arm64.tar.gz.sha256
+shasum -a 256 -c adevcontainer-macos-arm64.tar.gz.sha256
+tar xzf adevcontainer-macos-arm64.tar.gz
+sudo mv adevcontainer /usr/local/bin/   # or ~/bin if that directory is on PATH
+```
+
+### From source
+
+See [Build](#build). After a release build, install the binary somewhere on `PATH` (for example `cp .build/release/adevcontainer /usr/local/bin/`).
+
 ## Build
 
 ```bash

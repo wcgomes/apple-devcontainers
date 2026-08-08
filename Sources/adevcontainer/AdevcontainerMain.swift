@@ -91,7 +91,7 @@ struct AdevcontainerMain {
             return 0
 
         case "version", "--version":
-            print("adevcontainer 0.1.0")
+            print("adevcontainer \(AppVersion.current)")
             return 0
 
         default:

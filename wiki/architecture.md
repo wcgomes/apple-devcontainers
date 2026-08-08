@@ -11,6 +11,7 @@ Greenfield native Swift executable (arm64). Reads `devcontainer.json`, drives Ap
 | User runtime dep | Apple `container` CLI (install separately — [apple/container](https://github.com/apple/container); tested with 1.2.x JSON) |
 | Apple container binary (typical) | `/usr/local/bin/container` |
 | Product binary | `adevcontainer` |
+| Release / install | CI + GitHub Release tarball; Homebrew primary — [release-distribution.md](conventions/release-distribution.md) |
 
 ## Package layout
 
