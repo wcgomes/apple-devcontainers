@@ -2,6 +2,12 @@
 
 How `adevcontainer` binaries are built, versioned, and installed. Decided 2026-08.
 
+## Repo identity
+
+- **GitHub:** [wcgomes/apple-dev-containers](https://github.com/wcgomes/apple-dev-containers) (renamed 2026-08 from `wcgomes/dev-containerization`; old URLs 301).
+- **Product/binary:** still `adevcontainer`. Local clone folder may still be named `dev-containerization`.
+- **Homebrew tap:** unchanged (`wcgomes/homebrew-tap`); formula homepage/url point at the new repo.
+
 ## Constraints
 
 - **Host build:** GitHub Actions on **macos-26 only** (`Package.swift` requires macOS 26.0; arm64-only product).
