@@ -31,13 +31,13 @@ brew install adevcontainer
 
 ### GitHub Release binary
 
-Download the arm64 tarball from [Releases](https://github.com/wcgomes/dev-containerization/releases). Example for `v0.1.0` — replace the version as needed:
+Download the arm64 tarball from [Releases](https://github.com/wcgomes/apple-dev-containers/releases). Example for `v0.1.0` — replace the version as needed:
 
 ```bash
 curl -fsSL -o adevcontainer-macos-arm64.tar.gz \
-  https://github.com/wcgomes/dev-containerization/releases/download/v0.1.0/adevcontainer-macos-arm64.tar.gz
+  https://github.com/wcgomes/apple-dev-containers/releases/download/v0.1.0/adevcontainer-macos-arm64.tar.gz
 curl -fsSL -o adevcontainer-macos-arm64.tar.gz.sha256 \
-  https://github.com/wcgomes/dev-containerization/releases/download/v0.1.0/adevcontainer-macos-arm64.tar.gz.sha256
+  https://github.com/wcgomes/apple-dev-containers/releases/download/v0.1.0/adevcontainer-macos-arm64.tar.gz.sha256
 shasum -a 256 -c adevcontainer-macos-arm64.tar.gz.sha256
 tar xzf adevcontainer-macos-arm64.tar.gz
 sudo mv adevcontainer /usr/local/bin/   # or ~/bin if that directory is on PATH
