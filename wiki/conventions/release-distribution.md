@@ -24,6 +24,21 @@ How `adevcontainer` binaries are built, versioned, and installed. Decided 2026-0
 
 Do not paste workflow YAML into the wiki — edit the files under `.github/workflows/`.
 
+## Maintainer process
+
+**`main` ≠ release.** Merge integrates code; it does not publish a binary or GitHub Release.
+
+| Step | Action |
+|------|--------|
+| Land code | Branch → PR → CI green → merge to `main` (merge when ready to integrate; no ship gate) |
+| Ship | Tag the desired commit (usually latest `main`): `git tag vX.Y.Z && git push origin vX.Y.Z` — or `workflow_dispatch` with version input |
+| Publish | Release workflow builds/tests, writes tarball + sha256, creates GitHub Release |
+| Homebrew | After release: set `sha256` in `wcgomes/homebrew-tap` `Formula/adevcontainer.rb` **and** `packaging/homebrew/adevcontainer.rb` |
+
+- **Release trigger / source of truth:** git tag `vMAJOR.MINOR.PATCH` (or prerelease with `-`). Only tags (or dispatch + version) publish.
+- **Branch protection (recommended):** require PR + CI on `main` so contributors cannot push directly; maintainers still release only via tags. Confirm repo settings before claiming it is enforced.
+- No extra process (no changelog tooling, no notarize) unless this page is updated.
+
 ## Versioning
 
 - **Published binary source of truth:** git tag (`vX.Y.Z` or prerelease with `-`).
