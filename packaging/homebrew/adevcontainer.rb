@@ -7,8 +7,7 @@ class Adevcontainer < Formula
   homepage "https://github.com/wcgomes/dev-containerization"
   version "0.1.0"
   url "https://github.com/wcgomes/dev-containerization/releases/download/v#{version}/adevcontainer-macos-arm64.tar.gz"
-  # Replace with the release tarball SHA-256 before publishing the formula.
-  sha256 "REPLACE_ON_RELEASE"
+  sha256 "789c13b5f32150cd1cfd8218048e25da780fff3b81ffa5bf43ff9ebe16469ea8"
   license "MIT"
 
   depends_on macos: :tahoe # macOS 26+
