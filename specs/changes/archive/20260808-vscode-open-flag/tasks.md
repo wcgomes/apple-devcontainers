@@ -10,7 +10,7 @@ Package root: repository root
 
 Assume Swift 6.x / SPM already available. Do **not** install VS Code or extensions as task steps. Test-first: write failing tests before implementation in each section. Mock the host `code` launcher so the default suite needs no real VS Code.
 
-**Status note:** Sections 1–5 (open flag, URI, launcher, command wiring, docs for open) are **done**. Section 6+ is the **postAttach delta**: code already ships `--vscode` open without gated postAttach execution — implement the remaining gap without unchecking completed open work.
+**Status note:** All sections complete. Open flag, best-effort VS Code open, gated postAttach, docs, and suite verification are **done**. Change archived into realized contract `specs/adevcontainer/spec.md`.
 
 ---
 

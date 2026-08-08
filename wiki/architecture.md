@@ -92,7 +92,7 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
   | Reuse running | no create-path hooks; feature postAttach still mergeable from image metadata when `--vscode` open succeeds |
   | Bind start-stopped (`up`) | `postStartCommand` only; failure fails `up` but does **not** delete |
   | Bare `start` | no create-path / postStart; postAttach only if gated open succeeds (config from labels; feature hooks from image metadata) |
-  | `postAttachCommand` | **implemented** gate on `up`/`start`/`clone`: **RUNS** config then feature postAttach only after successful `--vscode` open; **SKIP** (+ status when any present) if flag absent or open soft-fails; non-zero → fail command, **keep** container. Not “always skip forever.” Spec: [`specs/changes/vscode-open-flag/`](../specs/changes/vscode-open-flag/) |
+  | `postAttachCommand` | **implemented** gate on `up`/`start`/`clone`: **RUNS** config then feature postAttach only after successful `--vscode` open; **SKIP** (+ status when any present) if flag absent or open soft-fails; non-zero → fail command, **keep** container. Not “always skip forever.” Contract: [`specs/adevcontainer/spec.md`](../specs/adevcontainer/spec.md); archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../specs/changes/archive/20260808-vscode-open-flag/) |
 
 - **runArgs allowlist** and **hostRequirements** enforce+apply: [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md). Contract: [`specs/adevcontainer/spec.md`](../specs/adevcontainer/spec.md).
 - Long-lived devcontainers use keep-alive entrypoint **`/bin/sleep` infinity** so the container stays up for `exec`/attach.
@@ -145,7 +145,7 @@ code --new-window --folder-uri "vscode-remote://apple-container+${HEX}${FOLDER}"
 - Extension UI command `remote-containers.attachToAppleContainer` opens the **remote authority only** (no folder) → empty/no-folder window UX gap; the `--folder-uri` recipe avoids that.
 - **Optional nameConfig** (improves attach defaults): `~/Library/Application Support/Code/User/globalStorage/ms-vscode-remote.remote-containers/nameConfigs/<containerName>.json` with `workspaceFolder` + `remoteUser` (from labels/`remoteUser`). Not required if the folder path is already in the URI.
 
-Not full Dev Containers up/rebuild parity; volume-mode is product `clone`, not the extension’s clone-in-volume. Design/spec: [`specs/changes/vscode-open-flag/`](../specs/changes/vscode-open-flag/). Gaps: [devcontainer-apple-gaps.md](domain/devcontainer-apple-gaps.md).
+Not full Dev Containers up/rebuild parity; volume-mode is product `clone`, not the extension’s clone-in-volume. Contract: [`specs/adevcontainer/spec.md`](../specs/adevcontainer/spec.md); design archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../specs/changes/archive/20260808-vscode-open-flag/). Gaps: [devcontainer-apple-gaps.md](domain/devcontainer-apple-gaps.md).
 
 ## Reference config
 

@@ -56,7 +56,7 @@ Apple BuildKit with `build.rosetta=true` can require Rosetta even for native arm
 
 ### VS Code attach (`--vscode` + manual)
 
-After lifecycle success, `up` / `start` / `clone` accept **`--vscode`**: best-effort host `code --new-window --folder-uri …`. Missing `code` or launch fail → stderr warn; open alone does not fail the command. Without the flag, same URI recipe works manually (does not run postAttach). Successful open gates **`postAttachCommand`** (implemented CLI attach approximation). Full recipe: [architecture.md — VS Code flow](../architecture.md#vs-code-flow). Spec: [`specs/changes/vscode-open-flag/`](../../specs/changes/vscode-open-flag/).
+After lifecycle success, `up` / `start` / `clone` accept **`--vscode`**: best-effort host `code --new-window --folder-uri …`. Missing `code` or launch fail → stderr warn; open alone does not fail the command. Without the flag, same URI recipe works manually (does not run postAttach). Successful open gates **`postAttachCommand`** (implemented CLI attach approximation). Full recipe: [architecture.md — VS Code flow](../architecture.md#vs-code-flow). Contract: [`specs/adevcontainer/spec.md`](../../specs/adevcontainer/spec.md); archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../../specs/changes/archive/20260808-vscode-open-flag/).
 
 | Piece | Fact |
 |-------|------|

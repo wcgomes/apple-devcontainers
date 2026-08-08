@@ -221,7 +221,7 @@ Hooks run via runtime **exec** into the running container (effective user + work
 | Reuse running | no create-path hooks; feature postAttach mergeable from image metadata when gated open succeeds |
 | Bind start-stopped (`up`) | `postStartCommand` only |
 | Bare `start` | no create-path / postStart; postAttach only via gate below |
-| `postAttachCommand` | **implemented** on `up`/`start`/`clone`: **RUNS** config then feature postAttach only after successful `--vscode` open; **SKIP** + status if no flag or open soft-fails (no status line if absent). Not always-skip-forever. Spec: [`specs/changes/vscode-open-flag/`](../../specs/changes/vscode-open-flag/) |
+| `postAttachCommand` | **implemented** on `up`/`start`/`clone`: **RUNS** config then feature postAttach only after successful `--vscode` open; **SKIP** + status if no flag or open soft-fails (no status line if absent). Not always-skip-forever. Contract: [`specs/adevcontainer/spec.md`](../../specs/adevcontainer/spec.md); archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../../specs/changes/archive/20260808-vscode-open-flag/) |
 
 - Capture exit codes; failed hook fails the command — do not pretend success.
 - **Create-path failure** (any of onCreate / updateContent / postCreate / postStart on fresh create): delete the container **before** returning failure, so reuse cannot treat a half-bootstrapped container as healthy.
