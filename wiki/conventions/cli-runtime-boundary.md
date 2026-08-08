@@ -23,7 +23,7 @@ Parse these paths from machine JSON (not human tables). Shape documented against
 
 - `container create --name <id>` — the name **is** the id used later for inspect/exec/stop/delete.
 - **No label filter on `list`** — filter client-side after JSON list (or resolve by deterministic name/inspect).
-- Long-lived devcontainers: keep-alive via `--entrypoint` + `sleep … infinity` (or equivalent) so the process does not exit immediately.
+- Long-lived devcontainers: keep-alive via `--entrypoint /bin/sleep` + `infinity` so the process does not exit immediately.
 
 ## Config → runtime
 
@@ -58,7 +58,7 @@ Fixtures may use directory binds already (`~/.kube`); configs that still use fil
   - `--network=NAME` — **named networks only** (reject host/bridge/none/container:*)
   - `--rosetta`, `--ssh`, `--read-only`
 - **Not via runArgs** (first-class props): `-e`/`-u`/`-w`/`-p`/`-v`/`--mount`/`--name`/`--label`/`-i`/`-t`/`-d`/`--rm`/`--entrypoint`.
-- Forever-reject (v1): `--privileged`, `--device=…` (incl. `/dev/net/tun`), `--security-opt`, `--gpus`, `--ipc`, `--pid`, `--userns`, `--cgroupns`, `--hostname`, `--add-host`, `--sysctl`, `--group-add`, `--runtime`, Docker-only network modes, and any flag not on the allowlist.
+- Forever-reject: `--privileged`, `--device=…` (incl. `/dev/net/tun`), `--security-opt`, `--gpus`, `--ipc`, `--pid`, `--userns`, `--cgroupns`, `--hostname`, `--add-host`, `--sysctl`, `--group-add`, `--runtime`, Docker-only network modes, and any flag not on the allowlist. See [0002](../decisions/0002-reject-docker-ood-privileged-tun.md).
 - Unknown or incomplete entries (e.g. bare `--cap-add` with no name) → structured error naming the entry.
 
 ## hostRequirements preflight
@@ -99,6 +99,7 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 | Workspace container | Yes |
 | Named volumes from config `mounts` (`type=volume`) | Yes |
 | Config `image` reference | Yes |
+| Derived Features tags (`adevcontainer/features:*`) | **No** — not removed unless the tag equals config `image` |
 | Bind-mount host paths | **No** |
 | Global `volume prune` / `image prune` | **No** |
 
@@ -111,7 +112,7 @@ On `up` when `features` is non-empty (code: `Sources/ADevContainerLib/Features/`
 | Step | Behavior |
 |------|----------|
 | Admit | Feature ref → options map; **OCI** (`ghcr.io/…/node:1`) and **local path** (`./…`, `../…`, absolute `/…`, `file://…` relative to workspace root); declaration key-sorted for stable ties |
-| Reject | Any ref containing `docker-outside-of-docker`, `docker-in-docker`, or `docker-from-docker` (forever, OCI or local); metadata `privileged` / `securityOpt` |
+| Reject | Any ref containing `docker-outside-of-docker`, `docker-in-docker`, or `docker-from-docker` (forever, OCI or local); metadata `privileged` / `securityOpt` ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)) |
 | build.rosetta | Before fetch/build: ensure Apple BuildKit `build.rosetta=false`. Already false → silent. True/missing → one-time TTY consent (or fail); CI auto-accept via `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`. Never install Rosetta; never restore `true` after consent |
 | Fetch / load | **Local path:** validate package (`devcontainer-feature.json` + `install.sh`) and copy into feature cache. **OCI:** embedded HTTPS client (`OCIFeatureClient`) — **not** `container image pull`, ORAS, or Node |
 | Order | `dependsOn` / `installsAfter` topo-sort (id last-segment match so `./x/sample-a` satisfies `…/sample-a:1`); cycle → structured error |
@@ -122,9 +123,9 @@ On `up` when `features` is non-empty (code: `Sources/ADevContainerLib/Features/`
 
 **Fixtures:** `features-node`, `features-triple`, `features-local`, `features-docker-ood`, `features-sample/*`.
 
-**Tests:** ~156+ offline; local E2E when Apple `container` available; OCI E2E opt-in `ADEVCONTAINER_FEATURES_E2E=1`.
+**Tests:** suite of record is `swift run adevcontainerTests`. Local E2E when Apple `container` available; OCI E2E opt-in `ADEVCONTAINER_FEATURES_E2E=1`.
 
-Progress lines: `==> Resolving features`, `==> Fetching features`, `==> Building features` (or Reusing); `==> Configuring native arm64 builds (build.rosetta=false)` only when changing config. Realized in `specs/adevcontainer/spec.md`. Archived: `specs/changes/archive/20260807-features-runner/`.
+Progress lines: `==> Resolving features`, `==> Fetching features`, `==> Building features` (or Reusing); `==> Configuring native arm64 builds (build.rosetta=false)` only when changing config.
 
 ## Progress / tee
 

@@ -8,13 +8,13 @@ Facts that constrain the CLI. Not a full Apple container manual — only gaps th
 |------|------------------------------|--------------------------------|
 | Driver | Docker/Moby engine API | Apple `container` CLI subprocess |
 | Compose | Docker Compose common | **Unsupported** — hard reject |
-| Privileged | `--privileged` widely used | **Rejected** in v1 policy |
-| Devices | `--device=…` (e.g. `/dev/net/tun`) | **Rejected** in v1 |
-| Features | OCI + local path feature packages + image build | **Supported** (OCI + local path runner); docker-* markers forever-reject; native arm64 build (no Rosetta by default) |
+| Privileged | `--privileged` widely used | **Rejected** ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)) |
+| Devices | `--device=…` (e.g. `/dev/net/tun`) | **Rejected** ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)) |
+| Features | OCI + local path feature packages + image build | **Supported** (OCI + local path runner); forever-reject `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker`; native arm64 build (no Rosetta by default) |
 | Events / rich watch APIs | Engine events often used by tools | Do not assume Docker-equivalent event stream |
 | List + label filter | `docker ps --filter label=…` | **No label filter on list** — client-side filter after JSON; prefer deterministic name + inspect |
 | VS Code | Dev Containers full up/rebuild | **Attach-only** after CLI `up` (experimental Attach to Running Apple Container) |
-| Default process | Often long-running or sleep entry | Need explicit keep-alive (`--entrypoint sleep … infinity`) for long-lived devcontainers |
+| Default process | Often long-running or sleep entry | Keep-alive `--entrypoint /bin/sleep` + `infinity` for long-lived devcontainers |
 | Create identity | Name vs id often distinct | `create --name` **is** the id (`configuration.id`) |
 | Bind mounts | File or directory host source OK | **Directory sources only** — file binds rejected by runtime |
 | Env PATH | Shell/`${PATH}` often expanded | Apple `container` does **not** expand `${PATH}` — product expands on create |
@@ -37,11 +37,11 @@ Apple BuildKit with `build.rosetta=true` can require Rosetta even for native arm
 
 - **Hard errors** for unsupported props/flags — never silent ignore.
 - **`forwardPorts`**: map to publish ports; do not promise IDE auto-forward behavior.
-- **`portsAttributes`**: metadata only at MVP (labels/docs for humans/tools); not full VS Code auto-forward semantics.
+- **`portsAttributes`**: metadata only; no IDE auto-forward.
 - **Lifecycle**: run via `container exec` (hook matrix: create-path full order; start-stopped `postStart` only; reuse none; `postAttach` admit + skip on `up`). Not Docker entrypoint injection parity. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
 - **`runArgs`**: allowlist (`--init`, `--cap-add`/`--cap-drop`, …); privileged/tun/device and unknown flags fail closed.
 - **`hostRequirements`**: preflight — fail on memory/cpus shortfall; map requested limits to create `-m`/`-c` when host OK; warn unsupported `gpu`; fail on unparseable/unknown keys.
-- **Features**: OCI + local path fetch/load + derived image build on `up` (see [cli-runtime-boundary](../conventions/cli-runtime-boundary.md)); forever-reject `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker` and privileged/securityOpt metadata ([0003](../decisions/0003-reject-docker-ood-privileged-tun.md)).
+- **Features**: OCI + local path fetch/load + derived image build on `up` (see [cli-runtime-boundary](../conventions/cli-runtime-boundary.md)); forever-reject `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker` and privileged/securityOpt metadata ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)).
 
 ## Reference config hotspots
 

@@ -159,7 +159,3 @@ devcontainer.json → Config resolver → [Features runner] → AppleContainerRu
 ```
 
 Only `AppleContainerRuntime` invokes `container`. Features: OCI fetch is embedded HTTPS; local path via DefaultFeatureFetcher (no ORAS/Node). Labels: `devcontainer.local_folder`, `devcontainer.config_file`, `devcontainer.config_hash`.
-
-Delivery planning: see `wiki/domain/phase-ladder.md`.
-
-**Spec:** realized contract `specs/adevcontainer/spec.md` (core + lifecycle + runArgs + hostRequirements + Features). No active changes. Archived: `specs/changes/archive/20260807-adevcontainer-core/`, `specs/changes/archive/20260807-lifecycle-runargs-host/`, `specs/changes/archive/20260807-features-runner/`. Next planning: Phase 6 stretch / advanced parity (optional).
