@@ -1,12 +1,17 @@
 import Foundation
 
 public struct ExecOptions: Sendable {
-    public var workspacePath: String
+    /// Managed container name/id (`--name`); nil → single managed / interactive picker.
+    public var name: String?
     public var command: [String]
     public var interactive: Bool
 
-    public init(workspacePath: String, command: [String], interactive: Bool = false) {
-        self.workspacePath = workspacePath
+    public init(
+        command: [String],
+        interactive: Bool = false,
+        name: String? = nil
+    ) {
+        self.name = name
         self.command = command
         self.interactive = interactive
     }
@@ -14,29 +19,27 @@ public struct ExecOptions: Sendable {
 
 public enum ExecCommand {
     /// Returns the remote process exit code.
+    ///
+    /// Selection is managed-only (`ManagedContainers.resolveSelection`). User and workdir
+    /// come from labels stamped at `up`/`clone` create.
     @discardableResult
     public static func run(
         options: ExecOptions,
-        runtime: AppleContainerRuntime,
-        localEnv: [String: String] = ProcessInfo.processInfo.environment
+        runtime: AppleContainerRuntime
     ) throws -> Int32 {
-        let resolved = try ConfigResolver.resolve(
-            workspacePath: options.workspacePath,
-            localEnv: localEnv
-        )
+        let info = try ManagedContainers.resolveSelection(name: options.name, runtime: runtime)
+        let labeledUser = info.labels[ContainerIdentity.labelRemoteUser]
+        let user = (labeledUser?.isEmpty == false) ? labeledUser : nil
+        let labeledWorkdir = info.labels[ContainerIdentity.labelWorkspaceFolder]
+        let workdir = (labeledWorkdir?.isEmpty == false) ? labeledWorkdir : nil
+        // containerEnv not stored on labels; Features PATH was baked at create.
+        let env: [String: String] = [:]
 
-        guard let info = try runtime.findByName(resolved.containerName) else {
-            throw CLIError(
-                code: CLIErrorCode.containerNotFound,
-                message: "No container for this workspace (expected \(resolved.containerName))",
-                hint: "Run 'adevcontainer up' first"
-            )
-        }
         guard info.isRunning else {
             throw CLIError(
                 code: CLIErrorCode.containerNotRunning,
                 message: "Container \(info.id) is not running (state: \(info.state))",
-                hint: "Run 'adevcontainer up' to start it"
+                hint: "Run 'adevcontainer start --name \(info.name)' or 'adevcontainer up' to start it"
             )
         }
 
@@ -44,9 +47,9 @@ public enum ExecCommand {
         let result = try runtime.exec(
             nameOrId: info.id,
             command: cmd,
-            user: resolved.config.effectiveUser,
-            workdir: resolved.config.workspaceFolder,
-            env: resolved.config.containerEnv,
+            user: user,
+            workdir: workdir,
+            env: env,
             interactive: options.interactive
         )
 

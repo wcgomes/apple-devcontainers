@@ -9,11 +9,16 @@ public struct SubstitutionContext: Sendable {
     public init(
         localWorkspaceFolder: String,
         containerWorkspaceFolder: String,
-        localEnv: [String: String] = ProcessInfo.processInfo.environment
+        localEnv: [String: String] = ProcessInfo.processInfo.environment,
+        localWorkspaceFolderBasename: String? = nil
     ) {
         let ws = (localWorkspaceFolder as NSString).standardizingPath
         self.localWorkspaceFolder = ws
-        self.localWorkspaceFolderBasename = (ws as NSString).lastPathComponent
+        if let override = localWorkspaceFolderBasename, !override.isEmpty {
+            self.localWorkspaceFolderBasename = override
+        } else {
+            self.localWorkspaceFolderBasename = (ws as NSString).lastPathComponent
+        }
         self.containerWorkspaceFolder = containerWorkspaceFolder
         self.localEnv = localEnv
     }

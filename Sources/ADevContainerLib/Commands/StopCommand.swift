@@ -1,22 +1,18 @@
 import Foundation
 
 public enum StopCommand {
+    /// Stop a managed container via `--name` or interactive picker.
     public static func run(
-        workspacePath: String,
+        name: String? = nil,
         runtime: AppleContainerRuntime,
-        localEnv: [String: String] = ProcessInfo.processInfo.environment
+        picker: InteractivePicker = .default
     ) throws {
-        let resolved = try ConfigResolver.resolve(
-            workspacePath: workspacePath,
-            localEnv: localEnv
+        let info = try ManagedContainers.resolveSelection(
+            name: name,
+            runtime: runtime,
+            picker: picker
         )
-        guard let info = try runtime.findByName(resolved.containerName) else {
-            throw CLIError(
-                code: CLIErrorCode.containerNotFound,
-                message: "No container for this workspace (expected \(resolved.containerName))",
-                hint: "Nothing to stop — run up first"
-            )
-        }
+
         if !info.isRunning {
             print("Container \(info.id) already stopped")
             return

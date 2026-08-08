@@ -1,0 +1,6 @@
+{
+  "id": "git",
+  "version": "1.0.0",
+  "name": "Git",
+  "description": "Fixture stand-in for ghcr.io/devcontainers/features/git"
+}

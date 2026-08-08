@@ -148,12 +148,147 @@ public struct AppleContainerRuntime: Sendable {
 
     /// Copy files between host and container (`container cp <source> <destination>`).
     /// Destination may be `containerId:/path` or a local path.
+    ///
+    /// Note: Apple `container cp` into a **named volume mount** is a silent no-op
+    /// (exit 0, no files). Prefer ``copyTreeIntoContainer(hostDir:containerId:destPath:)``
+    /// when the destination is on a volume mount.
     public func copy(from source: String, to destination: String) throws {
         let result = try invoke(["cp", source, destination], streamStderr: true)
         if result.succeeded { return }
         let alt = try invoke(["copy", source, destination], streamStderr: true)
         if alt.succeeded { return }
         throw mapFailure(result, action: "cp \(source) → \(destination)")
+    }
+
+    /// Copy a host directory tree into a path inside a running container via tar-pipe.
+    ///
+    /// Uses `(cd hostDir && tar cf - .) | container exec -i id tar xf - -C destPath`.
+    /// This writes correctly into named volume mounts where `container cp` is a no-op.
+    public func copyTreeIntoContainer(hostDir: String, containerId: String, destPath: String) throws {
+        let mkdir = try exec(nameOrId: containerId, command: ["mkdir", "-p", destPath])
+        if !mkdir.succeeded {
+            throw mapFailure(mkdir, action: "mkdir -p \(destPath) in \(containerId)")
+        }
+
+        if runner is FoundationProcessRunner {
+            try tarPipeIntoContainer(hostDir: hostDir, containerId: containerId, destPath: destPath)
+        } else {
+            // Mock / non-Foundation runners: record logical steps without a real pipe.
+            let hostTar = try runner.run(
+                executable: "/usr/bin/tar",
+                arguments: ["cf", "-", "-C", hostDir, "."],
+                environment: nil,
+                currentDirectory: nil
+            )
+            if !hostTar.succeeded {
+                throw CLIError(
+                    code: CLIErrorCode.populateFailed,
+                    message: "Host tar create failed (exit \(hostTar.exitCode))",
+                    hint: "Ensure /usr/bin/tar is available"
+                )
+            }
+            let extract = try runner.run(
+                executable: executablePath,
+                arguments: ["exec", "-i", containerId, "tar", "xf", "-", "-C", destPath],
+                environment: nil,
+                currentDirectory: nil
+            )
+            if !extract.succeeded {
+                throw mapFailure(extract, action: "exec tar extract into \(destPath)")
+            }
+        }
+    }
+
+    /// True when `path` exists inside the container (`test -e`).
+    public func pathExistsInContainer(containerId: String, path: String) throws -> Bool {
+        let result = try exec(nameOrId: containerId, command: ["test", "-e", path])
+        return result.succeeded
+    }
+
+    /// Stream host directory as tar into `container exec -i … tar xf - -C dest`.
+    private func tarPipeIntoContainer(hostDir: String, containerId: String, destPath: String) throws {
+        let pipe = Pipe()
+
+        let tar = Process()
+        tar.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        tar.arguments = ["cf", "-", "-C", hostDir, "."]
+        tar.standardOutput = pipe
+        let tarErr = Pipe()
+        tar.standardError = tarErr
+        tar.standardInput = FileHandle.nullDevice
+
+        let extract = Process()
+        extract.executableURL = URL(fileURLWithPath: executablePath)
+        extract.arguments = ["exec", "-i", containerId, "tar", "xf", "-", "-C", destPath]
+        extract.standardInput = pipe
+        let extractOut = Pipe()
+        let extractErr = Pipe()
+        extract.standardOutput = extractOut
+        extract.standardError = extractErr
+
+        final class DataBox: @unchecked Sendable {
+            var value = Data()
+        }
+        let tarErrBox = DataBox()
+        let extractOutBox = DataBox()
+        let extractErrBox = DataBox()
+        let group = DispatchGroup()
+
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            tarErrBox.value = tarErr.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            extractOutBox.value = extractOut.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            extractErrBox.value = extractErr.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+
+        do {
+            // Start consumer first so it is ready when tar writes.
+            try extract.run()
+            try tar.run()
+        } catch {
+            throw CLIError(
+                code: CLIErrorCode.populateFailed,
+                message: "Failed to launch tar-pipe into container: \(error.localizedDescription)",
+                hint: "Ensure /usr/bin/tar and Apple container CLI are available"
+            )
+        }
+
+        tar.waitUntilExit()
+        extract.waitUntilExit()
+        group.wait()
+
+        if tar.terminationStatus != 0 {
+            let detail = String(data: tarErrBox.value, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            throw CLIError(
+                code: CLIErrorCode.populateFailed,
+                message: "Host tar create failed (exit \(tar.terminationStatus))"
+                    + (detail.isEmpty ? "" : ": \(detail)"),
+                hint: "Ensure /usr/bin/tar can read the staging directory"
+            )
+        }
+        if extract.terminationStatus != 0 {
+            let err = String(data: extractErrBox.value, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let out = String(data: extractOutBox.value, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let detail = [err, out].filter { !$0.isEmpty }.joined(separator: " | ")
+            throw CLIError(
+                code: CLIErrorCode.populateFailed,
+                message: "container exec tar extract failed (exit \(extract.terminationStatus))"
+                    + (detail.isEmpty ? "" : ": \(detail)"),
+                hint: "Ensure the container is running and tar exists in the image"
+            )
+        }
     }
 
     /// Build a local image via `container build` (Features derived image path).
@@ -317,7 +452,11 @@ public struct AppleContainerRuntime: Sendable {
     }
 
     public func create(request: CreateRequest) throws -> String {
-        // Ensure named volumes exist
+        // Ensure workspace named volume (clone / volume-mode)
+        if request.workspaceMountMode == .volume {
+            try ensureVolume(name: request.workspaceBindHost)
+        }
+        // Ensure named volumes from config mounts
         for mount in request.mounts where mount.type == .volume {
             try ensureVolume(name: mount.source)
         }

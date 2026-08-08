@@ -27,13 +27,13 @@ public protocol ProcessRunning: Sendable {
         executable: String,
         arguments: [String],
         environment: [String: String]?,
-        currentDirectory: String?
+        currentDirectory: String?,
+        stdinData: Data?
     ) throws -> ProcessResult
 }
 
-public struct FoundationProcessRunner: ProcessRunning {
-    public init() {}
-
+extension ProcessRunning {
+    /// Convenience: no stdin payload.
     public func run(
         executable: String,
         arguments: [String],
@@ -45,6 +45,27 @@ public struct FoundationProcessRunner: ProcessRunning {
             arguments: arguments,
             environment: environment,
             currentDirectory: currentDirectory,
+            stdinData: nil
+        )
+    }
+}
+
+public struct FoundationProcessRunner: ProcessRunning {
+    public init() {}
+
+    public func run(
+        executable: String,
+        arguments: [String],
+        environment: [String: String]?,
+        currentDirectory: String?,
+        stdinData: Data?
+    ) throws -> ProcessResult {
+        try run(
+            executable: executable,
+            arguments: arguments,
+            environment: environment,
+            currentDirectory: currentDirectory,
+            stdinData: stdinData,
             streamStderr: false
         )
     }
@@ -55,6 +76,7 @@ public struct FoundationProcessRunner: ProcessRunning {
         arguments: [String],
         environment: [String: String]?,
         currentDirectory: String?,
+        stdinData: Data? = nil,
         streamStderr: Bool
     ) throws -> ProcessResult {
         let process = Process()
@@ -77,7 +99,20 @@ public struct FoundationProcessRunner: ProcessRunning {
         let errPipe = Pipe()
         process.standardOutput = outPipe
         process.standardError = errPipe
-        process.standardInput = FileHandle.nullDevice
+
+        let stdinPipe: Pipe?
+        if let stdinData {
+            let pipe = Pipe()
+            process.standardInput = pipe
+            stdinPipe = pipe
+            // Write after launch path is set up; write before run is fine for small payloads.
+            pipe.fileHandleForWriting.write(stdinData)
+            try? pipe.fileHandleForWriting.close()
+        } else {
+            process.standardInput = FileHandle.nullDevice
+            stdinPipe = nil
+        }
+        _ = stdinPipe
 
         // Drain pipes while the process runs to avoid pipe-buffer deadlock.
         final class DataBox: @unchecked Sendable {
@@ -138,7 +173,8 @@ public struct InteractiveProcessRunner: ProcessRunning {
         executable: String,
         arguments: [String],
         environment: [String: String]?,
-        currentDirectory: String?
+        currentDirectory: String?,
+        stdinData: Data?
     ) throws -> ProcessResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -156,9 +192,11 @@ public struct InteractiveProcessRunner: ProcessRunning {
             process.currentDirectoryURL = URL(fileURLWithPath: currentDirectory)
         }
 
+        // Interactive sessions use host stdio; ignore stdinData payload.
         process.standardInput = FileHandle.standardInput
         process.standardOutput = FileHandle.standardOutput
         process.standardError = FileHandle.standardError
+        _ = stdinData
 
         do {
             try process.run()

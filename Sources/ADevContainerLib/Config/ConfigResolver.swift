@@ -34,7 +34,10 @@ public enum ConfigResolver {
         workspacePath: String,
         configPath: String? = nil,
         localEnv: [String: String] = ProcessInfo.processInfo.environment,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        /// When set (e.g. clone), default `/workspaces/<basename>` and
+        /// `${localWorkspaceFolderBasename}` use this instead of the host path basename.
+        workspaceFolderBasename: String? = nil
     ) throws -> ResolvedWorkspace {
         let workspace = (workspacePath as NSString).standardizingPath
         let path = try configPath ?? ConfigDiscovery.discover(workspacePath: workspace, fileManager: fileManager)
@@ -43,7 +46,12 @@ public enum ConfigResolver {
         // Admit before deep work so forever-rejects fail fast (also re-admit after sub for mounts).
         try ConfigAdmissions.admit(raw)
 
-        let basename = (workspace as NSString).lastPathComponent
+        let basename: String = {
+            if let override = workspaceFolderBasename, !override.isEmpty {
+                return override
+            }
+            return (workspace as NSString).lastPathComponent
+        }()
         let defaultWorkspaceFolder = "/workspaces/\(basename)"
 
         // Pre-resolve workspaceFolder with a temporary context (container folder may self-ref).
@@ -52,7 +60,8 @@ public enum ConfigResolver {
             let ctx = SubstitutionContext(
                 localWorkspaceFolder: workspace,
                 containerWorkspaceFolder: defaultWorkspaceFolder,
-                localEnv: localEnv
+                localEnv: localEnv,
+                localWorkspaceFolderBasename: workspaceFolderBasename
             )
             provisionalFolder = try VariableSubstitutor.substitute(wf, context: ctx)
         } else {
@@ -62,7 +71,8 @@ public enum ConfigResolver {
         let context = SubstitutionContext(
             localWorkspaceFolder: workspace,
             containerWorkspaceFolder: provisionalFolder,
-            localEnv: localEnv
+            localEnv: localEnv,
+            localWorkspaceFolderBasename: workspaceFolderBasename
         )
 
         let substituted = try VariableSubstitutor.substituteAny(raw, context: context)
@@ -82,10 +92,16 @@ public enum ConfigResolver {
             configPath: path,
             configName: resolved.name
         )
-        let labels = ContainerIdentity.labels(
+        let configVolumeNames = resolved.mounts
+            .filter { $0.type == .volume }
+            .map(\.source)
+        let labels = ContainerIdentity.bindModeLabels(
             workspacePath: workspace,
             configPath: path,
-            configHash: hash
+            configHash: hash,
+            workspaceFolder: resolved.workspaceFolder,
+            remoteUser: resolved.effectiveUser,
+            configVolumeNames: configVolumeNames
         )
 
         return ResolvedWorkspace(

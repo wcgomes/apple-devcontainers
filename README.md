@@ -1,10 +1,12 @@
-# apple-dev-containers (adevcontainer)
+# Apple Dev Container CLI (adevcontainer)
 
 [![CI](https://github.com/wcgomes/apple-dev-containers/actions/workflows/ci.yml/badge.svg)](https://github.com/wcgomes/apple-dev-containers/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-156%2B-brightgreen)](https://github.com/wcgomes/apple-dev-containers)
+[![tests](https://img.shields.io/badge/tests-245%2B-brightgreen)](https://github.com/wcgomes/apple-dev-containers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Native Swift CLI that reads `devcontainer.json` and runs workspaces on **Apple `container`** (only host runtime dependency). Upstream `@devcontainers/cli` is Node/Docker-oriented; this is greenfield Swift.
+Native Swift CLI that reads `devcontainer.json` and runs workspaces on **Apple `container`**. 
+
+Supports clone a git repo straight into a container volume (faster disk I/O than bind mounts), or `up` an existing checkout; plus lifecycle hooks and Dev Container Features.
 
 ## Install
 
@@ -47,49 +49,56 @@ adevcontainer doctor
 
 | Command | Purpose |
 |---------|---------|
-| `adevcontainer doctor` | Verify Apple `container` binary, version, system status |
-| `adevcontainer up [--json] [--recreate] [--skip-pull]` | Create / start / reuse workspace container |
-| `adevcontainer exec [-it] [--] [cmd...]` | Run a command, or interactive shell (`exec` / `exec -it`) |
-| `adevcontainer stop` | Stop the workspace container |
-| `adevcontainer delete` | Remove the workspace container only |
-| `adevcontainer prune` | Remove container, named volumes from config, and config image |
-| `adevcontainer inspect` | Identity, state, labels, `portsAttributes` metadata |
-
-Global: `-w, --workspace <path>` (default: current directory).
+| `adevcontainer doctor` | Check Apple `container` readiness |
+| `adevcontainer up [-w path]` | Create/start workspace from a **host** checkout (only command that uses `-w`; default cwd) |
+| `adevcontainer clone <git-url>` | Clone a git repo into a **named volume** and start the devcontainer (HTTPS or SSH) |
+| `adevcontainer list [--json]` | List managed containers |
+| `adevcontainer start \| stop \| delete \| prune \| inspect [--name]` | Lifecycle by container name (or interactive picker) |
+| `adevcontainer exec [-it] [--name] [--] [cmd…]` | Shell or command in a running managed container |
 
 ### Quick start
 
+**Local checkout** (`up`):
+
 ```bash
 adevcontainer up
-adevcontainer exec -- echo hello
-adevcontainer exec            # interactive TTY shell (bash)
-adevcontainer inspect
+adevcontainer exec -it
 adevcontainer stop
-adevcontainer delete
-adevcontainer prune
 ```
+
+**Clone a repository** (no local checkout required — source lives in a volume for better I/O on Apple `container`):
+
+```bash
+adevcontainer clone https://github.com/org/repo.git   # or git@github.com:org/repo.git
+adevcontainer list
+adevcontainer exec --name <name> -it
+adevcontainer prune --name <name>
+```
+
+Uses your Mac git credentials (HTTPS helpers / SSH agent), confirms author identity on a TTY, and ensures `git` in the image when needed. Work, commit, and push inside the container.
 
 ### Config and workspace behavior
 
-Config discovery order: `.devcontainer/devcontainer.json`, then `.devcontainer.json`.
+Config: `.devcontainer/devcontainer.json`, else `.devcontainer.json`.
 
-- **Config hash mismatch** with an existing container → `up` errors. Use `up --recreate` to delete and recreate.
-- **Named volumes** from config: `up` lists first and **reuses** an existing volume (status “already exists — reusing”); it never fails solely because the volume already exists.
-- **`delete` vs `prune`:** `delete` removes only the workspace container. `prune` also deletes named volumes listed in config `mounts` (`type=volume`) and the config `image` reference. Neither deletes bind-mount host paths nor runs global `volume prune` / `image prune`. Missing resources are skipped; exit non-zero only if deleting an existing resource fails.
-- **Progress** on long operations (`up`, and runtime steps under stop/delete/prune) prints on **stderr** (`==> …`) and tees Apple `container` stderr there. `--json` keeps stdout pure JSON. `ADEVCONTAINER_QUIET=1` silences progress.
+- **`up`** bind-mounts the host folder. **`clone`** uses volume `adev-*-ws` (no host checkout to edit).
+- Config hash mismatch → `up` errors; use `--recreate`.
+- **`delete`** = container only. **`prune`** = container + named volumes (including clone `*-ws`) + config image. Never deletes host bind paths.
+- Progress on **stderr** (`==> …`). `ADEVCONTAINER_QUIET=1` silences it. `--json` keeps stdout clean.
 
 ### Lifecycle hooks
 
-On **fresh create**, hooks run via `container exec` in order:
+Fresh create (`up` or `clone`, after the tree exists):
 
 `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand`
 
-| `up` path | Hooks |
-|-----------|--------|
-| Fresh create | full order above; container is **deleted** if any create-path hook fails |
+| Path | Hooks |
+|------|--------|
+| Fresh create | full order; container deleted if any fail |
 | Reuse running | none |
-| Start stopped | `postStartCommand` only; failure fails `up` but does **not** delete the container |
-| `postAttachCommand` | admitted; **not** run on `up`; status: `postAttach skipped (no attach hook)` |
+| `up` start stopped | `postStartCommand` only |
+| `start` (managed) | none |
+| `postAttachCommand` | admitted, not run by this CLI |
 
 ### runArgs allowlist
 
@@ -108,23 +117,23 @@ Mapped onto `container create` (empty/`[]` OK; `=VALUE` or two-token):
 
 ### hostRequirements
 
-Preflight parses `memory` (`8gb` / `8192mb`) and `cpus`:
+Preflight on **`up` and `clone`** parses `memory` (`8gb` / `8192mb`) and `cpus`:
 
-- **Fail `up`** on capacity shortfall or unreadable host
+- **Fail `up` / `clone`** on capacity shortfall or unreadable host
 - When host OK, pass requested limits to `container create` (`-m`/`-c`); absent → no limit flags
 - **Warn** that `gpu` is unsupported (does not fail alone)
 - **Fail** on unparseable values or unknown keys
 
 ### Features (OCI + local path)
 
-`up` admits a top-level `features` object map of **feature ref → options**. Refs may be:
+`up` and `clone` admit a top-level `features` object map of **feature ref → options**. Refs may be:
 
 - **OCI** — e.g. `ghcr.io/devcontainers/features/node:1`
 - **Local path** — `./…`, `../…`, absolute `/…`, or `file://…` (resolved relative to the **workspace root**; directory must contain `devcontainer-feature.json` + `install.sh`)
 
 The Features path mirrors official Dev Containers (Dockerfile + `container build`) on **native arm64** — never `--rosetta` by default:
 
-1. **One-time consent** (only if needed): when Apple BuildKit still has `build.rosetta=true` (or the key is missing), `up` explains and asks once to set `build.rosetta=false` so feature image builds do not require Rosetta. Already `false` → silent. Decline → fail. Non-interactive: set `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1` to auto-accept, or set the config yourself.
+1. **One-time consent** (only if needed): when Apple BuildKit still has `build.rosetta=true` (or the key is missing), `up` / `clone` explains and asks once to set `build.rosetta=false` so feature image builds do not require Rosetta. Already `false` → silent. Decline → fail. Non-interactive: set `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1` to auto-accept, or set the config yourself.
 2. Loads local path packages from disk into the feature cache, or fetches OCI artifacts over HTTPS (embedded registry client — **not** `container image pull`, ORAS, or Node).
 3. Orders installs via `dependsOn` / `installsAfter` (id last-segment match so `./x/sample-a` satisfies `…/sample-a:1`) and merges runtime contributions (`init`, `capAdd`, `containerEnv` with **config wins**, mounts, lifecycle hooks). On create, `${PATH}` / `$PATH` in env values are expanded (Apple `container` does not expand them).
 4. Generates a Dockerfile and runs `container build --platform linux/arm64` to a deterministic `adev-{base}:{hash12}` tag (empty base → `adevcontainer:{hash12}`; no `adevcontainer/features:` prefix; reuse when the tag already exists).
@@ -136,7 +145,7 @@ The Features path mirrors official Dev Containers (Dockerfile + `container build
 
 ### VS Code attach
 
-After `up`, the container is running and listable. Attach manually with experimental **Attach to Running Apple Container**. This CLI does not auto-attach.
+After `up` or `clone`, the container is running and listable (`adevcontainer list`). Attach manually with experimental **Attach to Running Apple Container**. This CLI does not auto-attach.
 
 ### Non-goals (current)
 
@@ -150,7 +159,7 @@ After `up`, the container is running and listable. Attach manually with experime
 devcontainer.json → Config resolver → [Features runner] → AppleContainerRuntime → container CLI
 ```
 
-Only `AppleContainerRuntime` invokes `container`. Labels: `devcontainer.local_folder`, `devcontainer.config_file`, `devcontainer.config_hash`.
+Only `AppleContainerRuntime` shells out to `container`.
 
 ## Contributing
 
@@ -178,7 +187,7 @@ Command Line Tools hosts do not ship `XCTest.framework`, so the suite of record 
 swift run adevcontainerTests
 ```
 
-~156+ offline tests (discovery, JSONC, substitution, admission, lifecycle, runArgs, hostRequirements, Features runner mocks + local path fixtures, runtime argv mocks, commands, optional real-container integration).
+Covers discovery, JSONC, substitution, admission, lifecycle, runArgs, hostRequirements, Features, runtime mocks, commands, and clone/volume-mode (plus optional real-container integration).
 
 - Integration skips cleanly if Apple `container` is unavailable.
 - Local features E2E runs when Apple `container` is up (no ghcr gate).

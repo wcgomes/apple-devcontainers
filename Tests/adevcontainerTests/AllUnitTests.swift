@@ -33,20 +33,39 @@ final class MockProcessRunner: ProcessRunning, @unchecked Sendable {
     var calls: [MockProcessCall] = []
     var results: [ProcessResult] = []
     var handlers: [([String]) -> ProcessResult?] = []
+    /// Optional handlers that also receive stdin (for credential fill tests).
+    var stdinHandlers: [([String], Data?) -> ProcessResult?] = []
     var defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
 
     struct MockProcessCall: Equatable {
         var executable: String
         var arguments: [String]
+        var stdinData: Data?
+        var environment: [String: String]?
+
+        static func == (lhs: MockProcessCall, rhs: MockProcessCall) -> Bool {
+            lhs.executable == rhs.executable
+                && lhs.arguments == rhs.arguments
+                && lhs.stdinData == rhs.stdinData
+        }
     }
 
     func run(
         executable: String,
         arguments: [String],
         environment: [String: String]?,
-        currentDirectory: String?
+        currentDirectory: String?,
+        stdinData: Data?
     ) throws -> ProcessResult {
-        calls.append(MockProcessCall(executable: executable, arguments: arguments))
+        calls.append(MockProcessCall(
+            executable: executable,
+            arguments: arguments,
+            stdinData: stdinData,
+            environment: environment
+        ))
+        for handler in stdinHandlers {
+            if let r = handler(arguments, stdinData) { return r }
+        }
         for handler in handlers {
             if let r = handler(arguments) { return r }
         }
@@ -234,6 +253,19 @@ nonisolated(unsafe) let substitutionTests: [(String, () throws -> Void)] = [
             try VariableSubstitutor.substitute("${containerWorkspaceFolder}", context: ctx),
             "/workspaces/proj"
         )
+    }),
+    ("localWorkspaceFolderBasenameOverride", {
+        let ctx = SubstitutionContext(
+            localWorkspaceFolder: "/tmp/adev-clone-cfg-uuid",
+            containerWorkspaceFolder: "/workspaces/sample-repo",
+            localEnv: [:],
+            localWorkspaceFolderBasename: "sample-repo"
+        )
+        try MiniTest.expectEqual(
+            try VariableSubstitutor.substitute("${localWorkspaceFolderBasename}", context: ctx),
+            "sample-repo"
+        )
+        try MiniTest.expectEqual(ctx.localWorkspaceFolderBasename, "sample-repo")
     }),
     ("localEnvSubstitution", {
         let ctx = SubstitutionContext(
@@ -1073,6 +1105,68 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
             "/ws/.devcontainer/devcontainer.json"
         )
         try MiniTest.expectEqual(labels[ContainerIdentity.labelConfigHash], "deadbeef")
+        try MiniTest.expectEqual(labels[ContainerIdentity.labelManaged], "adevcontainer")
+        try MiniTest.expectEqual(labels[ContainerIdentity.labelWorkspaceMode], "bind")
+        try MiniTest.expect(labels[ContainerIdentity.labelGitURL] == nil)
+        try MiniTest.expect(labels[ContainerIdentity.labelWorkspaceVolume] == nil)
+    }),
+    ("bindModeLabelsDay2Fields", {
+        let labels = ContainerIdentity.bindModeLabels(
+            workspacePath: "/Projects/app",
+            configPath: "/Projects/app/.devcontainer/devcontainer.json",
+            configHash: "abc",
+            workspaceFolder: "/workspaces/app",
+            remoteUser: "vscode",
+            configVolumeNames: ["data-vol"]
+        )
+        try MiniTest.expectEqual(labels[ContainerIdentity.labelManaged], "adevcontainer")
+        try MiniTest.expectEqual(labels[ContainerIdentity.labelWorkspaceMode], "bind")
+        try MiniTest.expectEqual(labels[ContainerIdentity.labelLocalFolder], "/Projects/app")
+        try MiniTest.expectEqual(labels[ContainerIdentity.labelWorkspaceFolder], "/workspaces/app")
+        try MiniTest.expectEqual(labels[ContainerIdentity.labelRemoteUser], "vscode")
+        try MiniTest.expectEqual(labels[ContainerIdentity.labelConfigVolumes], "data-vol")
+        try MiniTest.expect(labels[ContainerIdentity.labelGitURL] == nil)
+        try MiniTest.expect(labels[ContainerIdentity.labelWorkspaceVolume] == nil)
+    }),
+    ("bindModeLabelsRemoteUserEmptyWhenNil", {
+        let labels = ContainerIdentity.bindModeLabels(
+            workspacePath: "/ws",
+            configPath: "/ws/.devcontainer/devcontainer.json",
+            configHash: "h",
+            workspaceFolder: "/workspaces/ws",
+            remoteUser: nil
+        )
+        try MiniTest.expectEqual(labels[ContainerIdentity.labelRemoteUser], "")
+        try MiniTest.expect(labels[ContainerIdentity.labelConfigVolumes] == nil)
+    }),
+    ("resolverBindModeLabelsIncludeManaged", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "vscode",
+          "workspaceFolder": "/workspaces/app",
+          "mounts": [
+            { "source": "cfg-vol", "target": "/data", "type": "volume" }
+          ]
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        try MiniTest.expectEqual(
+            resolved.labels[ContainerIdentity.labelManaged],
+            ContainerIdentity.managedValue
+        )
+        try MiniTest.expectEqual(
+            resolved.labels[ContainerIdentity.labelWorkspaceMode],
+            ContainerIdentity.workspaceModeBind
+        )
+        try MiniTest.expectEqual(resolved.labels[ContainerIdentity.labelRemoteUser], "vscode")
+        try MiniTest.expectEqual(resolved.labels[ContainerIdentity.labelWorkspaceFolder], "/workspaces/app")
+        try MiniTest.expectEqual(resolved.labels[ContainerIdentity.labelConfigVolumes], "cfg-vol")
+        try MiniTest.expectEqual(resolved.labels[ContainerIdentity.labelLocalFolder], resolved.workspacePath)
+        try MiniTest.expectEqual(resolved.labels[ContainerIdentity.labelConfigFile], resolved.configPath)
+        try MiniTest.expect(resolved.labels[ContainerIdentity.labelGitURL] == nil)
+        try MiniTest.expect(resolved.labels[ContainerIdentity.labelWorkspaceVolume] == nil)
     }),
     ("foundationProcessRunnerDrainsLargeStdout", {
         // >64KiB would deadlock if waitUntilExit ran before draining pipes.

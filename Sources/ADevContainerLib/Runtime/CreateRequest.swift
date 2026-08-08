@@ -33,11 +33,22 @@ public struct MountSpec: Equatable, Sendable {
 }
 
 public struct CreateRequest: Equatable, Sendable {
+    /// How the container workspace folder is mounted.
+    public enum WorkspaceMountMode: String, Sendable, Equatable {
+        /// Host directory bind (default for `up`).
+        case bind
+        /// Named volume (clone / volume-mode).
+        case volume
+    }
+
     public var name: String
     public var image: String
     public var labels: [String: String]
+    /// Host path (bind mode) or volume name (volume mode).
     public var workspaceBindHost: String
     public var workspaceBindTarget: String
+    /// Workspace mount source kind. Default `.bind` preserves `up` behavior.
+    public var workspaceMountMode: WorkspaceMountMode
     public var env: [String: String]
     public var user: String?
     public var workdir: String?
@@ -59,6 +70,7 @@ public struct CreateRequest: Equatable, Sendable {
         labels: [String: String],
         workspaceBindHost: String,
         workspaceBindTarget: String,
+        workspaceMountMode: WorkspaceMountMode = .bind,
         env: [String: String] = [:],
         user: String? = nil,
         workdir: String? = nil,
@@ -76,6 +88,7 @@ public struct CreateRequest: Equatable, Sendable {
         self.labels = labels
         self.workspaceBindHost = workspaceBindHost
         self.workspaceBindTarget = workspaceBindTarget
+        self.workspaceMountMode = workspaceMountMode
         self.env = env
         self.user = user
         self.workdir = workdir
@@ -97,9 +110,11 @@ public struct CreateRequest: Equatable, Sendable {
             args += ["-l", "\(k)=\(v)"]
         }
 
-        // Workspace bind
+        // Workspace mount (host bind or named volume)
+        let workspaceType: MountSpec.MountType =
+            workspaceMountMode == .volume ? .volume : .bind
         args += ["--mount", MountSpec(
-            type: .bind,
+            type: workspaceType,
             source: workspaceBindHost,
             target: workspaceBindTarget,
             readonly: false
@@ -228,6 +243,7 @@ public struct CreateRequest: Equatable, Sendable {
             labels: labels,
             workspaceBindHost: (workspacePath as NSString).standardizingPath,
             workspaceBindTarget: resolved.workspaceFolder,
+            workspaceMountMode: .bind,
             env: resolved.containerEnv,
             user: resolved.effectiveUser,
             workdir: resolved.workspaceFolder,
@@ -235,6 +251,45 @@ public struct CreateRequest: Equatable, Sendable {
             publishPorts: resolved.forwardPorts,
             portsAttributes: resolved.portsAttributes,
             runArgs: resolved.runArgs,
+            memoryLimit: memoryLimit,
+            cpuLimit: cpuLimit,
+            platform: platform,
+            configHash: configHash
+        )
+    }
+
+    /// Volume-mode create: workspace is a named volume (clone), not a host bind.
+    ///
+    /// - Parameter enableSSHForward: When true, ensures `AllowlistedRunArg.ssh` is present
+    ///   so Apple `container create --ssh` forwards the host agent (SSH after create git).
+    public static func fromVolumeMode(
+        resolved: ResolvedDevContainerConfig,
+        identityName: String,
+        labels: [String: String],
+        configHash: String,
+        workspaceVolumeName: String,
+        platform: String? = ContainerPlatform.defaultLinuxPlatform,
+        enableSSHForward: Bool = false
+    ) -> CreateRequest {
+        let (memoryLimit, cpuLimit) = mergeMemoryCpuLimits(from: resolved)
+        var runArgs = resolved.runArgs
+        if enableSSHForward, !runArgs.contains(.ssh) {
+            runArgs.append(.ssh)
+        }
+        return CreateRequest(
+            name: identityName,
+            image: resolved.image,
+            labels: labels,
+            workspaceBindHost: workspaceVolumeName,
+            workspaceBindTarget: resolved.workspaceFolder,
+            workspaceMountMode: .volume,
+            env: resolved.containerEnv,
+            user: resolved.effectiveUser,
+            workdir: resolved.workspaceFolder,
+            mounts: resolved.mounts,
+            publishPorts: resolved.forwardPorts,
+            portsAttributes: resolved.portsAttributes,
+            runArgs: runArgs,
             memoryLimit: memoryLimit,
             cpuLimit: cpuLimit,
             platform: platform,
