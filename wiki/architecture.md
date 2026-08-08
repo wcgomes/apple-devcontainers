@@ -56,7 +56,7 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
 | `up` | **Bind-mode** only: resolve config from host workspace, create/start/reuse; ensure named volumes; workspace bind; Features; lifecycle hooks in scope. Optional `--vscode` after success (see [VS Code flow](#vs-code-flow)) |
 | `clone <git-url>` | **Volume-mode** workspace (VS Code clone-in-volume analogue): host sparse/shallow **config-only** fetch → resolve (workspaceFolder default + `${localWorkspaceFolderBasename}` = **git URL repo basename**, not temp dir name) → **author identity before Features/create:** host `git -C <sparse-temp> config --get user.name/email` (includeIf-aware; env `ADEVCONTAINER_GIT_AUTHOR_*`); both env → skip prompt; TTY confirm/override or collect; non-TTY silent + warn if incomplete → **ensure Features `ghcr.io/devcontainers/features/git:1` when no `git`/`common-utils`** (Features path, not apt; `up` unchanged) → ensure workspace volume → create + start (**SSH:** inject `create --ssh` when `SSH_AUTH_SOCK` set) → **in-container full `git clone`** + verify `.git` (**HTTPS:** host `git credential fill` one-shot → guest `credential.helper store`; no GCM-in-guest; no host full+tar happy path) → author both → guest `--local`; else warn, no partial → create-path hooks; always clean config temps. Optional `--vscode` after success |
 | `list [--json]` | Managed containers only (`devcontainer.managed=adevcontainer`) |
-| `start [--name]` | Start a managed stopped container via `--name` or interactive picker; **volume-mode: no lifecycle hooks**; bind start-stopped `postStart` only via `up` path (not bare `start`). Optional `--vscode` after success |
+| `start [--name]` | Start a managed stopped container via `--name` or interactive picker; **no create-path / postStart hooks** (bind start-stopped `postStart` only via `up`). Optional `--vscode` after success; for postAttach, loads config from labels (bind: host `local_folder`+`config_file`; volume: in-container config path) and merges feature postAttach from image `devcontainer.metadata` (load errors → treat absent, do not fail start) |
 | `exec [--name]` | Run command/shell in running managed container (`-it` / empty cmd → interactive TTY, default `bash`). Selection: `--name` or picker (no `-w`). User/workdir from labels `devcontainer.remote_user` / `devcontainer.workspace_folder` when set |
 | `stop [--name]` | Stop managed container (`--name` or picker; no `-w`) |
 | `delete [--name]` | Remove **container only** (`--name` or picker; no `-w`) |
@@ -89,10 +89,10 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
   | Path | Hooks |
   |------|--------|
   | Fresh create (`up` bind or `clone` volume) | `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand`; delete container if any create-path hook fails |
-  | Reuse running | no lifecycle hooks |
+  | Reuse running | no create-path hooks; feature postAttach still mergeable from image metadata when `--vscode` open succeeds |
   | Bind start-stopped (`up`) | `postStartCommand` only; failure fails `up` but does **not** delete |
-  | Volume-mode `start` | **no hooks** |
-  | `postAttachCommand` | admitted; **not** run on `up`/`clone`/`start` (status: skipped — no attach hook) |
+  | Bare `start` | no create-path / postStart; postAttach only if gated open succeeds (config from labels; feature hooks from image metadata) |
+  | `postAttachCommand` | **implemented** gate on `up`/`start`/`clone`: **RUNS** config then feature postAttach only after successful `--vscode` open; **SKIP** (+ status when any present) if flag absent or open soft-fails; non-zero → fail command, **keep** container. Not “always skip forever.” Spec: [`specs/changes/vscode-open-flag/`](../specs/changes/vscode-open-flag/) |
 
 - **runArgs allowlist** and **hostRequirements** enforce+apply: [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md). Contract: [`specs/adevcontainer/spec.md`](../specs/adevcontainer/spec.md).
 - Long-lived devcontainers use keep-alive entrypoint **`/bin/sleep` infinity** so the container stays up for `exec`/attach.
@@ -113,12 +113,16 @@ Full runner steps, reject list, and progress lines: [cli-runtime-boundary.md](co
 
 ## VS Code flow
 
-**Product:** after successful lifecycle on `up`, `start`, or `clone`, optional **`--vscode`** best-effort opens VS Code on the host. Without the flag, manual attach (same URI recipe) remains valid.
+**Product (implemented):** after successful lifecycle on `up`, `start`, or `clone`, optional **`--vscode`** best-effort opens VS Code on the host. Without the flag, manual attach (same URI recipe) remains valid and does **not** run postAttach.
 
 **Behavior (`--vscode`):**
 - Runs only after lifecycle success (create/start/reuse path completed).
 - Invokes: `code --new-window --folder-uri "vscode-remote://apple-container+${HEX}${FOLDER}"`.
-- **Soft-fail:** missing `code` on PATH or launch failure → stderr warn; command exit stays success (lifecycle unchanged).
+- **Soft-fail open:** missing `code` on PATH or launch failure → stderr warn; open alone does not fail the command and must **not** run postAttach.
+- **postAttach gate (shipped):** successful open is the CLI attach approximation → run **config** `postAttachCommand` then **feature** postAttach via exec. **Skip** (one status line when any postAttach present) if flag absent or open soft-fails. postAttach non-zero → fail command, **keep** container (fail-keep). Approximation only — no wait for VS Code Server / IDE-confirmed attach; manual UI attach does not trigger postAttach.
+- **Config source for postAttach:**
+  - `up` / `clone`: in-memory resolved config; on **reuse/restart**, merge feature postAttach from image `devcontainer.metadata` (Features not re-run).
+  - bare `start`: load from labels — bind: host paths `local_folder` + `config_file`; volume: cat stamped config in-container; then merge feature postAttach from image metadata. Load failure → treat postAttach absent (start success preserved).
 - **Folder:** resolved `remoteWorkspaceFolder` / label `devcontainer.workspace_folder`; when config omits `workspaceFolder`, default is `/workspaces/<basename>`.
 
 **Prereqs (host):** VS Code + extension `ms-vscode-remote.remote-containers`; setting `dev.containers.experimentalAppleContainerSupport: true`.
@@ -141,7 +145,7 @@ code --new-window --folder-uri "vscode-remote://apple-container+${HEX}${FOLDER}"
 - Extension UI command `remote-containers.attachToAppleContainer` opens the **remote authority only** (no folder) → empty/no-folder window UX gap; the `--folder-uri` recipe avoids that.
 - **Optional nameConfig** (improves attach defaults): `~/Library/Application Support/Code/User/globalStorage/ms-vscode-remote.remote-containers/nameConfigs/<containerName>.json` with `workspaceFolder` + `remoteUser` (from labels/`remoteUser`). Not required if the folder path is already in the URI.
 
-Not full Dev Containers up/rebuild parity; volume-mode is product `clone`, not the extension’s clone-in-volume. Spec WIP: [`specs/changes/vscode-open-flag/`](../specs/changes/vscode-open-flag/). Gaps: [devcontainer-apple-gaps.md](domain/devcontainer-apple-gaps.md).
+Not full Dev Containers up/rebuild parity; volume-mode is product `clone`, not the extension’s clone-in-volume. Design/spec: [`specs/changes/vscode-open-flag/`](../specs/changes/vscode-open-flag/). Gaps: [devcontainer-apple-gaps.md](domain/devcontainer-apple-gaps.md).
 
 ## Reference config
 

@@ -64,16 +64,15 @@ public enum UpCommand {
             } else if options.recreate {
                 try runtime.delete(nameOrId: existing.id, force: true)
             } else if existing.isRunning {
-                // Reuse running: no feature fetch/build, no lifecycle hooks.
+                // Reuse running: no feature fetch/build; postAttach gated after open.
                 StatusPrinter.status("Reusing running container \(existing.name)")
-                LifecycleRunner.emitPostAttachSkipIfNeeded(config: resolved.config)
-                StatusPrinter.status("Ready")
-                return finish(
+                return try finish(
                     options: options,
                     id: existing.id,
                     name: existing.name,
                     config: resolved.config,
-                    image: existing.image ?? resolved.config.image
+                    image: existing.image ?? resolved.config.image,
+                    runtime: runtime
                 )
             } else {
                 // Start stopped: no rebuild (features already baked on create).
@@ -84,14 +83,13 @@ public enum UpCommand {
                     config: resolved.config,
                     runtime: runtime
                 )
-                LifecycleRunner.emitPostAttachSkipIfNeeded(config: resolved.config)
-                StatusPrinter.status("Ready")
-                return finish(
+                return try finish(
                     options: options,
                     id: existing.id,
                     name: existing.name,
                     config: resolved.config,
-                    image: existing.image ?? resolved.config.image
+                    image: existing.image ?? resolved.config.image,
+                    runtime: runtime
                 )
             }
         }
@@ -174,26 +172,27 @@ public enum UpCommand {
             runtime: runtime
         )
 
-        LifecycleRunner.emitPostAttachSkipIfNeeded(config: effectiveConfig)
-        StatusPrinter.status("Ready")
-        return finish(
+        return try finish(
             options: options,
             id: id,
             name: resolved.containerName,
             config: effectiveConfig,
-            image: effectiveConfig.image
+            image: effectiveConfig.image,
+            runtime: runtime
         )
     }
 
+    /// Open (optional) → postAttach gate → Ready. postAttach is never before open when `--vscode`.
     private static func finish(
         options: UpOptions,
         id: String,
         name: String,
         config: ResolvedDevContainerConfig,
-        image: String
-    ) -> UpResult {
+        image: String,
+        runtime: AppleContainerRuntime
+    ) throws -> UpResult {
         let result = successResult(id: id, name: name, config: config)
-        VSCodeOpen.openIfRequested(
+        let openOutcome = VSCodeOpen.openIfRequested(
             options.openVSCode,
             target: VSCodeOpenTarget(
                 containerId: result.containerId,
@@ -203,6 +202,20 @@ public enum UpCommand {
                 remoteUser: result.remoteUser
             )
         )
+        // Reuse/restart never re-runs Features; merge feature postAttach from image metadata.
+        var postAttachConfig = config
+        PostAttachConfigLoader.mergeFeaturePostAttach(
+            into: &postAttachConfig,
+            imageRef: image.isEmpty ? nil : image,
+            runtime: runtime
+        )
+        try LifecycleRunner.applyPostAttachGate(
+            openOutcome: openOutcome,
+            containerId: id,
+            config: postAttachConfig,
+            runtime: runtime
+        )
+        StatusPrinter.status("Ready")
         return result
     }
 

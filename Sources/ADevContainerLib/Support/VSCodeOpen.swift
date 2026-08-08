@@ -33,6 +33,22 @@ public enum VSCodeOpenOutcome: Equatable, Sendable {
     case skippedMissingImage
     case skippedMissingId
     case launchFailed(message: String)
+
+    /// Host `code` launch succeeded — CLI attach hook for postAttach gating.
+    public var isOpenSuccess: Bool {
+        if case .opened = self { return true }
+        return false
+    }
+
+    /// `--vscode` was set but open soft-failed or skipped (not a lifecycle failure by itself).
+    public var isOpenSoftFail: Bool {
+        switch self {
+        case .notRequested, .opened:
+            return false
+        case .skippedMissingCode, .skippedEmptyFolder, .skippedMissingImage, .skippedMissingId, .launchFailed:
+            return true
+        }
+    }
 }
 
 // MARK: - URI builder

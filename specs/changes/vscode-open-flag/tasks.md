@@ -10,6 +10,8 @@ Package root: repository root
 
 Assume Swift 6.x / SPM already available. Do **not** install VS Code or extensions as task steps. Test-first: write failing tests before implementation in each section. Mock the host `code` launcher so the default suite needs no real VS Code.
 
+**Status note:** Sections 1–5 (open flag, URI, launcher, command wiring, docs for open) are **done**. Section 6+ is the **postAttach delta**: code already ships `--vscode` open without gated postAttach execution — implement the remaining gap without unchecking completed open work.
+
 ---
 
 ## 1. URI builder and open inputs
@@ -76,15 +78,70 @@ Assume Swift 6.x / SPM already available. Do **not** install VS Code or extensio
 
 ---
 
-## 5. Docs and final gate
+## 5. Docs and final gate (open path)
 
 - [x] 5.1 [P] README: document `--vscode` on up/start/clone, host prereqs (VS Code + remote-containers + experimental Apple support), soft-fail, manual attach still valid, no full Dev Containers parity claim (path: `README.md`)
 - [x] 5.2 [P] Confirm help text matches README prereq tone (path: `Sources/adevcontainer/AdevcontainerMain.swift`)
 - [x] 5.3 Run full unit suite; fix regressions (path: `Tests/adevcontainerTests/`)
 
-## Checkpoint — docs / suite
+## Checkpoint — docs / suite (open)
 - [x] verify README/help mention soft-fail and prereqs without parity overclaim
 - [x] verify `swift run adevcontainerTests` green for default (mocked) suite
 - [x] Grep: no hard-fail path that maps open failure to non-zero lifecycle exit solely due to `--vscode`
 
-(End of file - total 88 lines)
+---
+
+## 6. postAttach gate — LifecycleRunner and open result (test-first)
+
+- [x] 6.1 Write failing tests: open result distinguishes **success** vs **soft-fail** (missing code, launch fail, missing id/image/folder) so callers can gate postAttach (path: `Tests/adevcontainerTests/`)
+- [x] 6.2 Write failing tests: `LifecycleRunner` (or successor helper) runs config `postAttachCommand` then `featurePostAttachCommands` via exec with `failKeepContainer`; labels match other feature stages (path: `Tests/adevcontainerTests/`)
+- [x] 6.3 Write failing tests: skip helpers — no attach hook status when `--vscode` absent and postAttach present; open-did-not-succeed skip when open soft-failed and postAttach present; **no** skip line when postAttach absent (path: `Tests/adevcontainerTests/`)
+- [x] 6.4 Write failing tests: postAttach non-zero → structured error naming postAttach; container **not** deleted (path: `Tests/adevcontainerTests/`)
+- [x] 6.5 Ensure open path returns a success/soft-fail outcome usable by commands (extend `VSCodeOpen` / launcher result if needed) (path: `Sources/ADevContainerLib/Support/VSCodeOpen.swift`)
+- [x] 6.6 Implement `runPostAttach` (config then features, `failKeepContainer`) and replace always-skip-only `emitPostAttachSkipIfNeeded` with outcome-aware skip/run API (path: `Sources/ADevContainerLib/Commands/LifecycleRunner.swift`)
+
+## Checkpoint — postAttach runner
+- [x] verify **Invalid postAttach form still fails resolve** (regression; unchanged)
+- [x] verify unit-level run order config → feature postAttach
+- [x] verify fail-keep-container on non-zero postAttach
+- [x] verify **no skip line when postAttach absent**
+
+---
+
+## 7. Wire postAttach after successful open on up / start / clone
+
+- [x] 7.1 Write failing tests: `UpCommand` with `--vscode` + open success + `postAttachCommand` exits 0 → postAttach exec after open; success JSON unchanged (path: `Tests/adevcontainerTests/`)
+- [x] 7.2 Write failing tests: `UpCommand` without `--vscode` + postAttach present → skip status, no exec, success (path: `Tests/adevcontainerTests/`)
+- [x] 7.3 Write failing tests: `UpCommand` with `--vscode` + open soft-fail + postAttach present → no postAttach exec; lifecycle success; skip status SHOULD explain open did not succeed (path: `Tests/adevcontainerTests/`)
+- [x] 7.4 Write failing tests: `UpCommand` with `--vscode` + open success + postAttach non-zero → command fails naming postAttach; container kept; no success JSON (path: `Tests/adevcontainerTests/`)
+- [x] 7.5 Write failing tests: feature-contributed postAttach runs after config on open success; feature non-zero fails keep-container (path: `Tests/adevcontainerTests/`)
+- [x] 7.6 Write failing tests: same gate matrix for `StartCommand` and `CloneCommand` (run after open success; skip without flag; skip on open soft-fail; fail keep container) (path: `Tests/adevcontainerTests/`)
+- [x] 7.7 Wire UpCommand: after open outcome, run or skip postAttach per design (path: `Sources/ADevContainerLib/Commands/UpCommand.swift`)
+- [x] 7.8 Wire CloneCommand: same postAttach gate after open (path: `Sources/ADevContainerLib/Commands/CloneCommand.swift`)
+- [x] 7.9 Wire StartCommand: same postAttach gate after open (path: `Sources/ADevContainerLib/Commands/StartCommand.swift`)
+- [x] 7.10 Ensure postAttach is **not** invoked from `runCreatePath` / `runRestartPostStart` and is never ordered before open when `--vscode` (path: `Sources/ADevContainerLib/Commands/`)
+
+## Checkpoint — postAttach command wiring
+- [x] verify **postAttach runs after successful --vscode open**
+- [x] verify **postAttach skipped without --vscode**
+- [x] verify **postAttach skipped when open soft-fails**
+- [x] verify **postAttach failure fails command but keeps container**
+- [x] verify **feature postAttach runs after successful open**
+- [x] verify open soft-fail still never fails lifecycle **by itself**
+- [x] verify start/clone parity with up for the gate
+
+---
+
+## 8. Docs and final gate (postAttach delta)
+
+- [x] 8.1 [P] README: document that `postAttachCommand` runs only after successful `--vscode` open; skipped without flag or when open soft-fails; failure fails the command but keeps the container; CLI-initiated attach approximation (not IDE remote-ready) (path: `README.md`)
+- [x] 8.2 [P] Help text: one-liner or cross-note consistent with README postAttach gate (path: `Sources/adevcontainer/AdevcontainerMain.swift`)
+- [x] 8.3 Run full unit suite; fix regressions (path: `Tests/adevcontainerTests/`)
+- [x] 8.4 Grep/regression: always-skip-only postAttach path removed for `--vscode` success; open soft-fail still non-fatal by itself; postAttach fail does not delete container
+
+## Checkpoint — docs / suite (postAttach)
+- [x] verify README/help describe gated postAttach + approximation caveat without parity overclaim
+- [x] verify `swift run adevcontainerTests` green for default (mocked) suite
+- [x] verify scenarios from change `spec.md` MODIFIED postAttach policy covered by tests
+
+(End of file)

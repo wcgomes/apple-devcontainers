@@ -300,9 +300,6 @@ public enum CloneCommand {
             throw error
         }
 
-        LifecycleRunner.emitPostAttachSkipIfNeeded(config: effectiveConfig)
-        StatusPrinter.status("Ready")
-
         let result = CloneResult(
             outcome: "success",
             containerId: id,
@@ -312,7 +309,8 @@ public enum CloneCommand {
             gitUrl: identity.normalizedGitURL,
             workspaceVolume: identity.workspaceVolumeName
         )
-        VSCodeOpen.openIfRequested(
+        // Open first, then postAttach only on open success (never before open when --vscode).
+        let openOutcome = VSCodeOpen.openIfRequested(
             options.openVSCode,
             target: VSCodeOpenTarget(
                 containerId: result.containerId,
@@ -322,6 +320,13 @@ public enum CloneCommand {
                 remoteUser: result.remoteUser
             )
         )
+        try LifecycleRunner.applyPostAttachGate(
+            openOutcome: openOutcome,
+            containerId: id,
+            config: effectiveConfig,
+            runtime: runtime
+        )
+        StatusPrinter.status("Ready")
         return result
     }
 

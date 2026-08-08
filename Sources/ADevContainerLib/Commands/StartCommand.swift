@@ -12,7 +12,8 @@ public struct StartOptions: Sendable {
 }
 
 public enum StartCommand {
-    /// Start a stopped managed container. Volume-mode: runtime start only (no lifecycle hooks).
+    /// Start a stopped managed container.
+    /// Create-path / postStart hooks stay on `up`/`clone`; postAttach is gated after optional open.
     public static func run(
         options: StartOptions,
         runtime: AppleContainerRuntime,
@@ -26,43 +27,79 @@ public enum StartCommand {
 
         if info.isRunning {
             print("Container \(info.id) already running")
-            openVSCodeIfRequested(options: options, nameOrId: info.id, runtime: runtime, picker: picker)
+            try openAndPostAttach(options: options, nameOrId: info.id, runtime: runtime, picker: picker)
             return
         }
 
         StatusPrinter.status("Starting container \(info.id)")
         try runtime.start(nameOrId: info.id)
-        // Bare start: runtime only (no lifecycle hooks). Bind postStart remains on `up` path.
+        // Bare start: no create-path / postStart. postAttach only via --vscode open gate.
         print("Started \(info.id)")
-        openVSCodeIfRequested(options: options, nameOrId: info.id, runtime: runtime, picker: picker)
+        try openAndPostAttach(options: options, nameOrId: info.id, runtime: runtime, picker: picker)
     }
 
-    private static func openVSCodeIfRequested(
+    /// Open (optional) then postAttach gate. Loads config from stamped labels when needed.
+    private static func openAndPostAttach(
         options: StartOptions,
         nameOrId: String,
         runtime: AppleContainerRuntime,
         picker: InteractivePicker
-    ) {
-        guard options.openVSCode else { return }
-        // id / image / folder from inspect (start has no UpResult).
-        let payload: InspectPayload
+    ) throws {
+        // id / image / folder / labels from inspect (start has no UpResult).
+        let payload: InspectPayload?
         do {
             payload = try InspectCommand.run(name: nameOrId, runtime: runtime, picker: picker)
         } catch {
-            StatusPrinter.warning(
-                "VS Code open skipped: could not inspect container (\(error.localizedDescription))"
-            )
+            if options.openVSCode {
+                StatusPrinter.warning(
+                    "VS Code open skipped: could not inspect container (\(error.localizedDescription))"
+                )
+            }
+            // Without inspect we cannot load postAttach config or open inputs.
             return
         }
+        guard let payload else { return }
+
         let image = (payload.image ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        VSCodeOpen.bestEffortOpen(
-            target: VSCodeOpenTarget(
-                containerId: payload.containerId,
-                image: image,
-                remoteWorkspaceFolder: payload.remoteWorkspaceFolder,
-                containerName: payload.containerName,
-                remoteUser: payload.remoteUser
+        let openOutcome: VSCodeOpenOutcome
+        if options.openVSCode {
+            openOutcome = VSCodeOpen.bestEffortOpen(
+                target: VSCodeOpenTarget(
+                    containerId: payload.containerId,
+                    image: image,
+                    remoteWorkspaceFolder: payload.remoteWorkspaceFolder,
+                    containerName: payload.containerName,
+                    remoteUser: payload.remoteUser
+                )
             )
-        )
+        } else {
+            openOutcome = .notRequested
+        }
+
+        // Resolve postAttach hooks from labels (bind host paths or volume cat).
+        // Load must not fail start after container is already up — treat errors as absent.
+        let config: ResolvedDevContainerConfig?
+        do {
+            config = try PostAttachConfigLoader.load(
+                labels: payload.labels,
+                containerId: payload.containerId,
+                imageRef: image.isEmpty ? nil : image,
+                runtime: runtime
+            )
+        } catch {
+            StatusPrinter.warning(
+                "postAttach config unavailable (\(error.localizedDescription))"
+            )
+            config = nil
+        }
+        if let config {
+            try LifecycleRunner.applyPostAttachGate(
+                openOutcome: openOutcome,
+                containerId: payload.containerId,
+                config: config,
+                runtime: runtime
+            )
+        }
+        // nil config → treat postAttach as absent (start success preserved).
     }
 }

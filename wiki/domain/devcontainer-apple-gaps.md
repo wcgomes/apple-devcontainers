@@ -56,15 +56,17 @@ Apple BuildKit with `build.rosetta=true` can require Rosetta even for native arm
 
 ### VS Code attach (`--vscode` + manual)
 
-After lifecycle success, `up` / `start` / `clone` accept **`--vscode`**: best-effort host `code --new-window --folder-uri …`. Missing `code` or launch fail → stderr warn; lifecycle exit stays success. Without the flag, same URI recipe works manually. Full recipe: [architecture.md — VS Code flow](../architecture.md#vs-code-flow). Spec WIP: [`specs/changes/vscode-open-flag/`](../../specs/changes/vscode-open-flag/).
+After lifecycle success, `up` / `start` / `clone` accept **`--vscode`**: best-effort host `code --new-window --folder-uri …`. Missing `code` or launch fail → stderr warn; open alone does not fail the command. Without the flag, same URI recipe works manually (does not run postAttach). Successful open gates **`postAttachCommand`** (implemented CLI attach approximation). Full recipe: [architecture.md — VS Code flow](../architecture.md#vs-code-flow). Spec: [`specs/changes/vscode-open-flag/`](../../specs/changes/vscode-open-flag/).
 
 | Piece | Fact |
 |-------|------|
-| Flag | `--vscode` on `up`, `start`, `clone` (post-success only; soft-fail) |
+| Flag | `--vscode` on `up`, `start`, `clone` (post-success only; open soft-fail) |
 | Prereq | VS Code + `ms-vscode-remote.remote-containers`; `dev.containers.experimentalAppleContainerSupport: true` |
 | Authority | `apple-container+` + hex(UTF-8 compact JSON `{"id","image"}`) — id = create `--name` |
 | Open | `code --new-window --folder-uri "vscode-remote://apple-container+${HEX}${FOLDER}"` |
 | Folder | `remoteWorkspaceFolder` from labels/resolve; default if config omits `workspaceFolder`: `/workspaces/<basename>` |
+| postAttach | **Implemented:** **RUNS** config then feature postAttach only after successful `--vscode` open; **SKIP** if no flag or open soft-fails (status when any present); fail-keep; not IDE-confirmed ready; not always-skip-forever |
+| postAttach sources | `start`: config from labels (bind host paths / volume in-container cat); reuse/`start`: feature hooks from image `devcontainer.metadata` |
 | nameConfigs (optional) | `…/globalStorage/ms-vscode-remote.remote-containers/nameConfigs/<containerName>.json` → `workspaceFolder` + `remoteUser` |
 | UI gap | `remote-containers.attachToAppleContainer` attaches authority **without** folder → empty window; folder-uri avoids it |
 | `open vscode://` | May reuse window; prefer `code --new-window --folder-uri` |
@@ -75,7 +77,7 @@ After lifecycle success, `up` / `start` / `clone` accept **`--vscode`**: best-ef
 - **Hard errors** for unsupported props/flags — never silent ignore.
 - **`forwardPorts`**: map to publish ports; do not promise IDE auto-forward behavior.
 - **`portsAttributes`**: metadata only; no IDE auto-forward.
-- **Lifecycle**: run via `container exec` (hook matrix: create-path full order on `up`/`clone`; bind start-stopped `postStart` only; volume-mode `start` none; reuse none; `postAttach` admit + skip). Exec must expand `containerEnv` PATH refs (same as create) or login-shell hooks fail (`id`/`bash` not found). Not Docker entrypoint injection parity. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
+- **Lifecycle**: run via `container exec` (hook matrix: create-path full order on `up`/`clone`; bind start-stopped `postStart` only; bare `start` no create-path/postStart; reuse none for create-path; **postAttach implemented** — runs after successful `--vscode` open only, skip otherwise, fail-keep; `start` loads config from labels; feature postAttach from image metadata on reuse/`start`). Exec must expand `containerEnv` PATH refs (same as create) or login-shell hooks fail (`id`/`bash` not found). Not Docker entrypoint injection parity. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
 - **`runArgs`**: allowlist (`--init`, `--cap-add`/`--cap-drop`, …); privileged/tun/device and unknown flags fail closed.
 - **`hostRequirements`**: preflight — fail on memory/cpus shortfall; map requested limits to create `-m`/`-c` when host OK; warn unsupported `gpu`; fail on unparseable/unknown keys.
 - **Features**: OCI + local path fetch/load + derived image build on `up` (see [cli-runtime-boundary](../conventions/cli-runtime-boundary.md)); forever-reject `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker` and privileged/securityOpt metadata ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)).

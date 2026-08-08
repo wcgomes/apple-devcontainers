@@ -328,7 +328,7 @@ struct AdevcontainerMain {
           --json                   Machine-readable output (up, list)
           --recreate               Delete and recreate on up if exists / hash mismatch
           --skip-pull              Skip image pull on up/clone
-          --vscode                 Best-effort open VS Code on remote workspace (up/start/clone)
+          --vscode                 Best-effort open VS Code; gates postAttach (up/start/clone)
           -h, --help               Show help
 
         Identity:
@@ -341,8 +341,10 @@ struct AdevcontainerMain {
           - Best-effort open of a new window on the resolved remote workspace folder.
           - Requires host VS Code + Remote - Containers + experimental Apple support
             (dev.containers.experimentalAppleContainerSupport) and a discoverable `code` CLI.
-          - Missing `code` or launch failure warns on stderr; lifecycle success is preserved.
-          - Does not provide full Dev Containers extension parity; manual attach still works.
+          - Missing `code` or launch failure warns on stderr; open alone does not fail lifecycle.
+          - postAttachCommand runs only after successful open; skipped without flag or on open
+            soft-fail (status when present). postAttach non-zero fails command but keeps container.
+          - CLI attach approximation only — not IDE remote-ready. Not full extension parity.
 
         Clone notes:
           - Requires host git on PATH (config fetch + HTTPS credential fill)
@@ -369,7 +371,9 @@ struct AdevcontainerMain {
 
             --vscode: best-effort open a new VS Code window on the remote workspace
             (requires VS Code + Remote - Containers + experimental Apple support and
-            a `code` CLI). Soft-fails with a stderr warning; does not fail up.
+            a `code` CLI). Soft-fails with a stderr warning; open alone does not fail up.
+            postAttachCommand runs only after successful open; skipped without flag /
+            open soft-fail; postAttach failure fails up but keeps the container.
             Not full Dev Containers parity — manual attach remains valid.
             """)
         case "clone":
@@ -386,7 +390,8 @@ struct AdevcontainerMain {
             ghcr.io/devcontainers/features/git:1 for in-container git.
 
             --vscode: best-effort open VS Code on the resolved remote folder after
-            success (same prereqs/soft-fail as up --vscode). Not full extension parity.
+            success (same prereqs/soft-fail/postAttach gate as up --vscode).
+            Not full extension parity.
             """)
         case "list":
             print("""
@@ -403,7 +408,8 @@ struct AdevcontainerMain {
             (no lifecycle hooks). Already running is success no-op.
 
             --vscode: best-effort open VS Code on the labeled remote workspace after
-            start (inspect for id/image/folder). Soft-fail; not full extension parity.
+            start (inspect for id/image/folder). Soft-fail open; postAttach only after
+            successful open (same gate as up). Not full extension parity.
             """)
         case "exec":
             print("""

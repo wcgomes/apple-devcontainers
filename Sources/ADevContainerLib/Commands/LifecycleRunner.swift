@@ -103,11 +103,73 @@ public enum LifecycleRunner {
         }
     }
 
-    /// Emit one-time postAttach skip status when the property is set (config or feature).
+    /// True when config and/or feature postAttach hooks are present.
+    public static func hasPostAttach(_ config: ResolvedDevContainerConfig) -> Bool {
+        config.postAttachCommand != nil || !config.featurePostAttachCommands.isEmpty
+    }
+
+    /// Emit one-time postAttach skip status when the property is set (config or feature)
+    /// and there is no CLI attach hook (`--vscode` absent).
     public static func emitPostAttachSkipIfNeeded(config: ResolvedDevContainerConfig) {
-        let hasAttach = config.postAttachCommand != nil || !config.featurePostAttachCommands.isEmpty
-        guard hasAttach else { return }
+        guard hasPostAttach(config) else { return }
         StatusPrinter.status("postAttach skipped (no attach hook)")
+    }
+
+    /// Skip when `--vscode` was set but open soft-failed/skipped and postAttach is present.
+    public static func emitPostAttachSkipOpenDidNotSucceedIfNeeded(config: ResolvedDevContainerConfig) {
+        guard hasPostAttach(config) else { return }
+        StatusPrinter.status("postAttach skipped (attach open did not succeed)")
+    }
+
+    /// Run config `postAttachCommand` then feature postAttach hooks via exec.
+    /// Failure policy: keep container (already up; VS Code may already be opening).
+    public static func runPostAttach(
+        containerId: String,
+        config: ResolvedDevContainerConfig,
+        runtime: AppleContainerRuntime
+    ) throws {
+        try runIfPresent(
+            property: "postAttachCommand",
+            command: config.postAttachCommand,
+            containerId: containerId,
+            config: config,
+            runtime: runtime,
+            failurePolicy: .failKeepContainer
+        )
+        for (index, extra) in config.featurePostAttachCommands.enumerated() {
+            let label = config.featurePostAttachCommands.count == 1
+                ? "postAttachCommand (feature)"
+                : "postAttachCommand (feature \(index + 1))"
+            try runIfPresent(
+                property: label,
+                command: extra,
+                containerId: containerId,
+                config: config,
+                runtime: runtime,
+                failurePolicy: .failKeepContainer
+            )
+        }
+    }
+
+    /// Outcome-aware postAttach gate after the open attempt (or no-op when not requested).
+    ///
+    /// - `.notRequested` → skip status when any postAttach present
+    /// - `.opened` → run config then feature postAttach (`failKeepContainer`)
+    /// - soft-fail open → skip status explaining attach open did not succeed
+    public static func applyPostAttachGate(
+        openOutcome: VSCodeOpenOutcome,
+        containerId: String,
+        config: ResolvedDevContainerConfig,
+        runtime: AppleContainerRuntime
+    ) throws {
+        switch openOutcome {
+        case .notRequested:
+            emitPostAttachSkipIfNeeded(config: config)
+        case .opened:
+            try runPostAttach(containerId: containerId, config: config, runtime: runtime)
+        case .skippedMissingCode, .skippedEmptyFolder, .skippedMissingImage, .skippedMissingId, .launchFailed:
+            emitPostAttachSkipOpenDidNotSucceedIfNeeded(config: config)
+        }
     }
 
     private static func lifecycleError(

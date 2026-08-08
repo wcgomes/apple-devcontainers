@@ -218,14 +218,18 @@ Hooks run via runtime **exec** into the running container (effective user + work
 | Path | Hooks |
 |------|--------|
 | Fresh create (`up` bind or `clone` volume) | `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand` |
-| Reuse running | none |
+| Reuse running | no create-path hooks; feature postAttach mergeable from image metadata when gated open succeeds |
 | Bind start-stopped (`up`) | `postStartCommand` only |
-| Volume-mode `start` | **none** |
-| `postAttachCommand` | admitted; **skipped** on `up`/`clone`/`start` (one status line; no attach hook yet) |
+| Bare `start` | no create-path / postStart; postAttach only via gate below |
+| `postAttachCommand` | **implemented** on `up`/`start`/`clone`: **RUNS** config then feature postAttach only after successful `--vscode` open; **SKIP** + status if no flag or open soft-fails (no status line if absent). Not always-skip-forever. Spec: [`specs/changes/vscode-open-flag/`](../../specs/changes/vscode-open-flag/) |
 
 - Capture exit codes; failed hook fails the command — do not pretend success.
 - **Create-path failure** (any of onCreate / updateContent / postCreate / postStart on fresh create): delete the container **before** returning failure, so reuse cannot treat a half-bootstrapped container as healthy.
 - **Bind start-stopped `postStartCommand` failure:** fail `up` but **do not** delete.
+- **postAttach failure** (when it runs): fail the command; **do not** delete/stop the container (fail-keep; contrast create-path delete-on-fail). Open soft-fail alone does not fail the command and must not run postAttach.
+- **postAttach config load:**
+  - `up`/`clone`: use resolved config; on reuse/restart merge feature postAttach from image `devcontainer.metadata` (no Features re-run).
+  - bare `start`: load from labels — bind: host `local_folder` + `config_file`; volume: cat stamped config path in-container; merge feature postAttach from image/container metadata. Load errors → treat absent (preserve start success).
 
 ## `exec`: selection, interactive vs non-interactive
 

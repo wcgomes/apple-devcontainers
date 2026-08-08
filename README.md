@@ -98,7 +98,7 @@ Fresh create (`up` or `clone`, after the tree exists):
 | Reuse running | none |
 | `up` start stopped | `postStartCommand` only |
 | `start` (managed) | none |
-| `postAttachCommand` | admitted, not run by this CLI |
+| `postAttachCommand` | runs only after successful `--vscode` open; otherwise skipped (status when present); failure fails command, keeps container |
 
 ### runArgs allowlist
 
@@ -150,7 +150,8 @@ After `up` or `clone`, the container is running and listable (`adevcontainer lis
 Optionally pass **`--vscode`** on `up`, `start`, or `clone` for a **best-effort** open of a **new** VS Code window on the resolved remote workspace folder (via the host `code` CLI and Remote - Containers `apple-container` URI). This is a convenience side effect only:
 
 - **Host prereqs:** VS Code, extension `ms-vscode-remote.remote-containers`, experimental Apple support (`dev.containers.experimentalAppleContainerSupport: true`), and a discoverable `code` CLI (`PATH` or the standard macOS app location; Insiders may be tried).
-- **Soft-fail:** If `code` is missing or launch fails, the CLI warns on **stderr** and still reports lifecycle **success** (container is not torn down). `--json` success shape is unchanged.
+- **Soft-fail open:** If `code` is missing or launch fails, the CLI warns on **stderr** and still reports lifecycle **success** (container is not torn down). Open failure alone does not fail the command. `--json` success shape is unchanged on success.
+- **`postAttachCommand` gate:** Config and feature `postAttachCommand` hooks run **only after a successful `--vscode` open** (CLI-initiated attach approximation — not IDE remote-ready confirmation). Without `--vscode`, or when open soft-fails, postAttach is **skipped** (one stderr status line when any postAttach is present; no skip line when absent). If postAttach **runs** and exits non-zero, the command **fails** with a structured error naming postAttach, but the container is **kept** (not deleted/stopped).
 - **Not full parity:** `--vscode` does **not** claim full Dev Containers extension parity (up/rebuild driver, extension clone-in-volume, etc.). Manual attach remains valid when the flag is omitted or open soft-fails.
 
 ### Non-goals (current)
