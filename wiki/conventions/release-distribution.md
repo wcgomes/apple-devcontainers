@@ -33,11 +33,12 @@ Do not paste workflow YAML into the wiki — edit the files under `.github/workf
 | Land code | Branch → PR → CI green → merge to `main` (merge when ready to integrate; no ship gate) |
 | Ship | Tag the desired commit (usually latest `main`): `git tag vX.Y.Z && git push origin vX.Y.Z` — or `workflow_dispatch` with version input |
 | Publish | Release workflow builds/tests, writes tarball + sha256, creates GitHub Release |
-| Homebrew | **Automated on non-prerelease:** workflow updates `wcgomes/homebrew-tap` `Formula/adevcontainer.rb` (version + sha256) via secret `HOMEBREW_TAP_TOKEN`; opens bot PR `brew-bump-vX.Y.Z` to sync `packaging/homebrew/adevcontainer.rb`. Prereleases skip brew bump. Manual sha edit is not required when the secret is set. |
+| Homebrew | **Automated on non-prerelease:** workflow bumps `wcgomes/homebrew-tap` `Formula/adevcontainer.rb` (version + sha256) via `HOMEBREW_TAP_TOKEN` + `scripts/render-homebrew-formula.sh`. Prereleases skip brew bump. Manual sha edit not required when the secret is set. |
 
 - **Release trigger / source of truth:** git tag `vMAJOR.MINOR.PATCH` (or prerelease with `-`). Only tags (or dispatch + version) publish.
 - **`HOMEBREW_TAP_TOKEN`:** required for non-prerelease releases. Missing secret fails the release job. Prereleases do not need it for brew (bump skipped).
-- **Formula render:** `scripts/render-homebrew-formula.sh` produces the formula content used by the bump.
+- **Formula SoT:** only `wcgomes/homebrew-tap` `Formula/adevcontainer.rb`. No in-repo formula mirror (`packaging/homebrew/` removed).
+- **Formula render:** `scripts/render-homebrew-formula.sh` produces the formula content used by the tap bump.
 - **Branch protection (configured 2026-08 on `main`):** require PR before merge (0 approving reviews — solo OK); require status check `build-and-test` (strict, branch up to date); `enforce_admins: true`; no force push, no branch deletion. Tags remain free for release.
 - No extra process (no changelog tooling, no notarize) unless this page is updated.
 
@@ -57,7 +58,7 @@ Do not paste workflow YAML into the wiki — edit the files under `.github/workf
 
 ## Install UX (priority order)
 
-1. **Homebrew (primary)** — public tap [wcgomes/homebrew-tap](https://github.com/wcgomes/homebrew-tap); formula `Formula/adevcontainer.rb`. Install: `brew tap wcgomes/tap && brew install adevcontainer`. In-repo mirror: `packaging/homebrew/adevcontainer.rb` (kept in sync by release bot PR `brew-bump-vX.Y.Z`; tap formula updated in-job on non-prerelease). Caveats must note Apple `container` is a separate runtime install.
+1. **Homebrew (primary)** — public tap [wcgomes/homebrew-tap](https://github.com/wcgomes/homebrew-tap); sole formula SoT `Formula/adevcontainer.rb`. Install: `brew tap wcgomes/tap && brew install adevcontainer`. Non-prerelease release auto-bumps the tap (`HOMEBREW_TAP_TOKEN` + `scripts/render-homebrew-formula.sh`). No in-repo formula mirror. Caveats must note Apple `container` is a separate runtime install.
 2. **GitHub Release curl/tar** — download tarball + verify sha256; fallback for non-brew users.
 3. **Source build** — documented in README (`swift build -c release` on macOS 26+ Apple Silicon).
 
@@ -66,5 +67,5 @@ Do not paste workflow YAML into the wiki — edit the files under `.github/workf
 - Touch workflows under `.github/workflows/`, not ad-hoc publish scripts, unless intentionally adding a new path.
 - Bump/tag version; release workflow owns inject + artifact + GH Release + Homebrew bump (non-prerelease).
 - Ensure `HOMEBREW_TAP_TOKEN` is configured for non-prerelease ships; missing token fails the job. Prereleases skip brew bump.
-- Formula content comes from `scripts/render-homebrew-formula.sh` — do not hand-edit sha/version in tap or in-repo formula as part of a normal release.
+- Formula content comes from `scripts/render-homebrew-formula.sh` — do not hand-edit sha/version in the tap formula as part of a normal release.
 - Still no notarize unless an explicit decision supersedes this page.
