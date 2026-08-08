@@ -31,9 +31,8 @@ if [[ ! "$sha256" =~ ^[0-9a-f]{64}$ ]]; then
 fi
 
 formula=$(cat <<EOF
-# Formula template for a personal tap (e.g. github.com/wcgomes/homebrew-tap).
+# Formula for personal tap github.com/wcgomes/homebrew-tap.
 # After each release: set version, url (if needed), and sha256 of the arm64 tarball.
-# See packaging/homebrew/README.md.
 
 class Adevcontainer < Formula
   desc "Native Swift CLI for devcontainer.json on Apple container"

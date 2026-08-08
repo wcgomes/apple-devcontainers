@@ -19,7 +19,7 @@ Native Swift CLI that reads `devcontainer.json` and runs workspaces on **Apple `
 brew install wcgomes/tap/adevcontainer
 ```
 
-Tap: [`github.com/wcgomes/homebrew-tap`](https://github.com/wcgomes/homebrew-tap). Formula template in-repo: [`packaging/homebrew/`](packaging/homebrew/).
+Tap: [`github.com/wcgomes/homebrew-tap`](https://github.com/wcgomes/homebrew-tap).
 
 ### GitHub Release binary
 

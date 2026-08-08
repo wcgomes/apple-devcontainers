@@ -13,7 +13,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   release:
@@ -116,48 +115,4 @@ jobs:
             git -C "${TAP_DIR}" commit -m "adevcontainer ${VERSION}"
             git -C "${TAP_DIR}" push origin HEAD:main
             echo "Pushed Formula/adevcontainer.rb ${VERSION} to wcgomes/homebrew-tap"
-          fi
-
-      - name: Sync packaging formula via PR
-        if: ${{ !contains(steps.version.outputs.version, '-') }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
-          SHA256: ${{ steps.package.outputs.sha256 }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          BRANCH="brew-bump-v${VERSION}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Drop inject-version / build dirt; branch from main (protected — PR only)
-          git fetch origin main
-          git checkout -f -B "${BRANCH}" origin/main
-          bash scripts/render-homebrew-formula.sh \
-            "${VERSION}" "${SHA256}" packaging/homebrew/adevcontainer.rb
-          git add packaging/homebrew/adevcontainer.rb
-          if git diff --cached --quiet; then
-            echo "packaging/homebrew/adevcontainer.rb already at ${VERSION}; skipping PR."
-            exit 0
-          fi
-          git commit -m "chore(homebrew): bump packaging formula to ${VERSION}"
-          git push -u origin "${BRANCH}" --force
-          BODY="## Summary
-          Mirror bump of \`packaging/homebrew/adevcontainer.rb\` to **${VERSION}** after the GitHub Release.
-
-          - version: \`${VERSION}\`
-          - sha256: \`${SHA256}\`
-          - tap \`wcgomes/homebrew-tap\` was updated in the same release job
-
-          Auto-opened by the Release workflow."
-          # Collapse accidental leading indent from YAML block
-          BODY="$(printf '%s\n' "${BODY}" | sed 's/^[[:space:]]*//')"
-          if [[ "$(gh pr list --head "${BRANCH}" --base main --json number --jq 'length')" == "0" ]]; then
-            gh pr create \
-              --base main \
-              --head "${BRANCH}" \
-              --title "chore(homebrew): bump packaging formula to ${VERSION}" \
-              --body "${BODY}"
-          else
-            echo "PR for ${BRANCH} already exists; branch updated."
           fi
