@@ -153,6 +153,10 @@ public enum LifecycleRunner {
 
     /// Outcome-aware postAttach gate after the open attempt (or no-op when not requested).
     ///
+    /// Callers that apply vscode extensions MUST run extensions apply **before** this gate
+    /// on open success. This gate never runs customizations apply and never uses
+    /// `postAttachCommand` as an apply vehicle.
+    ///
     /// - `.notRequested` → skip status when any postAttach present
     /// - `.opened` → run config then feature postAttach (`failKeepContainer`)
     /// - soft-fail open → skip status explaining attach open did not succeed

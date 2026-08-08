@@ -76,7 +76,7 @@ public enum StartCommand {
             openOutcome = .notRequested
         }
 
-        // Resolve postAttach hooks from labels (bind host paths or volume cat).
+        // Resolve config from labels (bind host paths or volume cat) for postAttach + vscode apply.
         // Load must not fail start after container is already up — treat errors as absent.
         let config: ResolvedDevContainerConfig?
         do {
@@ -93,6 +93,20 @@ public enum StartCommand {
             config = nil
         }
         if let config {
+            // Settings repair on marker drift (not gated on --vscode).
+            _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
+                containerId: payload.containerId,
+                config: config,
+                runtime: runtime
+            )
+            // Extensions only after successful open.
+            if openOutcome.isOpenSuccess {
+                _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
+                    containerId: payload.containerId,
+                    config: config,
+                    runtime: runtime
+                )
+            }
             try LifecycleRunner.applyPostAttachGate(
                 openOutcome: openOutcome,
                 containerId: payload.containerId,
@@ -100,6 +114,6 @@ public enum StartCommand {
                 runtime: runtime
             )
         }
-        // nil config → treat postAttach as absent (start success preserved).
+        // nil config → treat postAttach / customizations apply as absent (start success preserved).
     }
 }

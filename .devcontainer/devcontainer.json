@@ -24,7 +24,11 @@
     "vscode": {
       "extensions": [
         "swiftlang.swift-vscode"
-      ]
+      ],
+      "settings": {
+        "editor.tabSize": 3,
+        "files.insertFinalNewline": true
+      }
     }
   }
 }

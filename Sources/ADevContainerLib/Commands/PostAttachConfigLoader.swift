@@ -1,11 +1,14 @@
 import Foundation
 
-/// Load enough resolved config to run or skip postAttach on paths that no longer hold
-/// an in-memory `ResolvedDevContainerConfig` (notably bare `start`).
+/// Load enough resolved config to run or skip postAttach **and** vscode customizations apply
+/// on paths that no longer hold an in-memory `ResolvedDevContainerConfig` (notably bare `start`).
 ///
 /// Bind-mode: re-resolve from host `local_folder` + `config_file` labels.
 /// Volume-mode: `cat` the stamped config path inside the container workspace.
 /// Feature postAttach: merge from image `devcontainer.metadata` when inspect labels expose it.
+///
+/// Resolved config retains `vscodeExtensions` / `vscodeSettingsJSON` from the config file
+/// (ConfigResolver); callers use the same model for settings repair and open-gated extensions.
 public enum PostAttachConfigLoader {
     /// Best-effort load. Returns nil when labels/paths are insufficient (caller skips postAttach
     /// without a status line — equivalent to “postAttach absent”).

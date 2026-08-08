@@ -1,0 +1,10 @@
+{
+  "name": "vscode-customizations-bad-nested",
+  "image": "alpine:3.20",
+  "customizations": {
+    "vscode": {
+      "extensions": "not-an-array",
+      "settings": ["not", "an", "object"]
+    }
+  }
+}

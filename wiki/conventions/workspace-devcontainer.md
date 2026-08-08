@@ -13,7 +13,7 @@ This repo ships `.devcontainer/devcontainer.json` for **Linux Swift tooling** an
 | Keep-alive | product default (`/bin/sleep infinity`) — not overridden in config |
 | `runArgs` | omitted (none) |
 | `hostRequirements` | `cpus: 4`, `memory: "8gb"` — minimum floor; comfortable optional ~6–8 CPUs / 12–16gb |
-| Customizations | VS Code extension `swiftlang.swift-vscode` only — no `customizations.vscode.settings` |
+| Customizations | `customizations.vscode.extensions`: `swiftlang.swift-vscode`; `settings`: `editor.tabSize: 3`, `files.insertFinalNewline: true`. CLI applies settings on create-path and extensions after successful `--vscode` open (Apple attach does not auto-install). Hard dep `llvm-vs-code-extensions.lldb-dap` comes via Swift’s `extensionDependencies` (BFS auto-install) — not necessarily listed in config. See [architecture.md — VS Code flow](../architecture.md#vs-code-flow) |
 
 ### Features
 
@@ -37,10 +37,10 @@ These are supported OCI Features (product Features runner). They are not `docker
 - Installs **codegraph** via npm global
 - Agent wiring + init if needed
 
-### Why no VS Code settings
+### VS Code settings and deps (fixture)
 
-- `swift.path` defaults to PATH lookup; the image provides `/usr/bin/swift`.
-- `lldb.library` is a CodeLLDB setting, not swift-vscode; this fixture does not ship CodeLLDB.
+- Fixture settings are editor hygiene only (`editor.tabSize`, `files.insertFinalNewline`) — not Swift path overrides (`swift.path` defaults to PATH; image has `/usr/bin/swift`).
+- `lldb-dap` is **not** listed in config; CLI installs it transitively from Swift’s `package.json` `extensionDependencies` when extensions apply runs. Do not confuse with CodeLLDB `lldb.library` settings.
 
 ## Intended use
 

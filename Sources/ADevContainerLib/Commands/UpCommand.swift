@@ -64,8 +64,13 @@ public enum UpCommand {
             } else if options.recreate {
                 try runtime.delete(nameOrId: existing.id, force: true)
             } else if existing.isRunning {
-                // Reuse running: no feature fetch/build; postAttach gated after open.
+                // Reuse running: no feature fetch/build; settings repair on marker drift; postAttach gated after open.
                 StatusPrinter.status("Reusing running container \(existing.name)")
+                _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
+                    containerId: existing.id,
+                    config: resolved.config,
+                    runtime: runtime
+                )
                 return try finish(
                     options: options,
                     id: existing.id,
@@ -79,6 +84,11 @@ public enum UpCommand {
                 StatusPrinter.status("Starting container")
                 try runtime.start(nameOrId: existing.id)
                 try LifecycleRunner.runRestartPostStart(
+                    containerId: existing.id,
+                    config: resolved.config,
+                    runtime: runtime
+                )
+                _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
                     containerId: existing.id,
                     config: resolved.config,
                     runtime: runtime
@@ -172,6 +182,13 @@ public enum UpCommand {
             runtime: runtime
         )
 
+        // Settings apply after create-path hooks; not gated on --vscode.
+        _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
+            containerId: id,
+            config: effectiveConfig,
+            runtime: runtime
+        )
+
         return try finish(
             options: options,
             id: id,
@@ -182,7 +199,8 @@ public enum UpCommand {
         )
     }
 
-    /// Open (optional) → postAttach gate → Ready. postAttach is never before open when `--vscode`.
+    /// Open (optional) → extensions apply (open success) → postAttach gate → Ready.
+    /// postAttach is never before open when `--vscode`. Extensions never fold into postAttachCommand.
     private static func finish(
         options: UpOptions,
         id: String,
@@ -202,6 +220,14 @@ public enum UpCommand {
                 remoteUser: result.remoteUser
             )
         )
+        // Extensions only after successful open (same CLI attach hook as postAttach).
+        if openOutcome.isOpenSuccess {
+            _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
+                containerId: id,
+                config: config,
+                runtime: runtime
+            )
+        }
         // Reuse/restart never re-runs Features; merge feature postAttach from image metadata.
         var postAttachConfig = config
         PostAttachConfigLoader.mergeFeaturePostAttach(

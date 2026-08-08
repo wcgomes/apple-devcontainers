@@ -300,6 +300,13 @@ public enum CloneCommand {
             throw error
         }
 
+        // Settings apply after create-path hooks; not gated on --vscode. Soft-fail never deletes.
+        _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
+            containerId: id,
+            config: effectiveConfig,
+            runtime: runtime
+        )
+
         let result = CloneResult(
             outcome: "success",
             containerId: id,
@@ -309,7 +316,7 @@ public enum CloneCommand {
             gitUrl: identity.normalizedGitURL,
             workspaceVolume: identity.workspaceVolumeName
         )
-        // Open first, then postAttach only on open success (never before open when --vscode).
+        // Open → extensions (on success) → postAttach (never before open when --vscode).
         let openOutcome = VSCodeOpen.openIfRequested(
             options.openVSCode,
             target: VSCodeOpenTarget(
@@ -320,6 +327,13 @@ public enum CloneCommand {
                 remoteUser: result.remoteUser
             )
         )
+        if openOutcome.isOpenSuccess {
+            _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
+                containerId: id,
+                config: effectiveConfig,
+                runtime: runtime
+            )
+        }
         try LifecycleRunner.applyPostAttachGate(
             openOutcome: openOutcome,
             containerId: id,

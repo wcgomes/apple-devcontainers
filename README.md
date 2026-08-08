@@ -6,7 +6,7 @@
 
 Native Swift CLI that reads `devcontainer.json` and runs workspaces on **Apple `container`**.
 
-Clone a git repo into a named container volume (faster disk I/O than bind mounts), or `up` an existing checkout. Applies a practical subset—lifecycle hooks and Features included.
+Bring up a workspace with `clone <git-url>` (named volume, faster I/O) or `up` on an existing checkout. Use the terminal (or AI agents) as-is, or pass `--vscode` to open VS Code with extensions and settings applied. Lifecycle hooks and Features included.
 
 ## Install
 
@@ -135,7 +135,7 @@ Top-level `features` map (ref → options) on **`up` / `clone`**. Builds a deriv
 - **Forever-reject:** refs containing `docker-in-docker` / `docker-outside-of-docker` / `docker-from-docker`, or feature metadata with `privileged` / `securityOpt`
 - **Rosetta / BuildKit:** if prompted once to set `build.rosetta=false`, accept — or set `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1` for CI
 
-### VS Code (`--vscode`)
+### VS Code (`--vscode` + config customizations)
 
 Recommended: pass **`--vscode`** on `up`, `start`, or `clone` to open a new VS Code window on the remote workspace folder.
 
@@ -144,6 +144,13 @@ Recommended: pass **`--vscode`** on `up`, `start`, or `clone` to open a new VS C
 - Prereqs: VS Code + Remote - Containers + `dev.containers.experimentalAppleContainerSupport: true` (and a discoverable `code` CLI).
 - Manual attach (experimental **Attach to Running Apple Container**) works without the flag.
 - Not full Dev Containers extension parity — convenience open only.
+
+**Config-file `customizations.vscode`:**
+
+- **`settings`** — applied into the container on create (`up`/`clone`); not gated on `--vscode`
+- **`extensions`** — installed only after a successful `--vscode` open; dependency extensions installed automatically. Without `--vscode`, the CLI does not auto-install extensions
+- Apply failures warn on stderr but do not fail the command
+- After first extension install you may need **Developer: Reload Window** once
 
 ### Non-goals (current)
 

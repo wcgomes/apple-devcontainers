@@ -1,0 +1,16 @@
+{
+  "name": "vscode-customizations-wellformed",
+  "image": "alpine:3.20",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "swiftlang.swift-vscode",
+        "ms-python.python"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "files.eol": "\n"
+      }
+    }
+  }
+}

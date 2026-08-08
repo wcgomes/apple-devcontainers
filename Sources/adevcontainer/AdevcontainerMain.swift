@@ -328,7 +328,7 @@ struct AdevcontainerMain {
           --json                   Machine-readable output (up, list)
           --recreate               Delete and recreate on up if exists / hash mismatch
           --skip-pull              Skip image pull on up/clone
-          --vscode                 Best-effort open VS Code; gates postAttach (up/start/clone)
+          --vscode                 Best-effort open VS Code; gates postAttach + extensions apply
           -h, --help               Show help
 
         Identity:
@@ -344,6 +344,11 @@ struct AdevcontainerMain {
           - Missing `code` or launch failure warns on stderr; open alone does not fail lifecycle.
           - postAttachCommand runs only after successful open; skipped without flag or on open
             soft-fail (status when present). postAttach non-zero fails command but keeps container.
+          - customizations.vscode.settings: merged on create-path (not gated on --vscode).
+          - customizations.vscode.extensions: installed after successful --vscode open only
+            (soft-fail; marker idempotency; Server extensions.json + transitive
+            extensionDependencies). Manual attach without flag does not install.
+            May need Developer: Reload Window once so the UI refreshes the registry.
           - CLI attach approximation only — not IDE remote-ready. Not full extension parity.
 
         Clone notes:
@@ -374,6 +379,8 @@ struct AdevcontainerMain {
             a `code` CLI). Soft-fails with a stderr warning; open alone does not fail up.
             postAttachCommand runs only after successful open; skipped without flag /
             open soft-fail; postAttach failure fails up but keeps the container.
+            customizations.vscode.settings apply on create-path (not gated on open);
+            extensions apply after successful open (soft-fail; marker skip when matched).
             Not full Dev Containers parity — manual attach remains valid.
             """)
         case "clone":
@@ -390,7 +397,8 @@ struct AdevcontainerMain {
             ghcr.io/devcontainers/features/git:1 for in-container git.
 
             --vscode: best-effort open VS Code on the resolved remote folder after
-            success (same prereqs/soft-fail/postAttach gate as up --vscode).
+            success (same prereqs/soft-fail/postAttach + extensions gate as up --vscode).
+            Settings from customizations.vscode still apply on create-path without the flag.
             Not full extension parity.
             """)
         case "list":
@@ -408,8 +416,9 @@ struct AdevcontainerMain {
             (no lifecycle hooks). Already running is success no-op.
 
             --vscode: best-effort open VS Code on the labeled remote workspace after
-            start (inspect for id/image/folder). Soft-fail open; postAttach only after
-            successful open (same gate as up). Not full extension parity.
+            start (inspect for id/image/folder). Soft-fail open; postAttach and pending
+            extensions only after successful open (same gate as up). Settings repair on
+            marker drift does not require the flag. Not full extension parity.
             """)
         case "exec":
             print("""
