@@ -34,7 +34,7 @@ Do not paste workflow YAML into the wiki — edit the files under `.github/workf
 
 ## Install UX (priority order)
 
-1. **Homebrew (primary)** — tap `wcgomes/tap` (repo `homebrew-tap`). Formula template in-repo: `packaging/homebrew/adevcontainer.rb` (`sha256` placeholder `REPLACE_ON_RELEASE` until first real release). Caveats must note Apple `container` is a separate runtime install.
+1. **Homebrew (primary)** — public tap [wcgomes/homebrew-tap](https://github.com/wcgomes/homebrew-tap); formula `Formula/adevcontainer.rb`. Install: `brew tap wcgomes/tap && brew install adevcontainer`. In-repo template: `packaging/homebrew/adevcontainer.rb` (real `sha256` synced from first release **v0.1.0**; keep tap formula in sync on each release). Caveats must note Apple `container` is a separate runtime install.
 2. **GitHub Release curl/tar** — download tarball + verify sha256; fallback for non-brew users.
 3. **Source build** — documented in README (`swift build -c release` on macOS 26+ Apple Silicon).
 
@@ -42,5 +42,5 @@ Do not paste workflow YAML into the wiki — edit the files under `.github/workf
 
 - Touch workflows under `.github/workflows/`, not ad-hoc publish scripts, unless intentionally adding a new path.
 - Bump/tag version; release workflow owns inject + artifact + GH Release.
-- After first real release: replace `REPLACE_ON_RELEASE` in the Homebrew formula (and keep the tap formula in sync).
+- On each release: update `sha256` in `packaging/homebrew/adevcontainer.rb` and the tap formula (`Formula/adevcontainer.rb` in `wcgomes/homebrew-tap`).
 - Still no notarize unless an explicit decision supersedes this page.
