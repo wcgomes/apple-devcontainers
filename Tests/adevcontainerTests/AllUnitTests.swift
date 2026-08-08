@@ -1107,6 +1107,148 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expect(result.succeeded)
         try MiniTest.expect(result.stderrString.contains("streamed-err"))
+    }),
+    ("isBuilderRunningParsesStatusJSON", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["builder", "status", "--format", "json"] {
+                    let json = #"[{"id":"buildkit","status":{"state":"running"}}]"#
+                    return ProcessResult(exitCode: 0, stdout: Data(json.utf8), stderr: Data())
+                }
+                return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("unexpected".utf8))
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expect(runtime.isBuilderRunning())
+
+        mock.handlers = [
+            { args in
+                if args == ["builder", "status", "--format", "json"] {
+                    let json = #"[{"id":"buildkit","status":{"state":"stopped"}}]"#
+                    return ProcessResult(exitCode: 0, stdout: Data(json.utf8), stderr: Data())
+                }
+                return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("unexpected".utf8))
+            }
+        ]
+        try MiniTest.expect(!runtime.isBuilderRunning())
+
+        mock.handlers = [
+            { args in
+                if args == ["builder", "status", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
+                }
+                return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("unexpected".utf8))
+            }
+        ]
+        try MiniTest.expect(!runtime.isBuilderRunning())
+
+        // Undetermined → treat as running (do not restore-stop if unsure).
+        mock.handlers = [
+            { args in
+                if args == ["builder", "status", "--format", "json"] {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("boom".utf8))
+                }
+                return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("unexpected".utf8))
+            }
+        ]
+        try MiniTest.expect(runtime.isBuilderRunning())
+    }),
+    ("buildRestoresStoppedBuilderAfterSuccess", {
+        let mock = MockProcessRunner()
+        var sawStop = false
+        mock.handlers = [
+            { args in
+                if args == ["builder", "status", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
+                }
+                if args.first == "build" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.starts(with: ["builder", "stop"]) {
+                    sawStop = true
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("unexpected".utf8))
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try runtime.build(
+            contextDirectory: "/ctx",
+            dockerfilePath: "/ctx/Dockerfile",
+            tag: "adev:test",
+            platform: "linux/arm64"
+        )
+        try MiniTest.expect(sawStop)
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "build" })
+        try MiniTest.expect(mock.calls.contains { $0.arguments.starts(with: ["builder", "stop"]) })
+        // status before build
+        let statusIdx = mock.calls.firstIndex { $0.arguments == ["builder", "status", "--format", "json"] }!
+        let buildIdx = mock.calls.firstIndex { $0.arguments.first == "build" }!
+        let stopIdx = mock.calls.firstIndex { $0.arguments.starts(with: ["builder", "stop"]) }!
+        try MiniTest.expect(statusIdx < buildIdx)
+        try MiniTest.expect(buildIdx < stopIdx)
+    }),
+    ("buildLeavesRunningBuilderAlone", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["builder", "status", "--format", "json"] {
+                    let json = #"[{"id":"buildkit","status":{"state":"running"}}]"#
+                    return ProcessResult(exitCode: 0, stdout: Data(json.utf8), stderr: Data())
+                }
+                if args.first == "build" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.starts(with: ["builder", "stop"]) {
+                    return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("should not stop".utf8))
+                }
+                return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("unexpected".utf8))
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try runtime.build(
+            contextDirectory: "/ctx",
+            dockerfilePath: "/ctx/Dockerfile",
+            tag: "adev:test",
+            platform: "linux/arm64"
+        )
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "build" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.starts(with: ["builder", "stop"]) })
+    }),
+    ("buildRestoresStoppedBuilderAfterFailure", {
+        let mock = MockProcessRunner()
+        var sawStop = false
+        mock.handlers = [
+            { args in
+                if args == ["builder", "status", "--format", "json"] {
+                    let json = #"[{"id":"buildkit","status":{"state":"stopped"}}]"#
+                    return ProcessResult(exitCode: 0, stdout: Data(json.utf8), stderr: Data())
+                }
+                if args.first == "build" {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("build failed".utf8))
+                }
+                if args.starts(with: ["builder", "stop"]) {
+                    sawStop = true
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("unexpected".utf8))
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            try runtime.build(
+                contextDirectory: "/ctx",
+                dockerfilePath: "/ctx/Dockerfile",
+                tag: "adev:test",
+                platform: "linux/arm64"
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.featureBuild)
+        }
+        try MiniTest.expect(sawStop)
+        try MiniTest.expect(mock.calls.contains { $0.arguments.starts(with: ["builder", "stop"]) })
     })
 ]
 

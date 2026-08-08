@@ -119,13 +119,25 @@ On `up` when `features` is non-empty (code: `Sources/ADevContainerLib/Features/`
 |------|----------|
 | Admit | Feature ref → options map; **OCI** (`ghcr.io/…/node:1`) and **local path** (`./…`, `../…`, absolute `/…`, `file://…` relative to workspace root); declaration key-sorted for stable ties |
 | Reject | Any ref containing `docker-outside-of-docker`, `docker-in-docker`, or `docker-from-docker` (forever, OCI or local); metadata `privileged` / `securityOpt` ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)) |
-| build.rosetta | Before fetch/build: ensure Apple BuildKit `build.rosetta=false`. Already false → silent. True/missing → one-time TTY consent (or fail); CI auto-accept via `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`. Never install Rosetta; never restore `true` after consent |
+| build.rosetta | Before fetch/build: ensure Apple BuildKit `build.rosetta=false`. Already false → silent. True/missing → one-time TTY consent (or fail); CI auto-accept via `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`. Never install Rosetta; never restore `true` after consent. Config pickup uses `restartBuilderForConfig` (stop+delete only) — **not** the restore-after-build path below |
 | Fetch / load | **Local path:** validate package (`devcontainer-feature.json` + `install.sh`) and copy into feature cache. **OCI:** embedded HTTPS client (`OCIFeatureClient`) — **not** `container image pull`, ORAS, or Node |
 | Order | `dependsOn` / `installsAfter` topo-sort (id last-segment match so `./x/sample-a` satisfies `…/sample-a:1`); cycle → structured error |
-| Build | Generate Dockerfile (`RUN` each `install.sh` as root); `container build --platform` host-native (`linux/arm64` on Apple Silicon) via AppleContainerRuntime; **no** `--rosetta` unless user opted in via `runArgs`; deterministic derived tag `adev-{base}:{hash12}` (empty base → `adevcontainer:{hash12}`; no `adevcontainer/features:` prefix); reuse when tag exists |
+| Build | Generate Dockerfile (`RUN` each `install.sh` as root); `container build --platform` host-native (`linux/arm64` on Apple Silicon) via `AppleContainerRuntime.build`; **no** `--rosetta` unless user opted in via `runArgs`; deterministic derived tag `adev-{base}:{hash12}` (empty base → `adevcontainer:{hash12}`; no `adevcontainer/features:` prefix); reuse when tag exists. See BuildKit builder lifecycle |
 | Merge | Feature contributions into effective config before create (`init`, `capAdd`, mounts, lifecycle hooks; `containerEnv` **config wins**). PATH refs in env expanded on create **and** exec — see PATH expansion |
 | Create | Workspace container from **derived image** with same `--platform` |
 | Skip | Reuse-running path: no feature fetch/build |
+
+### BuildKit builder lifecycle (Features image build)
+
+adevcontainer does **not** pin the BuildKit image tag; Apple `container` owns builder image/version. We never `builder start` — `container build` may auto-start BuildKit.
+
+On `AppleContainerRuntime.build` (Features derived image):
+
+1. **Probe** `container builder status --format json` first.
+2. **If builder was not running** (empty list or non-running state): after build finishes — success **or** failure (`defer`) — best-effort `builder stop` so we do not leave BuildKit up when the user had it stopped.
+3. **If builder was already running**, or status is **undetermined** (probe/parse fail): do **not** stop after build.
+
+`restartBuilderForConfig` (stop+delete for rosetta config pickup) is separate from this restore-after-build behavior.
 
 **Fixtures:** `features-node`, `features-triple`, `features-local`, `features-docker-ood`, `features-sample/*`.
 

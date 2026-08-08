@@ -104,6 +104,26 @@ public struct AppleContainerRuntime: Sendable {
         throw mapFailure(result, action: "builder delete")
     }
 
+    /// Whether the BuildKit builder is currently running (`container builder status --format json`).
+    /// - `true` when any builder entry has `status.state == running`
+    /// - `false` when status is empty (absent), stopped, or any non-running state
+    /// - `true` when status cannot be determined (fail closed: skip restore-stop if unsure)
+    public func isBuilderRunning() -> Bool {
+        guard let result = try? invoke(["builder", "status", "--format", "json"]),
+              result.succeeded,
+              let arr = try? parseJSONArray(result.stdout)
+        else {
+            return true
+        }
+        if arr.isEmpty { return false }
+        for item in arr {
+            let status = item["status"] as? [String: Any] ?? [:]
+            let state = ((status["state"] as? String) ?? "").lowercased()
+            if state == "running" { return true }
+        }
+        return false
+    }
+
     // MARK: - Lifecycle
 
     /// Pull an image. Pass `platform` (e.g. `linux/arm64`) for multi-arch refs; never enables Rosetta.
@@ -138,12 +158,20 @@ public struct AppleContainerRuntime: Sendable {
 
     /// Build a local image via `container build` (Features derived image path).
     /// Always pass host-native `--platform` on arm64; never passes `--rosetta`.
+    /// If the BuildKit builder was not running before the build, stops it again afterward
+    /// (success or failure) so a side-effect start does not leave it running.
     public func build(
         contextDirectory: String,
         dockerfilePath: String,
         tag: String,
         platform: String? = ContainerPlatform.defaultLinuxPlatform
     ) throws {
+        let wasRunning = isBuilderRunning()
+        defer {
+            if !wasRunning {
+                try? builderStop()
+            }
+        }
         var args = ["build", "-f", dockerfilePath, "-t", tag]
         if let platform, !platform.isEmpty {
             args += ["--platform", platform]

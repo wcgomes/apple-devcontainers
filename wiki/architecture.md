@@ -84,7 +84,7 @@ Shipped under `Sources/ADevContainerLib/Features/`. On `up` with a non-empty `fe
 1. Admit **OCI** and **local path** refs; forever-reject docker-* markers and metadata `privileged` / `securityOpt`.
 2. One-time consent for `build.rosetta=false` when needed (CI: `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`).
 3. Load local packages or fetch OCI over HTTPS (embedded client).
-4. Order via `dependsOn` / `installsAfter`; build derived image via `container build --platform linux/arm64`; reuse tag when unchanged.
+4. Order via `dependsOn` / `installsAfter`; build derived image via `container build --platform linux/arm64`; reuse tag when unchanged. If BuildKit was stopped before the build, restore-after-build stops it again (best-effort); already-running / undetermined status → leave alone.
 5. Create from derived image; merge contributions (env **config wins**, `${PATH}` expansion on create and later exec).
 
 Full runner steps, reject list, and progress lines: [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md).
