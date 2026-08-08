@@ -61,7 +61,7 @@ adevcontainer doctor
 **Local checkout** (`up`):
 
 ```bash
-adevcontainer up
+adevcontainer up --vscode
 adevcontainer exec -it
 adevcontainer stop
 ```
@@ -69,11 +69,13 @@ adevcontainer stop
 **Clone a repository** (no local checkout required — source lives in a volume for better I/O on Apple `container`):
 
 ```bash
-adevcontainer clone https://github.com/org/repo.git   # or git@github.com:org/repo.git
+adevcontainer clone https://github.com/org/repo.git --vscode   # or git@github.com:org/repo.git
 adevcontainer list
 adevcontainer exec --name <name> -it
 adevcontainer prune --name <name>
 ```
+
+`--vscode` opens VS Code on the remote workspace and runs `postAttachCommand`. Omit it if you only need the container (manual attach or `exec`).
 
 Uses your Mac git credentials (HTTPS helpers / SSH agent), confirms author identity on a TTY, and ensures `git` in the image when needed. Work, commit, and push inside the container.
 
@@ -143,16 +145,15 @@ The Features path mirrors official Dev Containers (Dockerfile + `container build
 
 **Hash note (v1):** local path identity uses the path string + options; editing files under the same path may not invalidate the derived tag until the path or options change.
 
-### VS Code attach and optional `--vscode`
+### VS Code (`--vscode`)
 
-After `up` or `clone`, the container is running and listable (`adevcontainer list`). Attach manually with experimental **Attach to Running Apple Container**.
+Recommended: pass **`--vscode`** on `up`, `start`, or `clone` to open a new VS Code window on the remote workspace folder.
 
-Optionally pass **`--vscode`** on `up`, `start`, or `clone` for a **best-effort** open of a **new** VS Code window on the resolved remote workspace folder (via the host `code` CLI and Remote - Containers `apple-container` URI). This is a convenience side effect only:
-
-- **Host prereqs:** VS Code, extension `ms-vscode-remote.remote-containers`, experimental Apple support (`dev.containers.experimentalAppleContainerSupport: true`), and a discoverable `code` CLI (`PATH` or the standard macOS app location; Insiders may be tried).
-- **Soft-fail open:** If `code` is missing or launch fails, the CLI warns on **stderr** and still reports lifecycle **success** (container is not torn down). Open failure alone does not fail the command. `--json` success shape is unchanged on success.
-- **`postAttachCommand` gate:** Config and feature `postAttachCommand` hooks run **only after a successful `--vscode` open** (CLI-initiated attach approximation — not IDE remote-ready confirmation). Without `--vscode`, or when open soft-fails, postAttach is **skipped** (one stderr status line when any postAttach is present; no skip line when absent). If postAttach **runs** and exits non-zero, the command **fails** with a structured error naming postAttach, but the container is **kept** (not deleted/stopped).
-- **Not full parity:** `--vscode` does **not** claim full Dev Containers extension parity (up/rebuild driver, extension clone-in-volume, etc.). Manual attach remains valid when the flag is omitted or open soft-fails.
+- Runs config + feature **`postAttachCommand`** only after a successful open. Without `--vscode`, or if open soft-fails, postAttach is skipped.
+- Soft-fail: missing VS Code/`code` → warn on stderr; container still succeeds.
+- Prereqs: VS Code + Remote - Containers + `dev.containers.experimentalAppleContainerSupport: true` (and a discoverable `code` CLI).
+- Manual attach (experimental **Attach to Running Apple Container**) works without the flag.
+- Not full Dev Containers extension parity — convenience open only.
 
 ### Non-goals (current)
 
