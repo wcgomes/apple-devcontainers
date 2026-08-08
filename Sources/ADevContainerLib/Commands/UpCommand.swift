@@ -20,6 +20,13 @@ public struct UpOptions: Sendable {
 }
 
 public enum UpCommand {
+    /// Optional Features fetch override for tests (nil → DefaultFeatureFetcher with workspace path).
+    nonisolated(unsafe) public static var featuresFetcherOverride: (any FeatureFetching)?
+    /// Optional Features cache root override for tests.
+    nonisolated(unsafe) public static var featuresCacheRootOverride: String?
+    /// Optional override for native-arm BuildKit ensure (tests inject no-op / mock).
+    nonisolated(unsafe) public static var ensureNativeArmBuildOverride: (() throws -> Void)?
+
     public static func run(
         options: UpOptions,
         runtime: AppleContainerRuntime,
@@ -30,13 +37,6 @@ public enum UpCommand {
         let resolved = try ConfigResolver.resolve(
             workspacePath: options.workspacePath,
             localEnv: localEnv
-        )
-        let request = CreateRequest.from(
-            resolved: resolved.config,
-            identityName: resolved.containerName,
-            labels: resolved.labels,
-            configHash: resolved.configHash,
-            workspacePath: resolved.workspacePath
         )
 
         // hostRequirements: fail up on shortfall/unreadable host; warn gpu; limits applied on create.
@@ -60,14 +60,15 @@ public enum UpCommand {
             } else if options.recreate {
                 try runtime.delete(nameOrId: existing.id, force: true)
             } else if existing.isRunning {
+                // Reuse running: no feature fetch/build, no lifecycle hooks.
                 StatusPrinter.status("Reusing running container \(existing.name)")
                 LifecycleRunner.emitPostAttachSkipIfNeeded(config: resolved.config)
                 StatusPrinter.status("Ready")
                 return successResult(id: existing.id, name: existing.name, config: resolved.config)
             } else {
+                // Start stopped: no rebuild (features already baked on create).
                 StatusPrinter.status("Starting container")
                 try runtime.start(nameOrId: existing.id)
-                // Restart path: postStart only; do not delete on failure.
                 try LifecycleRunner.runRestartPostStart(
                     containerId: existing.id,
                     config: resolved.config,
@@ -83,27 +84,78 @@ public enum UpCommand {
         if !resolved.mountPromotions.isEmpty {
             fputs(MountNormalizer.warningMessage(promotions: resolved.mountPromotions) + "\n", stderr)
         }
-        if !options.skipPull {
-            StatusPrinter.status("Pulling image \(request.image)")
-            // Best-effort pull; create will also fetch if needed
-            try? runtime.pullImage(request.image)
+
+        var effectiveConfig = resolved.config
+        let platform = ContainerPlatform.defaultLinuxPlatform
+
+        if !resolved.config.features.isEmpty {
+            // One-time consent to disable BuildKit Rosetta for native arm64 feature image builds.
+            if let override = ensureNativeArmBuildOverride {
+                try override()
+            } else {
+                try AppleContainerConfig.ensureNativeArmBuild(runtime: runtime)
+            }
+
+            // Pull base image (native platform) before Features build FROM it.
+            if !options.skipPull {
+                StatusPrinter.status("Pulling image \(resolved.config.image)")
+                try? runtime.pullImage(resolved.config.image, platform: platform)
+            }
+            let fetcher: any FeatureFetching = featuresFetcherOverride
+                ?? DefaultFeatureFetcher(workspacePath: resolved.workspacePath)
+            let cacheRoot = featuresCacheRootOverride ?? FeatureCache.defaultRoot()
+            let deps = FeaturesRunner.Dependencies(
+                fetcher: fetcher,
+                runtime: runtime,
+                cacheRoot: cacheRoot,
+                platform: platform
+            )
+            let featuresResult = try FeaturesRunner.run(
+                features: resolved.config.features,
+                baseImage: resolved.config.image,
+                deps: deps,
+                remoteUser: resolved.config.remoteUser,
+                containerUser: resolved.config.containerUser
+            )
+            // Create uses derived image; merge runtime contributions from feature metadata.
+            effectiveConfig = try FeatureContributionMerge.apply(
+                contributions: featuresResult.contributions,
+                to: effectiveConfig
+            )
+            effectiveConfig.image = featuresResult.derivedImage
+        } else if !options.skipPull {
+            StatusPrinter.status("Pulling image \(effectiveConfig.image)")
+            try? runtime.pullImage(effectiveConfig.image, platform: platform)
         }
+
+        let request = CreateRequest.from(
+            resolved: effectiveConfig,
+            identityName: resolved.containerName,
+            labels: resolved.labels,
+            configHash: resolved.configHash,
+            workspacePath: resolved.workspacePath,
+            platform: platform
+        )
 
         StatusPrinter.status("Creating container \(resolved.containerName)")
         let id = try runtime.create(request: request)
         StatusPrinter.status("Starting container")
-        try runtime.start(nameOrId: id)
+        do {
+            try runtime.start(nameOrId: id)
+        } catch {
+            try? runtime.delete(nameOrId: id, force: true)
+            throw error
+        }
 
-        // Fresh create: onCreate → updateContent → postCreate → postStart; delete on any failure.
         try LifecycleRunner.runCreatePath(
             containerId: id,
-            config: resolved.config,
+            config: effectiveConfig,
             runtime: runtime
         )
 
-        LifecycleRunner.emitPostAttachSkipIfNeeded(config: resolved.config)
+        LifecycleRunner.emitPostAttachSkipIfNeeded(config: effectiveConfig)
         StatusPrinter.status("Ready")
-        return successResult(id: id, name: resolved.containerName, config: resolved.config)
+        return successResult(id: id, name: resolved.containerName, config: effectiveConfig)
     }
 
     private static func enforceHostRequirements(

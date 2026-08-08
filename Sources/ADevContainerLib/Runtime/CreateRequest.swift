@@ -49,6 +49,8 @@ public struct CreateRequest: Equatable, Sendable {
     public var memoryLimit: String?
     /// Apple `container create -c` value when hostRequirements.cpus is set.
     public var cpuLimit: String?
+    /// OCI platform for multi-arch images (e.g. `linux/arm64`). Never implies `--rosetta`.
+    public var platform: String?
     public var configHash: String
 
     public init(
@@ -66,6 +68,7 @@ public struct CreateRequest: Equatable, Sendable {
         runArgs: [AllowlistedRunArg] = [],
         memoryLimit: String? = nil,
         cpuLimit: String? = nil,
+        platform: String? = nil,
         configHash: String
     ) {
         self.name = name
@@ -82,6 +85,7 @@ public struct CreateRequest: Equatable, Sendable {
         self.runArgs = runArgs
         self.memoryLimit = memoryLimit
         self.cpuLimit = cpuLimit
+        self.platform = platform
         self.configHash = configHash
     }
 
@@ -105,7 +109,9 @@ public struct CreateRequest: Equatable, Sendable {
             args += ["--mount", mount.mountFlagValue]
         }
 
-        for (k, v) in env.sorted(by: { $0.key < $1.key }) {
+        // Apple container does not expand ${PATH}/$PATH in -e values.
+        let expandedEnv = Self.expandEnvPathRefs(env)
+        for (k, v) in expandedEnv.sorted(by: { $0.key < $1.key }) {
             args += ["-e", "\(k)=\(v)"]
         }
 
@@ -134,9 +140,77 @@ public struct CreateRequest: Equatable, Sendable {
             args += ["-c", cpuLimit]
         }
 
+        if let platform, !platform.isEmpty {
+            args += ["--platform", platform]
+        }
+
         // Keep container alive for attach/exec.
-        args += ["--entrypoint", "sleep", image, "infinity"]
+        // Never pass --rosetta here; user must opt in via runArgs if needed.
+        args += ["--entrypoint", "/bin/sleep", image, "infinity"]
         return args
+    }
+
+    /// Default Linux PATH used when expanding `${PATH}` / `$PATH` (Apple container does not expand).
+    public static let defaultLinuxPath =
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+    /// Expand `${PATH}` and bare `$PATH` (word-boundary) in containerEnv values for create `-e`.
+    /// PATH self-reference always substitutes `defaultLinuxPath` (not recursive).
+    /// Other keys use the expanded PATH from the map when present, else the default.
+    public static func expandEnvPathRefs(_ env: [String: String]) -> [String: String] {
+        let expandedPath: String
+        if let rawPath = env["PATH"] {
+            expandedPath = expandPathRefs(in: rawPath, pathReplacement: defaultLinuxPath)
+        } else {
+            expandedPath = defaultLinuxPath
+        }
+        var out: [String: String] = [:]
+        out.reserveCapacity(env.count)
+        for (k, v) in env {
+            if k == "PATH" {
+                out[k] = expandedPath
+            } else {
+                out[k] = expandPathRefs(in: v, pathReplacement: expandedPath)
+            }
+        }
+        return out
+    }
+
+    private static func expandPathRefs(in value: String, pathReplacement: String) -> String {
+        guard value.contains("$") else { return value }
+        var result = value.replacingOccurrences(of: "${PATH}", with: pathReplacement)
+        result = expandBareDollarPath(in: result, replacement: pathReplacement)
+        return result
+    }
+
+    /// Replace `$PATH` only when not a longer identifier (`$PATHNAME`, `$PATH_FOO`).
+    private static func expandBareDollarPath(in value: String, replacement: String) -> String {
+        var out = ""
+        out.reserveCapacity(value.utf8.count)
+        var i = value.startIndex
+        while i < value.endIndex {
+            if value[i] == "$" {
+                let afterDollar = value.index(after: i)
+                if value[afterDollar...].hasPrefix("PATH") {
+                    let afterPath = value.index(afterDollar, offsetBy: 4)
+                    let boundaryOK =
+                        afterPath == value.endIndex
+                        || !isEnvIdentContinuation(value[afterPath])
+                    if boundaryOK {
+                        out.append(contentsOf: replacement)
+                        i = afterPath
+                        continue
+                    }
+                }
+            }
+            out.append(value[i])
+            i = value.index(after: i)
+        }
+        return out
+    }
+
+    private static func isEnvIdentContinuation(_ c: Character) -> Bool {
+        c.isLetter || c.isNumber || c == "_"
     }
 
     public static func from(
@@ -144,7 +218,8 @@ public struct CreateRequest: Equatable, Sendable {
         identityName: String,
         labels: [String: String],
         configHash: String,
-        workspacePath: String
+        workspacePath: String,
+        platform: String? = ContainerPlatform.defaultLinuxPlatform
     ) -> CreateRequest {
         let (memoryLimit, cpuLimit) = mergeMemoryCpuLimits(from: resolved)
         return CreateRequest(
@@ -162,6 +237,7 @@ public struct CreateRequest: Equatable, Sendable {
             runArgs: resolved.runArgs,
             memoryLimit: memoryLimit,
             cpuLimit: cpuLimit,
+            platform: platform,
             configHash: configHash
         )
     }

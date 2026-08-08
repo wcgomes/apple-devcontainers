@@ -10,13 +10,14 @@ Facts that constrain the CLI. Not a full Apple container manual — only gaps th
 | Compose | Docker Compose common | **Unsupported** — hard reject |
 | Privileged | `--privileged` widely used | **Rejected** in v1 policy |
 | Devices | `--device=…` (e.g. `/dev/net/tun`) | **Rejected** in v1 |
-| Features | OCI feature artifacts + image build | **Later** — not current surface |
+| Features | OCI + local path feature packages + image build | **Supported** (OCI + local path runner); docker-* markers forever-reject; native arm64 build (no Rosetta by default) |
 | Events / rich watch APIs | Engine events often used by tools | Do not assume Docker-equivalent event stream |
 | List + label filter | `docker ps --filter label=…` | **No label filter on list** — client-side filter after JSON; prefer deterministic name + inspect |
 | VS Code | Dev Containers full up/rebuild | **Attach-only** after CLI `up` (experimental Attach to Running Apple Container) |
 | Default process | Often long-running or sleep entry | Need explicit keep-alive (`--entrypoint sleep … infinity`) for long-lived devcontainers |
 | Create identity | Name vs id often distinct | `create --name` **is** the id (`configuration.id`) |
 | Bind mounts | File or directory host source OK | **Directory sources only** — file binds rejected by runtime |
+| Env PATH | Shell/`${PATH}` often expanded | Apple `container` does **not** expand `${PATH}` — product expands on create |
 
 ### File bind mounts
 
@@ -28,21 +29,25 @@ The mounts-ports fixture uses a `~/.kube` **directory** bind; `reference/devcont
 
 Useful machine-JSON paths documented against Apple container **1.2.x**: `configuration.id`, `status.state`, `configuration.labels`. Full parse rules: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
 
+### Features build (Rosetta / platform)
+
+Apple BuildKit with `build.rosetta=true` can require Rosetta even for native arm64 image builds. Product ensures `build.rosetta=false` (one-time consent) and passes `--platform linux/arm64` on Features pull/build/create. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
+
 ## Config surface implications
 
 - **Hard errors** for unsupported props/flags — never silent ignore.
 - **`forwardPorts`**: map to publish ports; do not promise IDE auto-forward behavior.
 - **`portsAttributes`**: metadata only at MVP (labels/docs for humans/tools); not full VS Code auto-forward semantics.
 - **Lifecycle**: run via `container exec` (hook matrix: create-path full order; start-stopped `postStart` only; reuse none; `postAttach` admit + skip on `up`). Not Docker entrypoint injection parity. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
-- **`runArgs`**: allowlist (`--init`, `--cap-add`/`--cap-drop`); privileged/tun/device and unknown flags fail closed.
+- **`runArgs`**: allowlist (`--init`, `--cap-add`/`--cap-drop`, …); privileged/tun/device and unknown flags fail closed.
 - **`hostRequirements`**: preflight — fail on memory/cpus shortfall; map requested limits to create `-m`/`-c` when host OK; warn unsupported `gpu`; fail on unparseable/unknown keys.
-- **Features** including `docker-outside-of-docker`: not executed (next; see [phase-ladder](phase-ladder.md)); ood is forever-reject in v1 ([0003](../decisions/0003-reject-docker-ood-privileged-tun.md)).
+- **Features**: OCI + local path fetch/load + derived image build on `up` (see [cli-runtime-boundary](../conventions/cli-runtime-boundary.md)); forever-reject `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker` and privileged/securityOpt metadata ([0003](../decisions/0003-reject-docker-ood-privileged-tun.md)).
 
 ## Reference config hotspots
 
 `reference/devcontainer.json` exercises several gaps at once:
 
-- Features block (ood, node, third-party) — ood rejected; other features deferred
+- Features block (ood, node, third-party) — ood forever-rejected; other OCI/local features run via Features runner
 - `runArgs` privileged + `NET_ADMIN` + tun device — rejected
 - Bind + named volume mounts — supported
 - `postCreateCommand` — supported

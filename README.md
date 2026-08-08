@@ -104,6 +104,30 @@ Pure JSON samples under `Tests/Fixtures/`:
 - `lifecycle.json` — postCreateCommand
 - `lifecycle-hooks.json` — lifecycle hooks (+ admitted postAttach)
 - `runargs-host.json` — allowlisted runArgs + hostRequirements
+- `features-node.json` — OCI Features runner (Node feature only; no docker-ood)
+- `features-triple.json` — multi-feature install (node + git + github-cli)
+- `features-local.json` — local path features (`./.devcontainer/features/sample-a` + `sample-b`)
+- `features-docker-ood.json` — forever-reject fixture (`docker-outside-of-docker`)
+- `features-sample/` — on-disk sample feature packages for unit + local E2E
+
+### Features (OCI + local path)
+
+`up` admits a top-level `features` object map of **feature ref → options**. Refs may be:
+
+- **OCI** — e.g. `ghcr.io/devcontainers/features/node:1`
+- **Local path** — `./…`, `../…`, absolute `/…`, or `file://…` (resolved relative to the **workspace root**; directory must contain `devcontainer-feature.json` + `install.sh`)
+
+The Features path mirrors official Dev Containers (Dockerfile + `container build`) on **native arm64** — never `--rosetta` by default:
+
+1. **One-time consent** (only if needed): when Apple BuildKit still has `build.rosetta=true` (or the key is missing), `up` explains and asks once to set `build.rosetta=false` in the host Apple container config so feature image builds do not require Rosetta. Already `false` → silent. Decline → fail. Non-interactive: set `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1` to auto-accept, or set the config yourself.
+2. Loads local path packages from disk into the feature cache, or fetches OCI artifacts over HTTPS (embedded registry client — **not** `container image pull`, ORAS, or Node)
+3. Orders installs via `dependsOn` / `installsAfter` (id last-segment match so `./x/sample-a` satisfies `…/sample-a:1`) and merges runtime contributions (`init`, `capAdd`, `containerEnv` with **config wins**, mounts, lifecycle hooks). On create, `${PATH}` / `$PATH` in env values are expanded (Apple `container` does not expand them).
+4. Generates a Dockerfile and runs `container build --platform linux/arm64` (on Apple Silicon) to a deterministic `adevcontainer/features:<hash>` tag (reuse when the tag already exists)
+5. Creates from the **derived image** with the same platform flag, then runs lifecycle hooks
+
+**Forever-reject:** any feature ref containing `docker-outside-of-docker`, `docker-in-docker`, or `docker-from-docker` (OCI or local path); feature metadata with `privileged: true` or `securityOpt`.
+
+**Hash note (v1):** local path identity uses the path string + options; editing files under the same path may not invalidate the derived tag until the path or options change.
 
 ## VS Code attach
 
@@ -112,11 +136,11 @@ After `up`, the container is running and listable. Attach manually with experime
 ## Non-goals (current)
 
 - No Docker Compose driver
-- No `docker-outside-of-docker` / features runner
-- No `--privileged` or `--device` (including tun)
+- No `docker-outside-of-docker` (forever-reject)
+- No `--privileged` or `--device` (including tun); feature privileged/securityOpt forever-reject
 - No blind `runArgs` passthrough (runArgs allowlist only)
 - No full `postAttachCommand` execution / IDE attach hook
-- No Node / `@devcontainers/cli` dependency
+- No Node / `@devcontainers/cli` / ORAS dependency for Features fetch
 
 ## Tests
 
@@ -126,16 +150,16 @@ Command Line Tools hosts do not ship `XCTest.framework`, so the suite of record 
 swift run adevcontainerTests
 ```
 
-Unit + integration coverage via `swift run adevcontainerTests` (discovery, JSONC, substitution, admission, lifecycle, runArgs, hostRequirements, runtime argv mocks, commands, optional real-container integration). **~105 passed** (runArgs allowlist + hostRequirements enforce+apply). Integration skips cleanly if Apple `container` is unavailable. Override image with `ADEVCONTAINER_TEST_IMAGE`.
+~156+ offline via `swift run adevcontainerTests` (discovery, JSONC, substitution, admission, lifecycle, runArgs, hostRequirements, Features runner mocks + local path fixtures, runtime argv mocks, commands, optional real-container integration). Integration skips cleanly if Apple `container` is unavailable. Local features E2E runs when Apple `container` is up (no ghcr gate). Override image with `ADEVCONTAINER_TEST_IMAGE`. Optional live OCI Features E2E: `ADEVCONTAINER_FEATURES_E2E=1`.
 
 ## Architecture
 
 ```
-devcontainer.json → Config resolver → AppleContainerRuntime → container CLI
+devcontainer.json → Config resolver → [Features runner] → AppleContainerRuntime → container CLI
 ```
 
-Only `AppleContainerRuntime` invokes `container`. Labels: `devcontainer.local_folder`, `devcontainer.config_file`, `devcontainer.config_hash`.
+Only `AppleContainerRuntime` invokes `container`. Features: OCI fetch is embedded HTTPS; local path via DefaultFeatureFetcher (no ORAS/Node). Labels: `devcontainer.local_folder`, `devcontainer.config_file`, `devcontainer.config_hash`.
 
-Delivery planning: see `wiki/domain/phase-ladder.md`. Next: Features.
+Delivery planning: see `wiki/domain/phase-ladder.md`.
 
-**Spec:** realized contract `specs/adevcontainer/spec.md` (core + lifecycle + runArgs allowlist + hostRequirements). No active change open. Archived: `specs/changes/archive/20260807-adevcontainer-core/`, `specs/changes/archive/20260807-lifecycle-runargs-host/`.
+**Spec:** realized contract `specs/adevcontainer/spec.md` (core + lifecycle + runArgs + hostRequirements + Features). No active changes. Archived: `specs/changes/archive/20260807-adevcontainer-core/`, `specs/changes/archive/20260807-lifecycle-runargs-host/`, `specs/changes/archive/20260807-features-runner/`. Next planning: Phase 6 stretch / advanced parity (optional).

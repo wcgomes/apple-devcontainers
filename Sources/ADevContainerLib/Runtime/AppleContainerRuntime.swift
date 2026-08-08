@@ -65,16 +65,184 @@ public struct AppleContainerRuntime: Sendable {
         return try parseJSONObject(result.stdout)
     }
 
+    /// Effective system properties as TOML text (`container system property list`).
+    public func systemPropertyList() throws -> String {
+        let result = try invoke(["system", "property", "list"])
+        try ensureSuccess(result, action: "system property list")
+        return result.stdoutString
+    }
+
+    /// Stop Apple container services (`container system stop`).
+    public func systemStop() throws {
+        let result = try invoke(["system", "stop"], streamStderr: true)
+        try ensureSuccess(result, action: "system stop")
+    }
+
+    /// Start Apple container services (`container system start`).
+    public func systemStart() throws {
+        let result = try invoke(["system", "start"], streamStderr: true)
+        try ensureSuccess(result, action: "system start")
+    }
+
+    /// Stop the BuildKit builder container if running.
+    public func builderStop() throws {
+        let result = try invoke(["builder", "stop"], streamStderr: true)
+        try ensureSuccess(result, action: "builder stop")
+    }
+
+    /// Delete the BuildKit builder so the next build starts fresh (picks up config).
+    public func builderDelete(force: Bool = true) throws {
+        var args = ["builder", "delete"]
+        if force { args.append("--force") }
+        let result = try invoke(args, streamStderr: true)
+        if result.succeeded { return }
+        // Alternate verb
+        var altArgs = ["builder", "rm"]
+        if force { altArgs.append("--force") }
+        let alt = try invoke(altArgs, streamStderr: true)
+        if alt.succeeded { return }
+        throw mapFailure(result, action: "builder delete")
+    }
+
     // MARK: - Lifecycle
 
-    public func pullImage(_ image: String) throws {
-        let result = try invoke(["image", "pull", image], streamStderr: true)
-        // Some versions use `container image pull`
+    /// Pull an image. Pass `platform` (e.g. `linux/arm64`) for multi-arch refs; never enables Rosetta.
+    public func pullImage(_ image: String, platform: String? = ContainerPlatform.defaultLinuxPlatform) throws {
+        var args = ["image", "pull"]
+        if let platform, !platform.isEmpty {
+            args += ["--platform", platform]
+        }
+        args.append(image)
+        let result = try invoke(args, streamStderr: true)
         if result.succeeded { return }
-        // Fallback: pull via create will fetch; surface error if explicit pull fails hard
-        let alt = try invoke(["images", "pull", image], streamStderr: true)
+        // Fallback alternate verb
+        var altArgs = ["images", "pull"]
+        if let platform, !platform.isEmpty {
+            altArgs += ["--platform", platform]
+        }
+        altArgs.append(image)
+        let alt = try invoke(altArgs, streamStderr: true)
         if alt.succeeded { return }
         throw mapFailure(result, action: "image pull \(image)")
+    }
+
+    /// Copy files between host and container (`container cp <source> <destination>`).
+    /// Destination may be `containerId:/path` or a local path.
+    public func copy(from source: String, to destination: String) throws {
+        let result = try invoke(["cp", source, destination], streamStderr: true)
+        if result.succeeded { return }
+        let alt = try invoke(["copy", source, destination], streamStderr: true)
+        if alt.succeeded { return }
+        throw mapFailure(result, action: "cp \(source) → \(destination)")
+    }
+
+    /// Build a local image via `container build` (Features derived image path).
+    /// Always pass host-native `--platform` on arm64; never passes `--rosetta`.
+    public func build(
+        contextDirectory: String,
+        dockerfilePath: String,
+        tag: String,
+        platform: String? = ContainerPlatform.defaultLinuxPlatform
+    ) throws {
+        var args = ["build", "-f", dockerfilePath, "-t", tag]
+        if let platform, !platform.isEmpty {
+            args += ["--platform", platform]
+        }
+        args.append(contextDirectory)
+        let result = try invoke(args, streamStderr: true)
+        if result.succeeded { return }
+        let err = mapFailure(result, action: "build -t \(tag)")
+        throw CLIError(
+            code: CLIErrorCode.featureBuild,
+            property: "features",
+            message: err.message,
+            hint: "Inspect the generated Dockerfile and Apple container build logs; ensure build.rosetta=false for native arm64"
+        )
+    }
+
+    /// True when a local image with the given reference/tag exists.
+    public func imageExists(ref: String) throws -> Bool {
+        // Prefer inspect when available.
+        let inspect = try invoke(["image", "inspect", ref])
+        if inspect.succeeded {
+            return true
+        }
+        // Fallback: list and match reference.
+        let list = try invoke(["image", "list", "--format", "json"])
+        guard list.succeeded else {
+            // Try alternate list form
+            let alt = try invoke(["images", "list", "--format", "json"])
+            guard alt.succeeded, let arr = try? parseJSONArray(alt.stdout) else {
+                return false
+            }
+            return imageListContains(arr, ref: ref)
+        }
+        guard let arr = try? parseJSONArray(list.stdout) else { return false }
+        return imageListContains(arr, ref: ref)
+    }
+
+    /// Labels from a local image inspect (empty when unavailable).
+    public func imageLabels(ref: String) throws -> [String: String] {
+        let result = try invoke(["image", "inspect", ref])
+        guard result.succeeded else { return [:] }
+        if let arr = try? parseJSONArray(result.stdout), let first = arr.first {
+            return extractImageLabels(first)
+        }
+        if let obj = try? parseJSONObject(result.stdout) {
+            return extractImageLabels(obj)
+        }
+        return [:]
+    }
+
+    private func imageListContains(_ arr: [[String: Any]], ref: String) -> Bool {
+        for item in arr {
+            if imageItemMatches(item, ref: ref) { return true }
+        }
+        return false
+    }
+
+    private func imageItemMatches(_ item: [String: Any], ref: String) -> Bool {
+        if let reference = item["reference"] as? String, reference == ref { return true }
+        if let id = item["id"] as? String, id == ref { return true }
+        if let tags = item["tags"] as? [String], tags.contains(ref) { return true }
+        if let names = item["names"] as? [String], names.contains(ref) { return true }
+        if let cfg = item["configuration"] as? [String: Any] {
+            if let reference = cfg["reference"] as? String, reference == ref { return true }
+            if let img = cfg["image"] as? [String: Any],
+               let reference = img["reference"] as? String, reference == ref {
+                return true
+            }
+        }
+        // Match repository:tag parts
+        if let repo = item["repository"] as? String, let tag = item["tag"] as? String {
+            if "\(repo):\(tag)" == ref { return true }
+        }
+        return false
+    }
+
+    private func extractImageLabels(_ obj: [String: Any]) -> [String: String] {
+        if let labels = obj["labels"] as? [String: String] {
+            return labels
+        }
+        if let labels = obj["Labels"] as? [String: String] {
+            return labels
+        }
+        if let labels = obj["labels"] as? [String: Any] {
+            return labels.compactMapValues { $0 as? String }
+        }
+        if let cfg = obj["configuration"] as? [String: Any] {
+            if let labels = cfg["labels"] as? [String: String] {
+                return labels
+            }
+            if let labels = cfg["labels"] as? [String: Any] {
+                return labels.compactMapValues { $0 as? String }
+            }
+        }
+        if let config = obj["Config"] as? [String: Any],
+           let labels = config["Labels"] as? [String: String] {
+            return labels
+        }
+        return [:]
     }
 
     public func ensureVolume(name: String) throws {

@@ -104,9 +104,31 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 
 Missing resources are skipped. Exit non-zero only if deleting an **existing** resource fails. Contrast with `delete` (container only).
 
+## Features runner
+
+On `up` when `features` is non-empty (code: `Sources/ADevContainerLib/Features/`):
+
+| Step | Behavior |
+|------|----------|
+| Admit | Feature ref → options map; **OCI** (`ghcr.io/…/node:1`) and **local path** (`./…`, `../…`, absolute `/…`, `file://…` relative to workspace root); declaration key-sorted for stable ties |
+| Reject | Any ref containing `docker-outside-of-docker`, `docker-in-docker`, or `docker-from-docker` (forever, OCI or local); metadata `privileged` / `securityOpt` |
+| build.rosetta | Before fetch/build: ensure Apple BuildKit `build.rosetta=false`. Already false → silent. True/missing → one-time TTY consent (or fail); CI auto-accept via `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`. Never install Rosetta; never restore `true` after consent |
+| Fetch / load | **Local path:** validate package (`devcontainer-feature.json` + `install.sh`) and copy into feature cache. **OCI:** embedded HTTPS client (`OCIFeatureClient`) — **not** `container image pull`, ORAS, or Node |
+| Order | `dependsOn` / `installsAfter` topo-sort (id last-segment match so `./x/sample-a` satisfies `…/sample-a:1`); cycle → structured error |
+| Build | Generate Dockerfile (`RUN` each `install.sh` as root); `container build --platform` host-native (`linux/arm64` on Apple Silicon) via AppleContainerRuntime; **no** `--rosetta` unless user opted in via `runArgs`; deterministic derived tag `adevcontainer/features:<hash>`; reuse when tag exists |
+| Merge | Feature contributions into effective config before create (`init`, `capAdd`, mounts, lifecycle hooks; `containerEnv` **config wins**). Expand `${PATH}` / `$PATH` in env values on create (Apple container does not expand them) |
+| Create | Workspace container from **derived image** with same `--platform` |
+| Skip | Reuse-running path: no feature fetch/build |
+
+**Fixtures:** `features-node`, `features-triple`, `features-local`, `features-docker-ood`, `features-sample/*`.
+
+**Tests:** ~156+ offline; local E2E when Apple `container` available; OCI E2E opt-in `ADEVCONTAINER_FEATURES_E2E=1`.
+
+Progress lines: `==> Resolving features`, `==> Fetching features`, `==> Building features` (or Reusing); `==> Configuring native arm64 builds (build.rosetta=false)` only when changing config. Realized in `specs/adevcontainer/spec.md`. Archived: `specs/changes/archive/20260807-features-runner/`.
+
 ## Progress / tee
 
-- Progress status lines on **stderr**: `==> …` (pull, create, start, stop, delete, volume create, and related long steps).
+- Progress status lines on **stderr**: `==> …` (pull, create, start, stop, delete, volume create, Features Resolving/Fetching/Building/Reusing, build.rosetta config when changing, and related long steps).
 - Tee Apple `container` stderr onto the same stream for those operations.
 - `--json` keeps **stdout** pure JSON. `ADEVCONTAINER_QUIET=1` silences progress status lines.
 
@@ -140,3 +162,4 @@ Hooks run via runtime **exec** into the running container (effective user + work
 - Embedding a container engine / talking gRPC-private APIs unless product later re-decides.
 - Spawning Docker or Node to “help” Apple container.
 - Emulating privileged or device nodes.
+- Installing Rosetta for Features builds (native arm64 BuildKit only).

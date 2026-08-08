@@ -16,7 +16,7 @@ Greenfield native Swift executable (arm64). Reads `devcontainer.json`, drives Ap
 
 | Path | Role |
 |------|------|
-| `Sources/ADevContainerLib` | Library: resolver, runtime, commands, shared types |
+| `Sources/ADevContainerLib` | Library: resolver, runtime, commands, Features, shared types |
 | Thin executable target | CLI entry only; links the lib |
 | `adevcontainerTests` | Executable product — **suite of record** (MiniTest) |
 
@@ -29,19 +29,20 @@ swift run adevcontainerTests
 ## Pipeline
 
 ```
-devcontainer.json → Config resolver → AppleContainerRuntime → /usr/local/bin/container
+devcontainer.json → Config resolver → [Features runner] → AppleContainerRuntime → /usr/local/bin/container
 ```
 
 1. **Config resolver** — JSONC parse; variable substitution (`${localEnv:*}`, `${localWorkspaceFolderBasename}`); validate supported props; hard-error unsupported (never silent ignore).
-2. **AppleContainerRuntime** — sole boundary to the external CLI; subprocess invoke; parse machine-readable JSON only. See [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md).
-3. **Apple container** — create/run/exec/stop/delete/prune/inspect of the workspace container and related config volumes/image.
+2. **Features runner** (when `features` non-empty) — load local path and/or fetch OCI features; order; ensure `build.rosetta=false`; derived image build; swaps effective image before create. See [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md).
+3. **AppleContainerRuntime** — sole boundary to the external `container` CLI; subprocess invoke; parse machine-readable JSON only. Features OCI fetch is separate (embedded HTTPS); local path is disk copy.
+4. **Apple container** — create/run/exec/stop/delete/prune/inspect/build of the workspace container and related config volumes/image.
 
 ## Commands (product surface)
 
 | Command | Role |
 |---------|------|
 | `doctor` | Host/runtime readiness checks |
-| `up` | Resolve config, create/start/reuse container; ensure named volumes (reuse if present); workspace bind; lifecycle hooks in scope |
+| `up` | Resolve config, create/start/reuse container; ensure named volumes (reuse if present); workspace bind; Features derived image when needed; lifecycle hooks in scope |
 | `exec` | Run command/shell in running container (`-it` / empty cmd → interactive TTY, default `bash`) |
 | `stop` | Stop container |
 | `delete` | Remove **container only** |
@@ -50,7 +51,7 @@ devcontainer.json → Config resolver → AppleContainerRuntime → /usr/local/b
 
 **delete vs prune:** `delete` drops the workspace container only. `prune` also removes config `type=volume` mounts and the config `image` reference. Neither deletes bind-mount host paths or runs global `volume`/`image` prune.
 
-**Progress:** long ops print `==> …` progress lines on stderr and tee Apple `container` stderr (pull/create/start/stop/delete/volume create). `ADEVCONTAINER_QUIET=1` silences progress status.
+**Progress:** long ops print `==> …` progress lines on stderr and tee Apple `container` stderr (pull/create/start/stop/delete/volume create; Features: Resolving/Fetching/Building/Reusing; build.rosetta config when changing). `ADEVCONTAINER_QUIET=1` silences progress status.
 
 ## Identity
 
@@ -76,7 +77,16 @@ devcontainer.json → Config resolver → AppleContainerRuntime → /usr/local/b
 
 ## Features
 
-Features (OCI fetch + derived image build) are **next** (see [phase-ladder.md](domain/phase-ladder.md)) — not in current surface; runner-owned; never docker-ood.
+Shipped under `Sources/ADevContainerLib/Features/` (see [phase-ladder.md](domain/phase-ladder.md)). On `up` with a non-empty `features` map:
+
+1. Admit **OCI** refs and **local path** refs (`./…`, `../…`, absolute `/…`, `file://…`); forever-reject `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker`; forever-reject metadata `privileged` / `securityOpt`.
+2. One-time consent for `build.rosetta=false` when needed (silent if already false; CI: `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`).
+3. Load local packages from disk into the feature cache, or fetch OCI artifacts over HTTPS (embedded client — not `container image pull`, ORAS, or Node).
+4. Order via `dependsOn` / `installsAfter` (id last-segment match); generate Dockerfile (`install.sh` as root).
+5. Build deterministic derived image via `container build --platform linux/arm64` (on Apple Silicon); reuse tag when unchanged; no `--rosetta` by default.
+6. Create workspace container from derived image; merge feature contributions (env with **config wins**, `${PATH}` expansion, mounts, caps, lifecycle hooks).
+
+Progress stderr: `==> Resolving features` / `Fetching features` / `Building features` (or Reusing). Realized in `specs/adevcontainer/spec.md`. Archived: `specs/changes/archive/20260807-features-runner/`.
 
 ## VS Code flow
 
@@ -91,4 +101,4 @@ Team sample: `reference/devcontainer.json` — dotnet image, features (incl. doc
 
 - Not a fork of https://github.com/devcontainers/cli
 - No Docker Compose driver
-- No docker-outside-of-docker / privileged / tun device (hard reject)
+- No docker-outside-of-docker / docker-in-docker / docker-from-docker / privileged / tun device (hard reject)

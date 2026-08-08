@@ -20,7 +20,8 @@ public enum ConfigAdmissions {
         "postAttachCommand",
         "customizations",
         "hostRequirements",
-        "runArgs"
+        "runArgs",
+        "features"
     ]
 
     private static let composeKeys: Set<String> = [
@@ -30,8 +31,6 @@ public enum ConfigAdmissions {
         "runServices",
         "composeFile"
     ]
-
-    private static let dockerOODPrefix = "ghcr.io/devcontainers/features/docker-outside-of-docker"
 
     public static func admit(_ raw: [String: Any]) throws {
         // Compose keys
@@ -44,9 +43,9 @@ public enum ConfigAdmissions {
             )
         }
 
-        // Features — any features block errors; docker-ood called out specially
+        // Features — OCI map admitted; local path / docker-ood forever-reject.
         if let features = raw["features"] {
-            try admitFeatures(features)
+            _ = try FeatureAdmission.parse(features)
         }
 
         // runArgs — allowlisted subset only
@@ -63,12 +62,11 @@ public enum ConfigAdmissions {
         for key in raw.keys {
             if supportedKeys.contains(key) { continue }
             if composeKeys.contains(key) { continue } // already handled
-            if key == "features" { continue } // handled
             throw CLIError(
                 code: CLIErrorCode.unsupportedProperty,
                 property: key,
                 message: "Unsupported property '\(key)'",
-                hint: "Remove '\(key)' or wait for a later phase that supports it"
+                hint: "Remove '\(key)' or wait for a later release that supports it"
             )
         }
 
@@ -94,37 +92,5 @@ public enum ConfigAdmissions {
                 )
             }
         }
-    }
-
-    private static func admitFeatures(_ features: Any) throws {
-        guard let dict = features as? [String: Any] else {
-            throw CLIError(
-                code: CLIErrorCode.unsupportedFeature,
-                property: "features",
-                message: "features must be an object",
-                hint: "Features are not supported on the MVP path — remove the features block"
-            )
-        }
-
-        for featureId in dict.keys {
-            let base = featureId.split(separator: ":").first.map(String.init) ?? featureId
-            if base == dockerOODPrefix || featureId.hasPrefix(dockerOODPrefix) {
-                throw CLIError(
-                    code: CLIErrorCode.unsupportedFeature,
-                    property: "features",
-                    message: "Feature '\(featureId)' is forever-rejected (docker-outside-of-docker)",
-                    hint: "Remove docker-outside-of-docker; Apple container has no privileged/device path for this"
-                )
-            }
-        }
-
-        // Any features on MVP path
-        let ids = dict.keys.sorted().joined(separator: ", ")
-        throw CLIError(
-            code: CLIErrorCode.unsupportedFeature,
-            property: "features",
-            message: "Features are not supported on the MVP path: \(ids)",
-            hint: "Remove the features block; features runner is post-MVP"
-        )
     }
 }

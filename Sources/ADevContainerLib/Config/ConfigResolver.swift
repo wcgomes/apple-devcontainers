@@ -181,6 +181,8 @@ public enum ConfigResolver {
             hasVscode = true
         }
 
+        let features = try FeatureAdmission.parse(raw["features"])
+
         return ResolvedDevContainerConfig(
             name: raw["name"] as? String,
             image: image,
@@ -198,7 +200,8 @@ public enum ConfigResolver {
             postAttachCommand: postAttach,
             runArgs: runArgs,
             hostRequirements: hostRequirements,
-            hasVscodeCustomizations: hasVscode
+            hasVscodeCustomizations: hasVscode,
+            features: features
         )
     }
 }

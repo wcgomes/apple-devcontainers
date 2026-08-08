@@ -55,6 +55,18 @@ public enum CLIErrorCode {
     public static let lifecycleFailed = "lifecycle_failed"
     /// hostRequirements capacity shortfall or unverifiable host resources.
     public static let hostRequirements = "host_requirements"
+    /// OCI feature artifact fetch failure (network, 404, malformed).
+    public static let featureFetch = "feature_fetch"
+    /// Missing or invalid devcontainer-feature.json.
+    public static let featureMetadata = "feature_metadata"
+    /// Feature dependsOn/installsAfter cycle.
+    public static let featureDependencyCycle = "feature_dependency_cycle"
+    /// Legacy derived-image build failure (BuildKit path retained for optional future use).
+    public static let featureBuild = "feature_build"
+    /// In-container feature install failure (`cp` / `exec install.sh`) — retained helper path.
+    public static let featureInstall = "feature_install"
+    /// User declined or non-interactive failure configuring `build.rosetta=false` for Features builds.
+    public static let buildRosettaConfig = "build_rosetta_config"
     public static let usage = "usage"
     public static let internalError = "internal_error"
 }

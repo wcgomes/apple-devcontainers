@@ -21,6 +21,8 @@ let allTests: [(String, () throws -> Void)] = []
     + phase3Tests
     + phase4UnitTests
     + phase4CommandTests
+    + featuresUnitTests
+    + featuresCommandTests
     + integrationTests
 
 let code = MiniTest.runAll(allTests)

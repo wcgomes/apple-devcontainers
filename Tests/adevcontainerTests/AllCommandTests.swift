@@ -1317,3 +1317,467 @@ nonisolated(unsafe) let phase4CommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(eval.hardFailures.contains { $0.contains("memory") })
     })
 ]
+
+// MARK: - Features up path
+
+/// Shared mock plumbing for Features create-path tests (build succeeds, no real Rosetta config).
+private enum FeaturesUpTestSupport {
+    static func installOverrides(fetcher: MockFeatureFetcher, cache: String) -> () -> Void {
+        let previousFetcher = UpCommand.featuresFetcherOverride
+        let previousCache = UpCommand.featuresCacheRootOverride
+        let previousEnsure = UpCommand.ensureNativeArmBuildOverride
+        UpCommand.featuresFetcherOverride = fetcher
+        UpCommand.featuresCacheRootOverride = cache
+        UpCommand.ensureNativeArmBuildOverride = { /* no-op: already native in tests */ }
+        return {
+            UpCommand.featuresFetcherOverride = previousFetcher
+            UpCommand.featuresCacheRootOverride = previousCache
+            UpCommand.ensureNativeArmBuildOverride = previousEnsure
+        }
+    }
+
+    static func mockHandler(
+        createId: String = "ctr",
+        onBuild: (([String]) -> ProcessResult)? = nil,
+        onExec: (([String]) -> ProcessResult)? = nil
+    ) -> ([String]) -> ProcessResult? {
+        { args in
+            if args.starts(with: ["list"]) {
+                let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+            }
+            if args.starts(with: ["image", "inspect"]) || args.starts(with: ["image", "list"]) {
+                return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+            }
+            if args.first == "build" {
+                if let onBuild { return onBuild(args) }
+                if args.contains("--rosetta") {
+                    return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("unexpected rosetta".utf8))
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            if args.first == "create" {
+                if args.contains("--rosetta") {
+                    return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("unexpected rosetta".utf8))
+                }
+                return ProcessResult(exitCode: 0, stdout: Data("\(createId)\n".utf8), stderr: Data())
+            }
+            if args.first == "start" || args.first == "delete" {
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            if args.first == "exec" {
+                if let onExec { return onExec(args) }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+    }
+}
+
+nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
+    ("upWithFeaturesBuildsThenHooks", {
+        let ref = "ghcr.io/adevcontainer/features/sample-a:1"
+        let fixture = TestRepo.root()
+            .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-up-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "features": {
+            "\(ref)": { "greeting": "hi" }
+          },
+          "onCreateCommand": "echo config-onCreate"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+
+        let restore = FeaturesUpTestSupport.installOverrides(
+            fetcher: MockFeatureFetcher(packagesByRef: [ref: fixture]),
+            cache: cache
+        )
+        defer { restore() }
+
+        let mock = MockProcessRunner()
+        var imageInCreate: String?
+        var createHadPlatform = false
+        var buildHadPlatform = false
+        mock.handlers = [
+            FeaturesUpTestSupport.mockHandler(
+                onBuild: { args in
+                    if let pIdx = args.firstIndex(of: "--platform"), pIdx + 1 < args.count {
+                        buildHadPlatform = args[pIdx + 1].hasPrefix("linux/")
+                    }
+                    if args.contains("--rosetta") {
+                        return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("no rosetta".utf8))
+                    }
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+            )
+        ]
+        // Wrap create capture
+        let baseHandler = mock.handlers[0]
+        mock.handlers = [
+            { args in
+                if args.first == "create" {
+                    if let pIdx = args.firstIndex(of: "--platform"), pIdx + 1 < args.count {
+                        createHadPlatform = args[pIdx + 1].hasPrefix("linux/")
+                    }
+                    if let sleepIdx = args.firstIndex(of: "/bin/sleep"), sleepIdx + 1 < args.count {
+                        imageInCreate = args[sleepIdx + 1]
+                    }
+                }
+                return baseHandler(args)
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "build" })
+        try MiniTest.expect(buildHadPlatform)
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "create" })
+        try MiniTest.expect(createHadPlatform)
+        // Create uses derived features image, not raw base.
+        try MiniTest.expect(imageInCreate?.hasPrefix("adevcontainer/features:") == true)
+        // No in-container feature install on up path.
+        try MiniTest.expect(!mock.calls.contains {
+            ($0.arguments.first == "cp" || $0.arguments.first == "copy")
+                && $0.arguments.contains(where: { $0.contains("/tmp/adev-features/") })
+        })
+        // Feature onCreate runs after config onCreate
+        let execBodies = mock.calls.filter { $0.arguments.first == "exec" }.compactMap { call -> String? in
+            let args = call.arguments
+            if let lc = args.firstIndex(of: "-lc"), lc + 1 < args.count {
+                return args[lc + 1]
+            }
+            return nil
+        }
+        try MiniTest.expect(execBodies.contains("echo config-onCreate"))
+        try MiniTest.expect(execBodies.contains("echo feature-a-onCreate"))
+    }),
+    ("upWithoutFeaturesNoBuild", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let mock = LifecycleUpSupport.mockFreshCreate(resolved: resolved)
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "build" })
+        guard let createArgs = mock.calls.first(where: { $0.arguments.first == "create" })?.arguments else {
+            throw MiniTest.Failure(message: "expected create")
+        }
+        try MiniTest.expect(createArgs.contains("alpine:3.20"))
+    }),
+    ("upReuseRunningNoFeatureFetch", {
+        let ref = "ghcr.io/adevcontainer/features/sample-a:1"
+        let fixture = TestRepo.root()
+            .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-reuse-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "features": { "\(ref)": {} }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName, state: "running", labels: resolved.labels
+        )
+        let mockFetch = MockFeatureFetcher(packagesByRef: [ref: fixture])
+        let restore = FeaturesUpTestSupport.installOverrides(fetcher: mockFetch, cache: cache)
+        defer { restore() }
+
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(mockFetch.fetchCalls.count, 0)
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "build" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+    }),
+    ("featuresProgressLinesAndQuiet", {
+        let ref = "ghcr.io/adevcontainer/features/sample-a:1"
+        let fixture = TestRepo.root()
+            .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-prog-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "image": "alpine:3.20", "features": { "\(ref)": {} } }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+
+        let previousEnabled = StatusPrinter.enabled
+        let restore = FeaturesUpTestSupport.installOverrides(
+            fetcher: MockFeatureFetcher(packagesByRef: [ref: fixture]),
+            cache: cache
+        )
+        defer {
+            restore()
+            StatusPrinter.enabled = previousEnabled
+        }
+
+        let mock = MockProcessRunner()
+        mock.handlers = [FeaturesUpTestSupport.mockHandler()]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+
+        StatusPrinter.enabled = false
+        _ = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expect(!StatusPrinter.enabled)
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "build" })
+
+        StatusPrinter.enabled = true
+        mock.handlers = [FeaturesUpTestSupport.mockHandler()]
+        let ws2 = try TestRepo.makeTempWorkspace(configJSON: """
+        { "image": "alpine:3.20", "features": { "\(ref)": {} } }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws2) }
+        _ = try UpCommand.run(
+            options: UpOptions(workspacePath: ws2.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expect(StatusPrinter.enabled)
+    }),
+    ("featureBuildFailureNoCreate", {
+        let ref = "ghcr.io/adevcontainer/features/sample-a:1"
+        let fixture = TestRepo.root()
+            .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-build-fail-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "image": "alpine:3.20", "features": { "\(ref)": {} } }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+
+        let restore = FeaturesUpTestSupport.installOverrides(
+            fetcher: MockFeatureFetcher(packagesByRef: [ref: fixture]),
+            cache: cache
+        )
+        defer { restore() }
+
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            FeaturesUpTestSupport.mockHandler(
+                onBuild: { _ in
+                    ProcessResult(exitCode: 9, stdout: Data(), stderr: Data("build boom".utf8))
+                }
+            )
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: ws.path, skipPull: true),
+                runtime: runtime,
+                localEnv: [:]
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.featureBuild)
+        }
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "build" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+    }),
+    ("upFeaturesDeclineRosettaConfigFails", {
+        let ref = "ghcr.io/adevcontainer/features/sample-a:1"
+        let fixture = TestRepo.root()
+            .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-decline-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "image": "alpine:3.20", "features": { "\(ref)": {} } }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+
+        let previousFetcher = UpCommand.featuresFetcherOverride
+        let previousCache = UpCommand.featuresCacheRootOverride
+        let previousEnsure = UpCommand.ensureNativeArmBuildOverride
+        defer {
+            UpCommand.featuresFetcherOverride = previousFetcher
+            UpCommand.featuresCacheRootOverride = previousCache
+            UpCommand.ensureNativeArmBuildOverride = previousEnsure
+        }
+        UpCommand.featuresFetcherOverride = MockFeatureFetcher(packagesByRef: [ref: fixture])
+        UpCommand.featuresCacheRootOverride = cache
+        UpCommand.ensureNativeArmBuildOverride = {
+            throw CLIError(
+                code: CLIErrorCode.buildRosettaConfig,
+                property: "build.rosetta",
+                message: "User declined setting build.rosetta=false",
+                hint: "Re-run and accept"
+            )
+        }
+
+        let mock = MockProcessRunner()
+        mock.handlers = [{ _ in ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data()) }]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: ws.path, skipPull: true),
+                runtime: runtime,
+                localEnv: [:]
+            )
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.buildRosettaConfig)
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "build" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+    }),
+    ("featureLifecycleHookFailureDeletesContainer", {
+        let ref = "ghcr.io/adevcontainer/features/sample-a:1"
+        let fixture = TestRepo.root()
+            .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-fail-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "image": "alpine:3.20", "features": { "\(ref)": {} } }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+
+        let restore = FeaturesUpTestSupport.installOverrides(
+            fetcher: MockFeatureFetcher(packagesByRef: [ref: fixture]),
+            cache: cache
+        )
+        defer { restore() }
+
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            FeaturesUpTestSupport.mockHandler(
+                createId: resolved.containerName,
+                onExec: { args in
+                    // Lifecycle hook fails (feature install is in image, not exec).
+                    ProcessResult(exitCode: 7, stdout: Data(), stderr: Data("feat fail".utf8))
+                }
+            )
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: ws.path, skipPull: true),
+                runtime: runtime,
+                localEnv: [:]
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(
+                err.code == CLIErrorCode.lifecycleFailed || err.code == CLIErrorCode.postCreateFailed
+            )
+        }
+        try MiniTest.expect(mock.calls.contains {
+            $0.arguments.first == "delete" && $0.arguments.contains(resolved.containerName)
+        })
+    }),
+    ("upWithLocalFeaturesDefaultFetcher", {
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-up-local-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "features": {
+            "./.devcontainer/features/sample-a": { "greeting": "local" },
+            "./.devcontainer/features/sample-b": { "mode": "test" }
+          }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+
+        let featuresRoot = ws.appendingPathComponent(".devcontainer/features", isDirectory: true)
+        try FileManager.default.createDirectory(at: featuresRoot, withIntermediateDirectories: true)
+        for name in ["sample-a", "sample-b"] {
+            let src = TestRepo.root()
+                .appendingPathComponent("Tests/Fixtures/features-sample/\(name)").path
+            try FileManager.default.copyItem(
+                atPath: src,
+                toPath: featuresRoot.appendingPathComponent(name).path
+            )
+        }
+
+        // Use DefaultFeatureFetcher (no fetcher override) + local packages on disk.
+        let previousFetcher = UpCommand.featuresFetcherOverride
+        let previousCache = UpCommand.featuresCacheRootOverride
+        let previousEnsure = UpCommand.ensureNativeArmBuildOverride
+        defer {
+            UpCommand.featuresFetcherOverride = previousFetcher
+            UpCommand.featuresCacheRootOverride = previousCache
+            UpCommand.ensureNativeArmBuildOverride = previousEnsure
+        }
+        UpCommand.featuresFetcherOverride = nil
+        UpCommand.featuresCacheRootOverride = cache
+        UpCommand.ensureNativeArmBuildOverride = { /* no-op */ }
+
+        let mock = MockProcessRunner()
+        var imageInCreate: String?
+        mock.handlers = [
+            { args in
+                if args.first == "create" {
+                    if let sleepIdx = args.firstIndex(of: "/bin/sleep"), sleepIdx + 1 < args.count {
+                        imageInCreate = args[sleepIdx + 1]
+                    }
+                }
+                return FeaturesUpTestSupport.mockHandler()(args)
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "build" })
+        try MiniTest.expect(imageInCreate?.hasPrefix("adevcontainer/features:") == true)
+        // Dockerfile should install sample-a before sample-b
+        if let buildCall = mock.calls.first(where: { $0.arguments.first == "build" }),
+           let fIdx = buildCall.arguments.firstIndex(of: "-f"),
+           fIdx + 1 < buildCall.arguments.count {
+            let dockerfile = try String(contentsOfFile: buildCall.arguments[fIdx + 1], encoding: .utf8)
+            let idxA = dockerfile.range(of: "sample-a")?.lowerBound
+            let idxB = dockerfile.range(of: "sample-b")?.lowerBound
+            if let idxA, let idxB {
+                try MiniTest.expect(idxA < idxB)
+            }
+        }
+    })
+]

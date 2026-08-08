@@ -1,0 +1,27 @@
+{
+  "id": "sample-b",
+  "version": "1.0.0",
+  "name": "Sample B",
+  "description": "Fixture feature B depends on A",
+  "dependsOn": {
+    "ghcr.io/adevcontainer/features/sample-a:1": {}
+  },
+  "installsAfter": [
+    "ghcr.io/adevcontainer/features/sample-a"
+  ],
+  "options": {
+    "mode": {
+      "type": "string",
+      "default": "default",
+      "description": "Mode"
+    }
+  },
+  "containerEnv": {
+    "SAMPLE_B": "from-feature-b",
+    "FOO": "from-feature"
+  },
+  "mounts": [
+    "source=sample-b-data,target=/var/sample-b,type=volume"
+  ],
+  "postCreateCommand": "echo feature-b-postCreate"
+}

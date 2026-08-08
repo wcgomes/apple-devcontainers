@@ -78,6 +78,14 @@ public struct ResolvedDevContainerConfig: Equatable {
     public var hostRequirements: HostRequirements?
     /// Present when config included customizations.vscode (metadata only; not Sendable JSON).
     public var hasVscodeCustomizations: Bool
+    /// Admitted OCI features (empty = no Features runner work).
+    public var features: [AdmittedFeature]
+    /// Extra lifecycle hooks contributed by features (run after config hooks per stage).
+    public var featureOnCreateCommands: [LifecycleCommand]
+    public var featureUpdateContentCommands: [LifecycleCommand]
+    public var featurePostCreateCommands: [LifecycleCommand]
+    public var featurePostStartCommands: [LifecycleCommand]
+    public var featurePostAttachCommands: [LifecycleCommand]
 
     public init(
         name: String? = nil,
@@ -96,7 +104,13 @@ public struct ResolvedDevContainerConfig: Equatable {
         postAttachCommand: LifecycleCommand? = nil,
         runArgs: [AllowlistedRunArg] = [],
         hostRequirements: HostRequirements? = nil,
-        hasVscodeCustomizations: Bool = false
+        hasVscodeCustomizations: Bool = false,
+        features: [AdmittedFeature] = [],
+        featureOnCreateCommands: [LifecycleCommand] = [],
+        featureUpdateContentCommands: [LifecycleCommand] = [],
+        featurePostCreateCommands: [LifecycleCommand] = [],
+        featurePostStartCommands: [LifecycleCommand] = [],
+        featurePostAttachCommands: [LifecycleCommand] = []
     ) {
         self.name = name
         self.image = image
@@ -115,6 +129,12 @@ public struct ResolvedDevContainerConfig: Equatable {
         self.runArgs = runArgs
         self.hostRequirements = hostRequirements
         self.hasVscodeCustomizations = hasVscodeCustomizations
+        self.features = features
+        self.featureOnCreateCommands = featureOnCreateCommands
+        self.featureUpdateContentCommands = featureUpdateContentCommands
+        self.featurePostCreateCommands = featurePostCreateCommands
+        self.featurePostStartCommands = featurePostStartCommands
+        self.featurePostAttachCommands = featurePostAttachCommands
     }
 
     public var effectiveUser: String? {
@@ -162,6 +182,10 @@ public struct ResolvedDevContainerConfig: Equatable {
         // portsAttributes are metadata; include for inspect consistency
         if !portsAttributes.isEmpty {
             m["portsAttributes"] = portsAttributes
+        }
+        // Features participate in identity hash (refs + options).
+        if !features.isEmpty {
+            m["features"] = features.map { $0.hashMaterial }
         }
         return m
     }

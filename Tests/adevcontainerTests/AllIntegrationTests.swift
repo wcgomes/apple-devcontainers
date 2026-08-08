@@ -72,9 +72,27 @@ enum IntegrationSupport {
         try? FileManager.default.removeItem(at: workspace)
     }
 
+    /// Copy `Tests/Fixtures/features-sample/{sample-a,sample-b}` into workspace `.devcontainer/features/`.
+    static func copySampleFeatures(into workspace: URL, names: [String] = ["sample-a", "sample-b"]) throws {
+        let fm = FileManager.default
+        let destRoot = workspace.appendingPathComponent(".devcontainer/features", isDirectory: true)
+        try fm.createDirectory(at: destRoot, withIntermediateDirectories: true)
+        for name in names {
+            let src = TestRepo.root()
+                .appendingPathComponent("Tests/Fixtures/features-sample/\(name)")
+            let dest = destRoot.appendingPathComponent(name)
+            if fm.fileExists(atPath: dest.path) {
+                try fm.removeItem(at: dest)
+            }
+            try fm.copyItem(at: src, to: dest)
+        }
+    }
+
     static func runFixtureE2E(
         fixtureFile: String,
         ensureKube: Bool = false,
+        smokeCommand: [String] = ["true"],
+        prepareWorkspace: ((URL) throws -> Void)? = nil,
         extra: ((URL, AppleContainerRuntime, [String: Any]) throws -> Void)? = nil
     ) throws {
         guard let runtime = containerRuntimeIfAvailable() else {
@@ -89,6 +107,10 @@ enum IntegrationSupport {
         let (ws, config) = try makeWorkspaceFromFixture(fixtureFile)
         defer { cleanup(workspace: ws, runtime: runtime) }
 
+        if let prepareWorkspace {
+            try prepareWorkspace(ws)
+        }
+
         let up = try UpCommand.run(
             options: UpOptions(workspacePath: ws.path, jsonOutput: true, skipPull: true),
             runtime: runtime
@@ -97,7 +119,7 @@ enum IntegrationSupport {
         try MiniTest.expect(!up.containerId.isEmpty)
 
         let code = try ExecCommand.run(
-            options: ExecOptions(workspacePath: ws.path, command: ["true"]),
+            options: ExecOptions(workspacePath: ws.path, command: smokeCommand),
             runtime: runtime
         )
         try MiniTest.expectEqual(code, 0)
@@ -119,7 +141,7 @@ nonisolated(unsafe) let integrationTests: [(String, () throws -> Void)] = [
         try IntegrationSupport.runFixtureE2E(fixtureFile: "smoke.json")
     }),
     ("fixtureE2E_envUser", {
-        try IntegrationSupport.runFixtureE2E(fixtureFile: "env-user.json") { ws, runtime, _ in
+        try IntegrationSupport.runFixtureE2E(fixtureFile: "env-user.json", extra: { ws, runtime, _ in
             let up = try InspectCommand.run(workspacePath: ws.path, runtime: runtime)
             try MiniTest.expectEqual(up.remoteUser, "vscode")
             try MiniTest.expectEqual(
@@ -137,10 +159,10 @@ nonisolated(unsafe) let integrationTests: [(String, () throws -> Void)] = [
                 runtime: runtime
             )
             try MiniTest.expectEqual(code, 0)
-        }
+        })
     }),
     ("fixtureE2E_mountsPorts", {
-        try IntegrationSupport.runFixtureE2E(fixtureFile: "mounts-ports.json", ensureKube: true) { ws, runtime, config in
+        try IntegrationSupport.runFixtureE2E(fixtureFile: "mounts-ports.json", ensureKube: true, extra: { ws, runtime, config in
             let code = try ExecCommand.run(
                 options: ExecOptions(
                     workspacePath: ws.path,
@@ -155,7 +177,7 @@ nonisolated(unsafe) let integrationTests: [(String, () throws -> Void)] = [
                 inspect.portsAttributes["\( (config["forwardPorts"] as? [Int])?.first ?? -1 )"]?["label"],
                 "PlantSuite Portal"
             )
-        }
+        })
     }),
     ("fixtureE2E_lifecycle", {
         // postCreate is "echo postCreate-ok && pwd" — success of up + exec is enough
@@ -168,5 +190,95 @@ nonisolated(unsafe) let integrationTests: [(String, () throws -> Void)] = [
     ("fixtureE2E_runargsHost", {
         // Allowlisted runArgs + hostRequirements enforce+apply (8gb/4 cpus OK on typical Macs).
         try IntegrationSupport.runFixtureE2E(fixtureFile: "runargs-host.json")
+    }),
+    ("fixtureE2E_featuresNode_skipsWithoutNetworkOrRuntime", {
+        // Live OCI fetch + container build requires network and Apple container.
+        // Default suite must skip cleanly when either is unavailable.
+        guard IntegrationSupport.containerRuntimeIfAvailable() != nil else {
+            try MiniTest.skip("Apple container unavailable")
+        }
+        // Probe network to ghcr.io without pulling full feature (quick HEAD/GET).
+        var reachable = false
+        if let url = URL(string: "https://ghcr.io/v2/") {
+            final class StatusBox: @unchecked Sendable { var value = 0 }
+            let box = StatusBox()
+            let sem = DispatchSemaphore(value: 0)
+            let task = URLSession.shared.dataTask(with: url) { _, response, _ in
+                box.value = (response as? HTTPURLResponse)?.statusCode ?? -1
+                sem.signal()
+            }
+            task.resume()
+            if sem.wait(timeout: .now() + 3) == .timedOut {
+                task.cancel()
+            } else {
+                // ghcr often returns 401 for unauthenticated /v2/ — that still means reachable.
+                reachable = box.value > 0
+            }
+        }
+        guard reachable else {
+            try MiniTest.skip("network unavailable for ghcr.io feature pull")
+        }
+        // Full live features-node E2E is optional and expensive; skip unless explicitly enabled.
+        guard ProcessInfo.processInfo.environment["ADEVCONTAINER_FEATURES_E2E"] == "1" else {
+            try MiniTest.skip("set ADEVCONTAINER_FEATURES_E2E=1 to run live features-node up")
+        }
+        // create argv expands feature PATH `${PATH}` so bare `node` is on PATH.
+        try IntegrationSupport.runFixtureE2E(
+            fixtureFile: "features-node.json",
+            smokeCommand: ["node", "--version"]
+        )
+    }),
+    ("fixtureE2E_featuresTriple_skipsWithoutNetworkOrRuntime", {
+        guard IntegrationSupport.containerRuntimeIfAvailable() != nil else {
+            try MiniTest.skip("Apple container unavailable")
+        }
+        var reachable = false
+        if let url = URL(string: "https://ghcr.io/v2/") {
+            final class StatusBox: @unchecked Sendable { var value = 0 }
+            let box = StatusBox()
+            let sem = DispatchSemaphore(value: 0)
+            let task = URLSession.shared.dataTask(with: url) { _, response, _ in
+                box.value = (response as? HTTPURLResponse)?.statusCode ?? -1
+                sem.signal()
+            }
+            task.resume()
+            if sem.wait(timeout: .now() + 3) == .timedOut {
+                task.cancel()
+            } else {
+                reachable = box.value > 0
+            }
+        }
+        guard reachable else {
+            try MiniTest.skip("network unavailable for ghcr.io feature pull")
+        }
+        guard ProcessInfo.processInfo.environment["ADEVCONTAINER_FEATURES_E2E"] == "1" else {
+            try MiniTest.skip("set ADEVCONTAINER_FEATURES_E2E=1 to run live features-triple up")
+        }
+        try IntegrationSupport.runFixtureE2E(
+            fixtureFile: "features-triple.json",
+            smokeCommand: [
+                "/bin/bash", "-lc",
+                "node --version && git --version && gh --version"
+            ]
+        )
+    }),
+    ("fixtureE2E_featuresLocal", {
+        // Local path features only — no ghcr / ADEVCONTAINER_FEATURES_E2E gate.
+        // Requires Apple container; uses DefaultFeatureFetcher + sample packages on disk.
+        guard IntegrationSupport.containerRuntimeIfAvailable() != nil else {
+            try MiniTest.skip("Apple container unavailable")
+        }
+        try IntegrationSupport.runFixtureE2E(
+            fixtureFile: "features-local.json",
+            smokeCommand: [
+                "/bin/bash", "-lc",
+                "test -f /usr/local/etc/adev-features/installed.txt"
+                    + " && grep sample-a /usr/local/etc/adev-features/installed.txt"
+                    + " && grep sample-b /usr/local/etc/adev-features/installed.txt"
+            ],
+            prepareWorkspace: { ws in
+                try IntegrationSupport.copySampleFeatures(into: ws)
+            }
+        )
     })
 ]

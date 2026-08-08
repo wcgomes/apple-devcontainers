@@ -204,7 +204,9 @@ nonisolated(unsafe) let parserTests: [(String, () throws -> Void)] = [
             "mounts-ports.json",
             "lifecycle.json",
             "lifecycle-hooks.json",
-            "runargs-host.json"
+            "runargs-host.json",
+            "features-node.json",
+            "features-triple.json"
         ] {
             let path = root.appendingPathComponent("Tests/Fixtures/\(name)").path
             let obj = try JSONCParser.loadFile(at: path)
@@ -281,14 +283,16 @@ nonisolated(unsafe) let admissionTests: [(String, () throws -> Void)] = [
             try MiniTest.expect(err.message.contains("docker-outside-of-docker"))
         }
     }),
-    ("rejectAnyFeatures", {
+    ("admitOciNodeFeature", {
         let raw: [String: Any] = [
             "image": "alpine:3.20",
             "features": ["ghcr.io/devcontainers/features/node:2": ["version": "22"]]
         ]
-        try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
-            try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.unsupportedFeature)
-        }
+        try ConfigAdmissions.admit(raw)
+        let features = try FeatureAdmission.parse(raw["features"])
+        try MiniTest.expectEqual(features.count, 1)
+        try MiniTest.expectEqual(features[0].reference, "ghcr.io/devcontainers/features/node:2")
+        try MiniTest.expectEqual(features[0].options["version"]?.stringValue, "22")
     }),
     ("rejectPrivileged", {
         let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--privileged"]]
@@ -462,7 +466,9 @@ nonisolated(unsafe) let admissionTests: [(String, () throws -> Void)] = [
             "mounts-ports.json",
             "lifecycle.json",
             "lifecycle-hooks.json",
-            "runargs-host.json"
+            "runargs-host.json",
+            "features-node.json",
+            "features-triple.json"
         ] {
             let path = root.appendingPathComponent("Tests/Fixtures/\(name)").path
             let ws = FileManager.default.temporaryDirectory
@@ -805,7 +811,34 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
     })
 ]
 
-nonisolated(unsafe) let runtimeTests: [(String, () throws -> Void)] = [
+ nonisolated(unsafe) let runtimeTests: [(String, () throws -> Void)] = [
+    ("createEnvExpandsPathRefs", {
+        let nvmPrefix = "/usr/local/share/nvm/current/bin"
+        let request = CreateRequest(
+            name: "ctr",
+            image: "alpine:3.20",
+            labels: [:],
+            workspaceBindHost: "/ws",
+            workspaceBindTarget: "/workspaces/ws",
+            env: [
+                "PATH": "\(nvmPrefix):${PATH}",
+                "OTHER": "pre:$PATH:post",
+                "PATHNAME": "keep-$PATHNAME"
+            ],
+            configHash: "h"
+        )
+        let expanded = CreateRequest.expandEnvPathRefs(request.env)
+        let expectedPath = "\(nvmPrefix):\(CreateRequest.defaultLinuxPath)"
+        try MiniTest.expectEqual(expanded["PATH"], expectedPath)
+        try MiniTest.expect(!expanded["PATH"]!.contains("${PATH}"))
+        try MiniTest.expectEqual(expanded["OTHER"], "pre:\(expectedPath):post")
+        try MiniTest.expectEqual(expanded["PATHNAME"], "keep-$PATHNAME")
+        let args = request.createArguments()
+        try MiniTest.expect(args.contains("PATH=\(expectedPath)"))
+        try MiniTest.expect(!args.contains(where: { $0.contains("${PATH}") }))
+        try MiniTest.expect(args.contains("OTHER=pre:\(expectedPath):post"))
+        try MiniTest.expect(args.contains("PATHNAME=keep-$PATHNAME"))
+    }),
     ("createArgvMapping", {
         let mock = MockProcessRunner()
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
@@ -845,7 +878,7 @@ nonisolated(unsafe) let runtimeTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(args.contains("/workspaces/ws"))
         try MiniTest.expect(args.contains("4200:4200"))
         try MiniTest.expect(args.contains("5000:5000"))
-        try MiniTest.expect(args.contains("sleep"))
+        try MiniTest.expect(args.contains("/bin/sleep"))
         try MiniTest.expect(args.contains("alpine:3.20"))
         try MiniTest.expect(args.contains("infinity"))
         try MiniTest.expect(args.contains(where: { $0.contains("type=bind") && $0.contains("source=/ws") }))
@@ -1009,3 +1042,971 @@ nonisolated(unsafe) let runtimeTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(result.stderrString.contains("streamed-err"))
     })
 ]
+
+// MARK: - Features runner unit tests
+
+private enum FeaturesTestSupport {
+    static func fixtureFeatureDir(_ name: String) -> String {
+        TestRepo.root()
+            .appendingPathComponent("Tests/Fixtures/features-sample/\(name)")
+            .path
+    }
+
+    static let refA = "ghcr.io/adevcontainer/features/sample-a:1"
+    static let refB = "ghcr.io/adevcontainer/features/sample-b:1"
+    static let refPriv = "ghcr.io/adevcontainer/features/sample-privileged:1"
+}
+
+nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
+    ("featuresEmptyObjectOK", {
+        try ConfigAdmissions.admit(["image": "alpine:3.20", "features": [:] as [String: Any]])
+        let parsed = try FeatureAdmission.parse([:] as [String: Any])
+        try MiniTest.expectEqual(parsed.count, 0)
+    }),
+    ("featuresOmittedOK", {
+        try ConfigAdmissions.admit(["image": "alpine:3.20"])
+        let parsed = try FeatureAdmission.parse(nil)
+        try MiniTest.expectEqual(parsed.count, 0)
+    }),
+    ("featuresMustBeObject", {
+        try MiniTest.expectThrows({
+            try ConfigAdmissions.admit([
+                "image": "alpine:3.20",
+                "features": ["ghcr.io/devcontainers/features/node:1"] as [Any]
+            ])
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.property, "features")
+            try MiniTest.expect(err.message.lowercased().contains("object"))
+        }
+    }),
+    ("featuresLocalPathAdmits", {
+        for path in ["./local-feature", "../features/foo", "/abs/path", "file:///tmp/f"] {
+            try ConfigAdmissions.admit([
+                "image": "alpine:3.20",
+                "features": [path: ["greeting": "x"] as [String: Any]]
+            ])
+            let parsed = try FeatureAdmission.parse([path: ["greeting": "x"] as [String: Any]])
+            try MiniTest.expectEqual(parsed.count, 1)
+            try MiniTest.expectEqual(parsed[0].reference, path)
+            try MiniTest.expectEqual(parsed[0].options["greeting"]?.stringValue, "x")
+            try MiniTest.expect(FeatureRef.isLocalPath(path))
+        }
+    }),
+    ("featuresLocalFixtureAdmits", {
+        let path = TestRepo.root().appendingPathComponent("Tests/Fixtures/features-local.json").path
+        let obj = try JSONCParser.loadFile(at: path)
+        try ConfigAdmissions.admit(obj)
+        let features = try FeatureAdmission.parse(obj["features"])
+        try MiniTest.expectEqual(features.count, 2)
+        try MiniTest.expect(features.contains { $0.reference.contains("sample-a") })
+        try MiniTest.expect(features.contains { $0.reference.contains("sample-b") })
+        for f in features {
+            try MiniTest.expect(FeatureRef.isLocalPath(f.reference))
+            try MiniTest.expect(!FeatureRef.containsDockerOOD(f.reference))
+        }
+    }),
+    ("featuresDockerOODAnyRegistryTag", {
+        let refs = [
+            "ghcr.io/devcontainers/features/docker-outside-of-docker:1",
+            "ghcr.io/devcontainers/features/docker-outside-of-docker:2.0",
+            "example.com/mirror/docker-outside-of-docker:latest",
+            "ghcr.io/other/docker-outside-of-docker"
+        ]
+        for ref in refs {
+            try MiniTest.expectThrows({
+                try ConfigAdmissions.admit([
+                    "image": "alpine:3.20",
+                    "features": [ref: [:] as [String: Any]]
+                ])
+            }) { error in
+                let err = error as! CLIError
+                try MiniTest.expect(err.message.contains("docker-outside-of-docker"))
+                try MiniTest.expect(err.message.lowercased().contains("forever-rejected")
+                    || (err.hint?.contains("docker-outside-of-docker") == true))
+            }
+        }
+    }),
+    ("featuresDockerRelatedForeverRejectByName", {
+        // Offline: admit fails immediately (no network) for docker-in-docker / ood / from-docker.
+        let cases: [(ref: String, marker: String)] = [
+            ("ghcr.io/devcontainers/features/docker-in-docker:2", "docker-in-docker"),
+            ("ghcr.io/devcontainers/features/docker-outside-of-docker:1", "docker-outside-of-docker"),
+            ("ghcr.io/devcontainers/features/docker-from-docker:1", "docker-from-docker"),
+            ("example.com/mirror/docker-in-docker:latest", "docker-in-docker")
+        ]
+        for item in cases {
+            try MiniTest.expectThrows({
+                try ConfigAdmissions.admit([
+                    "image": "alpine:3.20",
+                    "features": [item.ref: [:] as [String: Any]]
+                ])
+            }) { error in
+                let err = error as! CLIError
+                try MiniTest.expectEqual(err.code, CLIErrorCode.unsupportedFeature)
+                try MiniTest.expect(err.message.contains(item.marker))
+                try MiniTest.expect(err.message.lowercased().contains("forever-rejected"))
+            }
+        }
+    }),
+    ("featuresDockerOODFixtureRejects", {
+        let path = TestRepo.root().appendingPathComponent("Tests/Fixtures/features-docker-ood.json").path
+        let obj = try JSONCParser.loadFile(at: path)
+        try MiniTest.expectThrows({ try ConfigAdmissions.admit(obj) }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.unsupportedFeature)
+            try MiniTest.expect(err.message.contains("docker-outside-of-docker"))
+            try MiniTest.expect(err.message.lowercased().contains("forever-rejected"))
+        }
+        try MiniTest.expectThrows({ _ = try FeatureAdmission.parse(obj["features"]) }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(err.message.contains("docker-outside-of-docker"))
+        }
+    }),
+    ("featuresNodeFixtureAdmits", {
+        let path = TestRepo.root().appendingPathComponent("Tests/Fixtures/features-node.json").path
+        let obj = try JSONCParser.loadFile(at: path)
+        try ConfigAdmissions.admit(obj)
+        let features = try FeatureAdmission.parse(obj["features"])
+        try MiniTest.expectEqual(features.count, 1)
+        try MiniTest.expect(features[0].reference.contains("node"))
+        try MiniTest.expect(!FeatureRef.containsDockerOOD(features[0].reference))
+    }),
+    ("featuresTripleFixtureAdmits", {
+        let path = TestRepo.root().appendingPathComponent("Tests/Fixtures/features-triple.json").path
+        let obj = try JSONCParser.loadFile(at: path)
+        try ConfigAdmissions.admit(obj)
+        let features = try FeatureAdmission.parse(obj["features"])
+        try MiniTest.expectEqual(features.count, 3)
+        let refs = features.map(\.reference)
+        try MiniTest.expect(refs.contains(where: { $0.contains("node") }))
+        try MiniTest.expect(refs.contains(where: { $0.contains("/git:") || $0.hasSuffix("/git:1") || $0.contains("features/git") }))
+        try MiniTest.expect(refs.contains(where: { $0.contains("github-cli") }))
+        for ref in refs {
+            try MiniTest.expect(!FeatureRef.containsDockerOOD(ref), ref)
+        }
+    }),
+    ("featureMetadataParseFixture", {
+        let dir = FeaturesTestSupport.fixtureFeatureDir("sample-a")
+        let data = try Data(contentsOf: URL(fileURLWithPath: dir)
+            .appendingPathComponent("devcontainer-feature.json"))
+        let meta = try FeatureMetadata.parse(data: data, featureRef: FeaturesTestSupport.refA)
+        try MiniTest.expectEqual(meta.id, "sample-a")
+        try MiniTest.expect(meta.initProcess)
+        try MiniTest.expectEqual(meta.capAdd, ["SYS_PTRACE"])
+        try MiniTest.expectEqual(meta.containerEnv["SAMPLE_A"], "from-feature-a")
+        try MiniTest.expect(meta.onCreateCommand != nil)
+        try MiniTest.expectEqual(meta.optionDefaults["greeting"]?.stringValue, "hello")
+    }),
+    ("featureMetadataMissingFails", {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-missing-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try MiniTest.expectThrows({
+            _ = try FeatureMetadata.parse(
+                data: Data("{}".utf8),
+                featureRef: "ghcr.io/x/y:1"
+            )
+            // empty id falls back — use invalid JSON
+            _ = try FeatureMetadata.parse(
+                data: Data("not-json".utf8),
+                featureRef: "ghcr.io/x/y:1"
+            )
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.featureMetadata)
+        }
+    }),
+    ("featureOrderDependsOn", {
+        let metaA = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refA
+        )
+        let metaB = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-b"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refB
+        )
+        // Declare B before A — order must still put A first via dependsOn
+        let ordered = try FeatureOrder.resolve([
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: FeaturesTestSupport.refB),
+                metadata: metaB
+            ),
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: FeaturesTestSupport.refA),
+                metadata: metaA
+            )
+        ])
+        try MiniTest.expectEqual(ordered.map(\.admitted.reference), [
+            FeaturesTestSupport.refA,
+            FeaturesTestSupport.refB
+        ])
+    }),
+    ("featureOrderInstallsAfter", {
+        let metaA = FeatureMetadata(id: "a")
+        let metaB = FeatureMetadata(id: "b", installsAfter: ["a"])
+        let ordered = try FeatureOrder.resolve([
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: "b"),
+                metadata: metaB
+            ),
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: "a"),
+                metadata: metaA
+            )
+        ])
+        try MiniTest.expectEqual(ordered.map(\.admitted.reference), ["a", "b"])
+    }),
+    ("featureOrderCycleFails", {
+        let a = FeatureMetadata(id: "a", dependsOn: ["b": [:]])
+        let b = FeatureMetadata(id: "b", dependsOn: ["a": [:]])
+        try MiniTest.expectThrows({
+            _ = try FeatureOrder.resolve([
+                FeatureOrder.OrderedFeature(
+                    admitted: AdmittedFeature(reference: "a"),
+                    metadata: a
+                ),
+                FeatureOrder.OrderedFeature(
+                    admitted: AdmittedFeature(reference: "b"),
+                    metadata: b
+                )
+            ])
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.featureDependencyCycle)
+            try MiniTest.expect(err.message.lowercased().contains("cycle"))
+        }
+    }),
+    ("featurePrivilegedMetadataReject", {
+        let data = try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-privileged"))
+            .appendingPathComponent("devcontainer-feature.json"))
+        let meta = try FeatureMetadata.parse(data: data, featureRef: FeaturesTestSupport.refPriv)
+        try MiniTest.expectThrows({
+            try meta.rejectUnsafeContributions(featureRef: FeaturesTestSupport.refPriv)
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(err.message.lowercased().contains("privileged"))
+            try MiniTest.expect(err.message.lowercased().contains("forever-rejected")
+                || (err.hint?.lowercased().contains("privileged") == true))
+        }
+    }),
+    ("featureSecurityOptReject", {
+        let meta = FeatureMetadata(id: "x", securityOpt: ["label=disable"])
+        try MiniTest.expectThrows({
+            try meta.rejectUnsafeContributions(featureRef: "ghcr.io/x:1")
+        }) { error in
+            try MiniTest.expect((error as! CLIError).message.lowercased().contains("securityopt")
+                || (error as! CLIError).message.contains("securityOpt"))
+        }
+    }),
+    ("featureOptionsEnvNames", {
+        try MiniTest.expectEqual(FeatureOptions.envName(forOption: "version"), "VERSION")
+        try MiniTest.expectEqual(FeatureOptions.envName(forOption: "nodeVersion"), "NODE_VERSION")
+        let env = FeatureOptions.installEnvironment(
+            user: ["greeting": .string("hi")],
+            defaults: ["greeting": .string("hello"), "mode": .string("x")]
+        )
+        try MiniTest.expectEqual(env["GREETING"], "hi")
+        try MiniTest.expectEqual(env["MODE"], "x")
+    }),
+    ("featureMockFetchSuccessAnd404", {
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-fetch-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: cache) }
+        let mock = MockFeatureFetcher(packagesByRef: [
+            FeaturesTestSupport.refA: FeaturesTestSupport.fixtureFeatureDir("sample-a")
+        ], errorsByRef: [
+            "ghcr.io/missing:1": CLIError(
+                code: CLIErrorCode.featureFetch,
+                property: "features",
+                message: "Feature 'ghcr.io/missing:1' not found (404)",
+                hint: "Check the feature reference and tag"
+            )
+        ])
+        let dest = cache.appendingPathComponent("a").path
+        let pkg = try mock.fetch(reference: FeaturesTestSupport.refA, destinationDirectory: dest)
+        try MiniTest.expect(FileManager.default.fileExists(atPath: pkg.metadataPath))
+        try MiniTest.expect(FileManager.default.fileExists(atPath: pkg.installScriptPath))
+        try MiniTest.expectThrows({
+            _ = try mock.fetch(
+                reference: "ghcr.io/missing:1",
+                destinationDirectory: cache.appendingPathComponent("m").path
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.featureFetch)
+            try MiniTest.expect(err.message.contains("404"))
+        }
+    }),
+    ("featureLocalLoadCopiesPackage", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let featuresRoot = ws.appendingPathComponent(".devcontainer/features", isDirectory: true)
+        try FileManager.default.createDirectory(at: featuresRoot, withIntermediateDirectories: true)
+        let sampleA = FeaturesTestSupport.fixtureFeatureDir("sample-a")
+        try FileManager.default.copyItem(
+            atPath: sampleA,
+            toPath: featuresRoot.appendingPathComponent("sample-a").path
+        )
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-local-load-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: cache) }
+        let dest = cache.appendingPathComponent("a").path
+        let ref = "./.devcontainer/features/sample-a"
+        let fetcher = DefaultFeatureFetcher(workspacePath: ws.path)
+        let pkg = try fetcher.fetch(reference: ref, destinationDirectory: dest)
+        try MiniTest.expectEqual(pkg.reference, ref)
+        try MiniTest.expect(FileManager.default.fileExists(atPath: pkg.metadataPath))
+        try MiniTest.expect(FileManager.default.fileExists(atPath: pkg.installScriptPath))
+        let meta = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: pkg.metadataPath)),
+            featureRef: ref
+        )
+        try MiniTest.expectEqual(meta.id, "sample-a")
+    }),
+    ("featureLocalLoadMissingPathErrors", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-local-miss-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: cache) }
+        let fetcher = DefaultFeatureFetcher(workspacePath: ws.path)
+        try MiniTest.expectThrows({
+            _ = try fetcher.fetch(
+                reference: "./.devcontainer/features/does-not-exist",
+                destinationDirectory: cache.appendingPathComponent("m").path
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.featureFetch)
+            try MiniTest.expect(err.message.lowercased().contains("does not exist")
+                || err.message.lowercased().contains("not a directory")
+                || err.message.contains("does-not-exist"))
+        }
+    }),
+    ("featureLocalLoadMissingInstallShErrors", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let feat = ws.appendingPathComponent(".devcontainer/features/broken", isDirectory: true)
+        try FileManager.default.createDirectory(at: feat, withIntermediateDirectories: true)
+        try #"{ "id": "broken", "version": "1.0.0" }"#.write(
+            to: feat.appendingPathComponent("devcontainer-feature.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-local-noinst-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: cache) }
+        let fetcher = DefaultFeatureFetcher(workspacePath: ws.path)
+        try MiniTest.expectThrows({
+            _ = try fetcher.fetch(
+                reference: "./.devcontainer/features/broken",
+                destinationDirectory: cache.appendingPathComponent("b").path
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(err.message.lowercased().contains("install.sh"))
+        }
+    }),
+    ("featureLocalSampleOrderDependsOnIdMatch", {
+        let metaA = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: "./.devcontainer/features/sample-a"
+        )
+        let metaB = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-b"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: "./.devcontainer/features/sample-b"
+        )
+        // Local path refs; B dependsOn OCI-style sample-a — id segment match.
+        let refA = "./.devcontainer/features/sample-a"
+        let refB = "./.devcontainer/features/sample-b"
+        let ordered = try FeatureOrder.resolve([
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: refB, options: ["mode": .string("test")]),
+                metadata: metaB
+            ),
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: refA, options: ["greeting": .string("local")]),
+                metadata: metaA
+            )
+        ])
+        try MiniTest.expectEqual(ordered.map(\.admitted.reference), [refA, refB])
+    }),
+    ("featureLocalPrivilegedStillRejects", {
+        let meta = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-privileged"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: "./.devcontainer/features/sample-privileged"
+        )
+        try MiniTest.expectThrows({
+            try meta.rejectUnsafeContributions(featureRef: "./.devcontainer/features/sample-privileged")
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(err.message.lowercased().contains("privileged"))
+            try MiniTest.expect(err.message.lowercased().contains("forever-rejected")
+                || (err.hint?.lowercased().contains("privileged") == true))
+        }
+    }),
+    ("featuresRunnerLocalSampleAAndBOrder", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let featuresRoot = ws.appendingPathComponent(".devcontainer/features", isDirectory: true)
+        try FileManager.default.createDirectory(at: featuresRoot, withIntermediateDirectories: true)
+        for name in ["sample-a", "sample-b"] {
+            try FileManager.default.copyItem(
+                atPath: FeaturesTestSupport.fixtureFeatureDir(name),
+                toPath: featuresRoot.appendingPathComponent(name).path
+            )
+        }
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-local-run-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+        let fetcher = DefaultFeatureFetcher(workspacePath: ws.path)
+        let mockProc = MockProcessRunner()
+        mockProc.handlers = [
+            { args in
+                if args.starts(with: ["image", "inspect"]) || args.starts(with: ["image", "list"]) {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+                }
+                if args.first == "build" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mockProc)
+        let refA = "./.devcontainer/features/sample-a"
+        let refB = "./.devcontainer/features/sample-b"
+        let result = try FeaturesRunner.run(
+            features: [
+                AdmittedFeature(reference: refB, options: ["mode": .string("test")]),
+                AdmittedFeature(reference: refA, options: ["greeting": .string("local")])
+            ],
+            baseImage: "alpine:3.20",
+            deps: FeaturesRunner.Dependencies(
+                fetcher: fetcher,
+                runtime: runtime,
+                cacheRoot: cache,
+                platform: "linux/arm64"
+            )
+        )
+        try MiniTest.expectEqual(result.orderedRefs, [refA, refB])
+        try MiniTest.expect(!result.reusedExistingImage)
+        try MiniTest.expect(result.derivedImage.hasPrefix("adevcontainer/features:"))
+    }),
+    ("featureInstallEnvAndSafeName", {
+        let metaA = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refA
+        )
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(
+                    reference: FeaturesTestSupport.refA,
+                    options: ["greeting": .string("yo")]
+                ),
+                metadata: metaA
+            )
+        ]
+        let userEnv = FeatureOptions.userInstallEnvironment(
+            remoteUser: "vscode",
+            containerUser: "vscode"
+        )
+        var installEnv = FeatureOptions.installEnvironment(
+            user: ordered[0].admitted.options,
+            defaults: ordered[0].metadata.optionDefaults
+        )
+        for (k, v) in userEnv { installEnv[k] = v }
+        try MiniTest.expectEqual(installEnv["GREETING"], "yo")
+        try MiniTest.expectEqual(installEnv["_REMOTE_USER"], "vscode")
+        try MiniTest.expectEqual(installEnv["_REMOTE_USER_HOME"], "/home/vscode")
+        try MiniTest.expectEqual(installEnv["_CONTAINER_USER"], "vscode")
+        let safe = FeatureInstaller.safeName(for: FeaturesTestSupport.refA, index: 0)
+        try MiniTest.expect(safe.hasPrefix("0-"))
+        try MiniTest.expect(!safe.contains("/"))
+        try MiniTest.expect(!safe.contains(":"))
+    }),
+    ("tomlMergeBuildRosettaFalsePreservesKeys", {
+        let input = """
+        # header
+        [machine]
+        cpus = 7
+        memory = "24gb"
+
+        [build]
+        cpus = 2
+        rosetta = true
+        memory = "2048mb"
+
+        [network]
+        """
+        let out = AppleContainerConfig.mergeBuildRosettaFalse(into: input)
+        try MiniTest.expectEqual(AppleContainerConfig.parseBuildRosetta(from: out), false)
+        try MiniTest.expect(out.contains("cpus = 7"))
+        try MiniTest.expect(out.contains("memory = \"24gb\""))
+        try MiniTest.expect(out.contains("cpus = 2"))
+        try MiniTest.expect(out.contains("memory = \"2048mb\""))
+        try MiniTest.expect(out.contains("[network]"))
+        try MiniTest.expect(out.contains("rosetta = false"))
+        try MiniTest.expect(!out.contains("rosetta = true"))
+        // Empty file → creates [build]
+        let created = AppleContainerConfig.mergeBuildRosettaFalse(into: "")
+        try MiniTest.expectEqual(AppleContainerConfig.parseBuildRosetta(from: created), false)
+        try MiniTest.expect(created.contains("[build]"))
+        // Missing rosetta key under [build]
+        let noKey = """
+        [build]
+        cpus = 4
+        """
+        let added = AppleContainerConfig.mergeBuildRosettaFalse(into: noKey)
+        try MiniTest.expectEqual(AppleContainerConfig.parseBuildRosetta(from: added), false)
+        try MiniTest.expect(added.contains("cpus = 4"))
+    }),
+    ("ensureNativeArmAlreadyFalseNoWriteNoPrompt", {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("adev-rosetta-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let configPath = dir.appendingPathComponent("config.toml").path
+        try "[build]\nrosetta = false\n".write(toFile: configPath, atomically: true, encoding: .utf8)
+
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["system", "property", "list"]) {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("[build]\nrosetta = false\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("unexpected".utf8))
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        var prompted = false
+        try AppleContainerConfig.ensureNativeArmBuild(
+            runtime: runtime,
+            options: AppleContainerConfig.EnsureOptions(
+                configPath: configPath,
+                environment: [:],
+                isInteractive: true,
+                readLine: {
+                    prompted = true
+                    return "n"
+                }
+            )
+        )
+        try MiniTest.expect(!prompted)
+        // Only property list — no builder delete / system restart
+        try MiniTest.expectEqual(mock.calls.count, 1)
+        try MiniTest.expect(mock.calls[0].arguments.starts(with: ["system", "property", "list"]))
+        let onDisk = try String(contentsOfFile: configPath, encoding: .utf8)
+        try MiniTest.expectEqual(onDisk, "[build]\nrosetta = false\n")
+    }),
+    ("ensureNativeArmDeclineErrors", {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("adev-rosetta-d-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let configPath = dir.appendingPathComponent("config.toml").path
+
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["system", "property", "list"]) {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("[build]\nrosetta = true\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            try AppleContainerConfig.ensureNativeArmBuild(
+                runtime: runtime,
+                options: AppleContainerConfig.EnsureOptions(
+                    configPath: configPath,
+                    environment: [:],
+                    isInteractive: true,
+                    readLine: { "n" }
+                )
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.buildRosettaConfig)
+            try MiniTest.expect(err.message.lowercased().contains("declined"))
+        }
+        try MiniTest.expect(!FileManager.default.fileExists(atPath: configPath))
+    }),
+    ("ensureNativeArmEnvAutoAcceptWrites", {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("adev-rosetta-a-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let configPath = dir.appendingPathComponent("config.toml").path
+        try """
+        [machine]
+        cpus = 4
+        [build]
+        rosetta = true
+        cpus = 2
+        """.write(toFile: configPath, atomically: true, encoding: .utf8)
+
+        let mock = MockProcessRunner()
+        var propertyCalls = 0
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["system", "property", "list"]) {
+                    propertyCalls += 1
+                    // First call: still true; after write+restart mock returns false
+                    if propertyCalls == 1 {
+                        return ProcessResult(
+                            exitCode: 0,
+                            stdout: Data("[build]\nrosetta = true\n".utf8),
+                            stderr: Data()
+                        )
+                    }
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("[build]\nrosetta = false\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                if args.starts(with: ["builder", "stop"])
+                    || args.starts(with: ["builder", "delete"])
+                    || args.starts(with: ["builder", "rm"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        var prompted = false
+        try AppleContainerConfig.ensureNativeArmBuild(
+            runtime: runtime,
+            options: AppleContainerConfig.EnsureOptions(
+                configPath: configPath,
+                environment: [AppleContainerConfig.allowDisableEnvKey: "1"],
+                isInteractive: false,
+                readLine: {
+                    prompted = true
+                    return nil
+                }
+            )
+        )
+        try MiniTest.expect(!prompted)
+        let onDisk = try String(contentsOfFile: configPath, encoding: .utf8)
+        try MiniTest.expectEqual(AppleContainerConfig.parseBuildRosetta(from: onDisk), false)
+        try MiniTest.expect(onDisk.contains("cpus = 4"))
+        try MiniTest.expect(onDisk.contains("cpus = 2"))
+        try MiniTest.expect(mock.calls.contains {
+            $0.arguments.starts(with: ["builder", "delete"]) || $0.arguments.starts(with: ["builder", "rm"])
+        })
+    }),
+    ("featureDerivedTagStableAndOptionsChange", {
+        let metaA = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refA
+        )
+        let o1 = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(
+                    reference: FeaturesTestSupport.refA,
+                    options: ["greeting": .string("a")]
+                ),
+                metadata: metaA
+            )
+        ]
+        let o2 = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(
+                    reference: FeaturesTestSupport.refA,
+                    options: ["greeting": .string("b")]
+                ),
+                metadata: metaA
+            )
+        ]
+        let t1 = DerivedImageTag.compute(baseImage: "alpine:3.20", ordered: o1)
+        let t1b = DerivedImageTag.compute(baseImage: "alpine:3.20", ordered: o1)
+        let t2 = DerivedImageTag.compute(baseImage: "alpine:3.20", ordered: o2)
+        try MiniTest.expectEqual(t1, t1b)
+        try MiniTest.expect(t1 != t2)
+        try MiniTest.expect(t1.hasPrefix("adevcontainer/features:"))
+    }),
+    ("containerPlatformDefaultArm64", {
+        try MiniTest.expectEqual(
+            ContainerPlatform.linuxPlatform(hostMachine: "arm64"),
+            "linux/arm64"
+        )
+        try MiniTest.expectEqual(
+            ContainerPlatform.linuxPlatform(hostMachine: "x86_64"),
+            "linux/amd64"
+        )
+        #if arch(arm64)
+        try MiniTest.expectEqual(ContainerPlatform.defaultLinuxPlatform, "linux/arm64")
+        #endif
+    }),
+    ("featureHashMaterialInConfig", {
+        let ws1 = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "features": { "ghcr.io/devcontainers/features/node:1": { "version": "lts" } }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws1) }
+        let ws2 = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "features": { "ghcr.io/devcontainers/features/node:1": { "version": "20" } }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws2) }
+        let r1 = try ConfigResolver.resolve(workspacePath: ws1.path, localEnv: [:])
+        let r2 = try ConfigResolver.resolve(workspacePath: ws2.path, localEnv: [:])
+        try MiniTest.expect(r1.configHash != r2.configHash)
+        try MiniTest.expectEqual(r1.config.features.count, 1)
+    }),
+    ("featureContributionMergeEnvAndInitCap", {
+        let contrib = FeatureContributions(
+            initProcess: true,
+            capAdd: ["SYS_PTRACE"],
+            containerEnv: ["FOO": "from-feature", "SAMPLE_A": "from-feature-a"],
+            mounts: [],
+            onCreateCommands: [.shell("echo feat")]
+        )
+        let base = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            containerEnv: ["FOO": "from-config"],
+            workspaceFolder: "/workspaces/x"
+        )
+        let merged = try FeatureContributionMerge.apply(contributions: contrib, to: base)
+        try MiniTest.expectEqual(merged.containerEnv["FOO"], "from-config")
+        try MiniTest.expectEqual(merged.containerEnv["SAMPLE_A"], "from-feature-a")
+        try MiniTest.expect(merged.runArgs.contains(.initFlag))
+        try MiniTest.expect(merged.runArgs.contains(.capAdd("SYS_PTRACE")))
+        try MiniTest.expectEqual(merged.featureOnCreateCommands.count, 1)
+        let argv = CreateRequest.from(
+            resolved: merged,
+            identityName: "ctr",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        ).createArguments()
+        try MiniTest.expect(argv.contains("--init"))
+        try MiniTest.expect(argv.contains("SYS_PTRACE"))
+    }),
+    ("featureMetadataLabelMergeAndAbsenceOK", {
+        let labels = [
+            DevContainerMetadataLabel.labelKey: #"{"init":true,"containerEnv":{"FROM_LABEL":"1"}}"#
+        ]
+        let c = DevContainerMetadataLabel.parseContributions(from: labels)
+        try MiniTest.expect(c.initProcess)
+        try MiniTest.expectEqual(c.containerEnv["FROM_LABEL"], "1")
+        let empty = DevContainerMetadataLabel.parseContributions(from: [:])
+        try MiniTest.expectEqual(empty, FeatureContributions.empty)
+    }),
+    ("featureMetadataLabelArrayMergesEnv", {
+        let labels = [
+            DevContainerMetadataLabel.labelKey:
+                #"[{"containerEnv":{"A":"1"}},{"containerEnv":{"B":"2"},"init":true}]"#
+        ]
+        let c = DevContainerMetadataLabel.parseContributions(from: labels)
+        try MiniTest.expectEqual(c.containerEnv["A"], "1")
+        try MiniTest.expectEqual(c.containerEnv["B"], "2")
+        try MiniTest.expect(c.initProcess)
+    }),
+    ("featureMetadataLabelArrayPrivilegedReject", {
+        let labels = [
+            DevContainerMetadataLabel.labelKey:
+                #"[{"containerEnv":{"OK":"1"}},{"privileged":true}]"#
+        ]
+        try MiniTest.expectThrows({
+            try DevContainerMetadataLabel.rejectUnsafe(from: labels, imageRef: "img:1")
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(err.message.lowercased().contains("privileged"))
+        }
+    }),
+    ("featuresRunnerBuildWithPlatformNoRosetta", {
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-run-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+        let mockFetch = MockFeatureFetcher(packagesByRef: [
+            FeaturesTestSupport.refA: FeaturesTestSupport.fixtureFeatureDir("sample-a")
+        ])
+        let mockProc = MockProcessRunner()
+        var buildArgs: [String]?
+        mockProc.handlers = [
+            { args in
+                if args.starts(with: ["image", "inspect"]) || args.starts(with: ["image", "list"]) {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+                }
+                if args.first == "build" {
+                    buildArgs = args
+                    if args.contains("--rosetta") {
+                        return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("no rosetta".utf8))
+                    }
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mockProc)
+        let deps = FeaturesRunner.Dependencies(
+            fetcher: mockFetch,
+            runtime: runtime,
+            cacheRoot: cache,
+            platform: "linux/arm64"
+        )
+        let features = [
+            AdmittedFeature(
+                reference: FeaturesTestSupport.refA,
+                options: ["greeting": .string("hi")]
+            )
+        ]
+        let result = try FeaturesRunner.run(
+            features: features,
+            baseImage: "alpine:3.20",
+            deps: deps,
+            remoteUser: "vscode",
+            containerUser: "vscode"
+        )
+        try MiniTest.expect(result.contributions.initProcess)
+        try MiniTest.expectEqual(result.orderedRefs, [FeaturesTestSupport.refA])
+        try MiniTest.expect(!result.reusedExistingImage)
+        try MiniTest.expect(result.derivedImage.hasPrefix("adevcontainer/features:"))
+        guard let buildArgs else {
+            throw MiniTest.Failure(message: "expected container build")
+        }
+        try MiniTest.expect(buildArgs.contains("--platform"))
+        if let pIdx = buildArgs.firstIndex(of: "--platform"), pIdx + 1 < buildArgs.count {
+            try MiniTest.expectEqual(buildArgs[pIdx + 1], "linux/arm64")
+        } else {
+            throw MiniTest.Failure(message: "expected --platform linux/arm64")
+        }
+        try MiniTest.expect(buildArgs.contains("-t"))
+        try MiniTest.expect(buildArgs.contains(result.derivedImage))
+        try MiniTest.expect(!buildArgs.contains("--rosetta"))
+        // Dockerfile written
+        let dockerfile = mockProc.calls.first(where: { $0.arguments.first == "build" }).map { call -> String? in
+            if let fIdx = call.arguments.firstIndex(of: "-f"), fIdx + 1 < call.arguments.count {
+                return call.arguments[fIdx + 1]
+            }
+            return nil
+        } ?? nil
+        if let dockerfile {
+            try MiniTest.expect(FileManager.default.fileExists(atPath: dockerfile))
+            let contents = try String(contentsOfFile: dockerfile, encoding: .utf8)
+            try MiniTest.expect(contents.contains("FROM alpine:3.20"))
+            try MiniTest.expect(contents.contains("install.sh"))
+        }
+    }),
+    ("featuresRunnerReusesExistingTag", {
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-reuse-tag-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+        let mockFetch = MockFeatureFetcher(packagesByRef: [
+            FeaturesTestSupport.refA: FeaturesTestSupport.fixtureFeatureDir("sample-a")
+        ])
+        let mockProc = MockProcessRunner()
+        mockProc.handlers = [
+            { args in
+                if args.starts(with: ["image", "inspect"]) {
+                    // Any inspect succeeds → imageExists true for derived tag path
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data(#"[{"id":"img"}]"#.utf8),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "build" {
+                    return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("should not build".utf8))
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mockProc)
+        let result = try FeaturesRunner.run(
+            features: [
+                AdmittedFeature(reference: FeaturesTestSupport.refA, options: [:])
+            ],
+            baseImage: "alpine:3.20",
+            deps: FeaturesRunner.Dependencies(
+                fetcher: mockFetch,
+                runtime: runtime,
+                cacheRoot: cache,
+                platform: "linux/arm64"
+            )
+        )
+        try MiniTest.expect(result.reusedExistingImage)
+        try MiniTest.expect(!mockProc.calls.contains { $0.arguments.first == "build" })
+    }),
+    ("featureInstallerCpAndExecAsRoot", {
+        // Helper retained; up path uses build. Still cover cp/exec mechanics.
+        let mockProc = MockProcessRunner()
+        mockProc.handlers = [
+            { args in
+                if args.first == "cp" || args.first == "copy" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mockProc)
+        let step = FeatureInstallStep(
+            reference: FeaturesTestSupport.refA,
+            packageDirectory: FeaturesTestSupport.fixtureFeatureDir("sample-a"),
+            installEnv: ["GREETING": "hi", "_REMOTE_USER": "root"],
+            safeName: "0-sample-a"
+        )
+        try FeatureInstaller.install(into: "ctr", plan: [step], runtime: runtime)
+        try MiniTest.expect(mockProc.calls.contains {
+            ($0.arguments.first == "cp" || $0.arguments.first == "copy")
+                && $0.arguments.contains(where: { $0.contains("ctr:") && $0.contains("/tmp/adev-features/") })
+        })
+        try MiniTest.expect(mockProc.calls.contains { call in
+            let a = call.arguments
+            return a.first == "exec"
+                && a.contains("-u") && a.contains("root")
+                && a.contains(where: { $0.contains("install.sh") })
+                && a.contains(where: { $0.hasPrefix("GREETING=") })
+        })
+    }),
+    ("pullImageIncludesPlatform", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["image", "pull"]) || args.starts(with: ["images", "pull"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try runtime.pullImage("alpine:3.20", platform: "linux/arm64")
+        guard let pull = mock.calls.first(where: {
+            $0.arguments.starts(with: ["image", "pull"]) || $0.arguments.starts(with: ["images", "pull"])
+        })?.arguments else {
+            throw MiniTest.Failure(message: "expected image pull")
+        }
+        try MiniTest.expect(pull.contains("--platform"))
+        if let i = pull.firstIndex(of: "--platform") {
+            try MiniTest.expectEqual(pull[i + 1], "linux/arm64")
+        }
+        try MiniTest.expect(!pull.contains("--rosetta"))
+    })
+]
+

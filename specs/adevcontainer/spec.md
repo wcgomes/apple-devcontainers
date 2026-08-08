@@ -2,7 +2,7 @@
 
 ## Purpose
 
-macOS developers need a native CLI that reads `devcontainer.json` and runs workspaces on Apple’s `container` stack. Upstream `@devcontainers/cli` is Node/Docker-oriented and is not a fit. This specification defines the durable outcome contract for a greenfield Swift CLI (`adevcontainer`): image-based workspaces with bind mounts, env/user/workspace folder, mounts and ports, lifecycle hooks (`onCreateCommand` through `postStartCommand`, plus admitted `postAttachCommand`), allowlisted `runArgs`, and `hostRequirements` preflight with create limits, plus lifecycle commands including `prune` and named-volume reuse on `up`.
+macOS developers need a native CLI that reads `devcontainer.json` and runs workspaces on Apple’s `container` stack. Upstream `@devcontainers/cli` is Node/Docker-oriented and is not a fit. This specification defines the durable outcome contract for a greenfield Swift CLI (`adevcontainer`): image-based workspaces with bind mounts, env/user/workspace folder, mounts and ports, lifecycle hooks (`onCreateCommand` through `postStartCommand`, plus admitted `postAttachCommand`), allowlisted `runArgs`, `hostRequirements` preflight with create limits, an OCI and local-path **Features runner** (derived image build on native arm64), plus lifecycle commands including `prune` and named-volume reuse on `up`.
 
 ## Requirements
 
@@ -106,6 +106,9 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - `runArgs` — allowlisted subset only; mapped on create
 - `hostRequirements` — evaluated preflight (fail on capacity shortfall; map memory/cpus to create limits; fail on parse/unknown keys)
 
+**Features**
+- `features` — object map of OCI or local path feature ref → options; processed by the Features runner (see Features requirements)
+
 #### Scenario: Minimal image config
 - Given fixture `Tests/Fixtures/smoke.json` as the workspace config
 - When the user runs a successful `up` then `exec`
@@ -136,18 +139,29 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - When config is validated
 - Then validation does not fail with unsupported-property for those keys
 
+#### Scenario: features is on the supported surface
+- Given a config that includes only previously supported keys plus an OCI `features` map without forever-rejected entries
+- When config is validated
+- Then validation does not fail with unsupported-property for `features`
+
 ---
 
 ### Requirement: Unsupported property policy
 
 The CLI MUST fail closed on unsupported or forever-rejected configuration. Errors MUST be structured and actionable: identify the property/flag, state that it is unsupported, and indicate what to remove or change. The CLI MUST NEVER silently ignore forever-rejected or unknown-dangerous entries.
 
-**Forever reject (v1) — runArgs allowlist is non-empty**
-- Feature id `ghcr.io/devcontainers/features/docker-outside-of-docker` (any tag/version)
-- Any `features` entry until Features land (see phase-ladder); docker-ood remains forever-reject after features land
+**Forever reject (v1) — Features-aware**
+
+- Feature refs containing `docker-outside-of-docker` / `docker-in-docker` / `docker-from-docker` (any registry/tag or local path)
+- Feature metadata requiring `privileged: true` or `securityOpt` (or equivalent)
 - `runArgs` containing `--privileged` or `--device…`
 - `runArgs` entries not on the runArgs allowlist
 - Docker Compose keys / compose-file driven multi-service config
+
+**No longer reject**
+
+- Non-ood OCI `features` entries solely for being features — they MUST enter the Features runner path
+- Local path feature refs — they MUST enter the Features runner path (load from disk relative to workspace)
 
 **May ignore or store as metadata (MUST NOT fail parse)**
 - `customizations.vscode` (and nested extensions/settings)
@@ -157,12 +171,17 @@ The CLI MUST fail closed on unsupported or forever-rejected configuration. Error
 - `hostRequirements` — MUST evaluate per **hostRequirements preflight** (not silent ignore)
 
 **Unknown non-metadata top-level properties**
-- MUST hard-error (fail closed), except keys explicitly supported in core plus lifecycle hooks, allowlisted `runArgs`, and `hostRequirements`.
+- MUST hard-error (fail closed), except keys explicitly supported in core plus lifecycle hooks, allowlisted `runArgs`, `hostRequirements`, and **`features`**.
 
-#### Scenario: Reject docker-outside-of-docker
-- Given a config with `features` including `ghcr.io/devcontainers/features/docker-outside-of-docker:1`
+#### Scenario: Reject docker-outside-of-docker (policy retained)
+- Given a config with `features` including a docker-outside-of-docker ref
 - When config is validated
 - Then the CLI fails with a structured error naming the feature and the reject policy
+
+#### Scenario: Non-ood features no longer rejected as blanket-unsupported
+- Given `features` with only `ghcr.io/devcontainers/features/node:1`
+- When config is validated at admission
+- Then the CLI does not fail with a blanket “features are not supported” error
 
 #### Scenario: Reject privileged runArgs
 - Given `runArgs` including `--privileged`
@@ -224,6 +243,8 @@ On create, the CLI MUST assign a deterministic container name derived from works
 
 Discovery and reuse MUST prefer deterministic name + inspect, NOT Docker-style `ps --filter label=` as the primary mechanism.
 
+When `features` is present, config hash material MUST include the selected feature refs, options, and ordered identity inputs. Changing features MUST change config hash so reuse and drift detection remain correct (recreate when features change).
+
 #### Scenario: Stable name across invocations
 - Given the same workspace path and config content
 - When `up` is invoked twice without delete
@@ -233,6 +254,11 @@ Discovery and reuse MUST prefer deterministic name + inspect, NOT Docker-style `
 - Given a container created by `up`
 - When the user runs `adevcontainer inspect`
 - Then local folder, config file, and config hash labels/fields are visible in the inspect output
+
+#### Scenario: Features participate in identity hash
+- Given two configs identical except for a feature option value
+- When config hashes are computed
+- Then the hashes differ
 
 ---
 
@@ -247,6 +273,15 @@ Discovery and reuse MUST prefer deterministic name + inspect, NOT Docker-style `
 - `remoteWorkspaceFolder` — absolute path inside the container used as workspace folder
 
 Additional helpful fields (e.g. `containerName`) MAY be included.
+
+**Create image selection (Features-aware)**
+
+On paths that create a new container (fresh create or recreate):
+
+- **Before create**, if resolved `features` is non-empty: ensure **build.rosetta=false** (consent), then **resolve → fetch → order → contribution merge → Dockerfile generate → `container build`** (or reuse derived tag). Create uses the **derived image** with contributions merged and **`--platform`** host-native.
+- Then start and lifecycle hooks (onCreate → updateContent → postCreate → postStart, etc.); feature-contributed hooks merge per the merge-feature-metadata requirement (installs are already in the derived image).
+- If `features` is absent or empty: create uses config `image` as today (still with default platform); Features build path is not required.
+- Reuse running / start stopped paths MUST NOT re-fetch/rebuild features unless product identity says config/features hash drift requires recreate (existing drift/recreate policy applies; features hash is part of config identity material when features present).
 
 **Lifecycle hook matrix by path**
 
@@ -278,6 +313,21 @@ Create-path cleanup: if any create-path hook fails before `up` returns success, 
 - Given a successful fresh `up` with postStart configured
 - When the user runs `up` again while the container is running
 - Then the second run reuses without re-running onCreate/updateContent/postCreate/postStart
+
+#### Scenario: Up with features builds then hooks
+- Given fixture-equivalent config with OCI node feature
+- When the user runs `up` (fresh create) with fetch/build available or mocked success
+- Then resolve/fetch/build run before create, create uses the derived image, then lifecycle hooks
+
+#### Scenario: Up without features unchanged image path
+- Given a config with no `features` key
+- When the user runs `up` fresh create
+- Then create uses config `image` and the Features build path is not required
+
+#### Scenario: Reuse running does not re-fetch features
+- Given a matching container already running with features identity satisfied
+- When the user runs `up` without recreate
+- Then no feature fetch/build is required and lifecycle hooks are not re-run
 
 ---
 
@@ -395,13 +445,20 @@ The repository MUST provide pure JSON capability fixtures used by tests and docs
 | `Tests/Fixtures/lifecycle.json` | postCreateCommand |
 | `Tests/Fixtures/lifecycle-hooks.json` | lifecycle hooks |
 | `Tests/Fixtures/runargs-host.json` | runArgs + hostRequirements |
+| `Tests/Fixtures/features-node.json` | OCI Features runner (node only; no docker-ood) |
+| `Tests/Fixtures/features-local.json` | Local path Features runner (sample-a + sample-b) |
 
-Fixtures MUST be valid for their capability (no forever-rejected props). They SHOULD align field styles with `reference/devcontainer.json` where applicable (image family, env keys, mount shapes, ports) while remaining Apple-container-runnable. Existing core fixtures MUST remain valid under lifecycle / runArgs / hostRequirements admission.
+Fixtures MUST be valid for their capability (no forever-rejected props). They SHOULD align field styles with `reference/devcontainer.json` where applicable (image family, env keys, mount shapes, ports) while remaining Apple-container-runnable. Existing core fixtures MUST remain valid under lifecycle / runArgs / hostRequirements / Features-aware admission (configs without `features` behave as today).
 
 #### Scenario: Fixtures are parseable configs
 - Given each file under `Tests/Fixtures/`
 - When parsed with JSONC/JSON rules and validated against admission
 - Then each fixture is admitted for its capability without unsupported-property errors
+
+#### Scenario: All listed fixtures still admit for their capability
+- Given each file under `Tests/Fixtures/` listed in the capability table including `features-node.json` and `features-local.json`
+- When parsed and validated against admission
+- Then each fixture is admitted for its capability without unexpected unsupported-property errors
 
 ---
 
@@ -644,3 +701,366 @@ Fixtures MUST NOT include forever-rejected props (no privileged/device, no featu
 - Given each lifecycle / runArgs / hostRequirements fixture file
 - When parsed and validated under admission rules
 - Then admission succeeds without unsupported-property errors
+
+---
+
+### Requirement: Features object admission (OCI + local path)
+
+The CLI MUST admit a top-level `features` property when it is an **object** (map). Each map key is a feature reference string; each value MUST be an object of option key → JSON value, or an empty object. A missing `features` key or empty object `{}` MUST be treated as no features (no-op for the runner).
+
+**Supported reference forms (v1):**
+
+1. **OCI** feature references resolvable over HTTP(S) registry APIs, including optional tag/version suffix, e.g. `ghcr.io/devcontainers/features/node:1`.
+2. **Local path** feature keys: relative (`./…`, `../…`), absolute (`/…`), and `file://…` URIs. Relative paths resolve against the **workspace root**. The path MUST be a directory containing `devcontainer-feature.json` and `install.sh`; the package is copied into the feature cache. Missing directory / metadata / install script → structured error at fetch/load (not a silent skip).
+
+Options object MAY supply feature options (e.g. `"version": "lts"`).
+
+**Not supported (v1) — structured hard error:**
+
+- Non-object `features` value (array, string, number, boolean).
+- Non-object option values for a feature entry (unless the entry value is explicitly empty object).
+- Forever-rejected docker-* feature markers (see forever-reject requirement) even when expressed as a local path.
+
+Error messages MUST name the feature key (when applicable) and indicate supported OCI and/or local path forms.
+
+Omitted `features` MUST NOT fail validation solely for absence.
+
+**Hash material (v1):** local path refs participate via the path string (and options); content changes under the same path MAY NOT invalidate the derived tag until the path or options change — acceptable for v1.
+
+#### Scenario: OCI feature ref with options admits
+- Given a config with `"features": { "ghcr.io/devcontainers/features/node:1": { "version": "lts" } }` and a valid `image`
+- When config is validated
+- Then validation does not fail solely because `features` is present, and the resolved model carries the feature ref and options
+
+#### Scenario: Empty features object is no-op
+- Given `"features": {}`
+- When config is validated and `up` runs without other features work
+- Then admission succeeds and the Features runner performs no fetch/install
+
+#### Scenario: Local path feature admits
+- Given `"features": { "./.devcontainer/features/sample-a": { "greeting": "local" } }`
+- When config is validated
+- Then admission succeeds and the resolved model carries the local path ref and options
+
+#### Scenario: Local path missing package fails at load
+- Given an admitted local path whose directory (or `install.sh` / `devcontainer-feature.json`) is missing
+- When features are fetched/loaded
+- Then the CLI fails with a structured error naming the feature ref
+
+#### Scenario: features must be an object
+- Given `"features": ["ghcr.io/devcontainers/features/node:1"]`
+- When config is validated
+- Then the CLI fails with a structured error naming `features` and requiring an object map
+
+---
+
+### Requirement: Forever-reject docker-ood and privileged feature contributions
+
+Independent of general Features support, the CLI MUST forever-reject:
+
+1. **docker-outside-of-docker** — any feature reference whose id/path contains the segment or substring `docker-outside-of-docker` (case-sensitive match on the conventional id), regardless of registry host or tag (e.g. `ghcr.io/devcontainers/features/docker-outside-of-docker:1`, alternate registries, any version tag). Also forever-reject refs containing `docker-in-docker` or `docker-from-docker` (any registry/tag or local path).
+2. **Privileged / securityOpt contributions** — after metadata resolve, any feature whose `devcontainer-feature.json` (or merged effective contribution) requires `privileged: true`, non-empty `securityOpt` / equivalent security-opt list, or an install posture that mandatorily needs them.
+3. **Compose** — unchanged; Compose keys remain forever-rejected.
+
+Errors MUST be structured and actionable: name the feature id, state the reject policy, and indicate what to remove. The CLI MUST NEVER silently skip docker-ood or privileged contributions.
+
+#### Scenario: Reject docker-ood under any registry/tag
+- Given `features` includes `ghcr.io/devcontainers/features/docker-outside-of-docker:1` (or another host/tag with `docker-outside-of-docker` in the ref)
+- When config is validated (or at latest before fetch)
+- Then the CLI fails with a structured error naming the feature and the forever-reject policy
+
+#### Scenario: Reject privileged feature metadata
+- Given an OCI feature whose resolved `devcontainer-feature.json` sets `privileged` to true (or requires `securityOpt`)
+- When features are resolved for `up`
+- Then the CLI fails with a structured error naming the feature and the privileged/securityOpt reject policy, and MUST NOT install features into a container for that set
+
+#### Scenario: Non-ood feature is not rejected solely as features-unsupported
+- Given only `ghcr.io/devcontainers/features/node:1` in `features` (no ood)
+- When config is validated at the admission layer
+- Then the CLI does **not** fail with the legacy “any features entry rejected / features runner post-MVP” policy
+
+---
+
+### Requirement: Feature metadata resolve and dependency order
+
+For each admitted feature (OCI or local path), the runner MUST obtain and parse **`devcontainer-feature.json`** from the fetched/loaded feature package (standard Features metadata file at the package root or documented Features layout).
+
+The runner MUST compute a simplified **correct install order** using:
+
+- `dependsOn` (feature dependencies that must install first)
+- `installsAfter` (ordering constraints relative to other selected features)
+
+Dependency keys MUST match selected features by full ref, bare id, or last path segment (so `./x/sample-a` matches `dependsOn` of `…/sample-a:1`).
+
+Direct declaration order in `devcontainer.json` MAY break ties when the Features spec leaves order unspecified. Cyclic dependencies MUST fail with a structured error naming the cycle participants.
+
+Options from the config options object MUST be applied with standard Features option substitution into install environment / `install.sh` invocation as applicable (at minimum: export option values as environment variables consumed by `install.sh` per common Features practice).
+
+#### Scenario: dependsOn orders install before dependent
+- Given feature B `dependsOn` feature A, and both are selected
+- When the runner computes install order
+- Then A is ordered before B in the install plan
+
+#### Scenario: dependsOn matches local path by feature id segment
+- Given selected `./.devcontainer/features/sample-a` and `./.devcontainer/features/sample-b` where B `dependsOn` an OCI-style `…/sample-a:1`
+- When the runner computes install order
+- Then sample-a is ordered before sample-b
+
+#### Scenario: installsAfter respected
+- Given feature B declares `installsAfter` including feature A, and both are selected
+- When the runner computes install order
+- Then A is ordered before B
+
+#### Scenario: Dependency cycle fails
+- Given selected features form a dependsOn/installsAfter cycle
+- When the runner resolves order
+- Then the CLI fails with a structured error indicating a dependency cycle
+
+#### Scenario: Missing devcontainer-feature.json fails
+- Given a fetched artifact without parseable `devcontainer-feature.json`
+- When metadata is resolved
+- Then the CLI fails with a structured error naming the feature ref
+
+---
+
+### Requirement: Feature artifact fetch (OCI + local path)
+
+The default fetcher MUST:
+
+1. **Local path** refs → resolve relative to workspace root (or absolute/`file://`), validate package layout, and **copy** into the feature cache destination.
+2. **OCI** refs → fetch feature content as **OCI artifacts** (feature layers/files), not as a plain application container image assumed runnable, via **HTTPS and/or registry API** logic **embedded in the product** (library code under `Sources/ADevContainerLib/`).
+
+The product MUST NOT:
+
+- Require users to install ORAS or another external feature-fetch CLI
+- Assume Apple `container image pull` pulls feature artifacts correctly
+- Invoke Node or `@devcontainers/cli` to fetch features
+
+Fetch/load failures (missing local dir, missing install.sh/metadata, network, 401/403/404, malformed manifest) MUST surface as structured errors naming the feature ref and failure class. Unit tests MUST mock the OCI fetch boundary so the default suite needs no network; local path tests use fixtures under `Tests/Fixtures/features-sample/`.
+
+#### Scenario: Fetch invokes embedded registry client not container pull for artifacts
+- Given an admitted OCI feature ref
+- When the runner fetches the feature
+- Then fetch goes through the embedded Features fetch path (mockable), and tests can succeed without calling `container image pull` for the feature artifact
+
+#### Scenario: Fetch 404 is structured failure
+- Given a feature ref whose manifest does not exist
+- When fetch runs
+- Then `up` fails with a structured error naming the feature ref (and does not proceed to create/install)
+
+#### Scenario: Unit tests mock fetch without network
+- Given unit tests for the Features runner
+- When the suite runs offline
+- Then fetch is satisfied by a mock/fake and tests do not require live registry access
+
+---
+
+### Requirement: Derived image build (native arm64; no Rosetta)
+
+When `features` is non-empty after admission, on a fresh create path the product MUST:
+
+1. **Ensure native arm64 BuildKit** (see **build.rosetta consent** requirement) before fetch/build.
+2. **Resolve + fetch** OCI feature artifacts (embedded client), compute install order, and collect runtime contributions (see other requirements).
+3. **Pull** the config base image with **`--platform`** set to the host-native Linux platform:
+   - `linux/arm64` when the host is arm64 / aarch64 (product default on Apple Silicon)
+   - `linux/amd64` only when the host is x86_64
+4. **Build** a derived image with Apple `container build` from a **generated Dockerfile** that `FROM`s the base image and `RUN`s each feature `install.sh` **as root** (options / `_REMOTE_USER` / `_CONTAINER_USER` env). Build argv MUST include the same host-native **`--platform`**.
+5. **Tag** a deterministic local image (`adevcontainer/features:<hash>`); **reuse** when that tag already exists locally (skip rebuild).
+6. **Create** the workspace container **from the derived image** (not the raw config `image`) with the same **`--platform`**. Contributions that affect create flags (`init`, `capAdd`, env, mounts) MUST be merged **before** create.
+7. **Start** the container, then run lifecycle hooks (onCreate → …) as today.
+
+**MUST NOT** pass `--rosetta` on Features pull/build/create unless the user opted in via `runArgs`.
+
+**MUST NOT** depend on Rosetta being installed: Features builds rely on `build.rosetta=false` (native arm64 BuildKit).
+
+Reuse running / start stopped: MUST NOT re-fetch/rebuild features (already baked into the image on create). Config hash (including features) still drives recreate when features change.
+
+#### Scenario: Create uses derived image after build
+- Given a config with `image` and one OCI feature
+- When the user runs `up` on a fresh create path (fetch/build available or mocked success)
+- Then `container build` runs with `--platform linux/arm64` on arm64 hosts, create uses `adevcontainer/features:<hash>`, and lifecycle hooks run after start
+
+#### Scenario: Build and pull never pass --rosetta by default
+- Given Features pull/build on the up path
+- When argv is inspected
+- Then neither pull nor build includes `--rosetta` unless the user opted in via runArgs
+
+#### Scenario: Platform flag on pull, build, and create (arm64 host)
+- Given host architecture arm64
+- When pull, build, and create run for features
+- Then argv includes `--platform linux/arm64` and does not include `--rosetta` unless the user opted in via runArgs
+
+#### Scenario: Build failure does not create container
+- Given `container build` exits non-zero
+- When features build runs before create
+- Then `up` fails with a structured feature-build error and no workspace container is created
+
+#### Scenario: Reuse existing derived tag skips build
+- Given the deterministic derived tag already exists locally
+- When Features runner runs with the same base image + features identity
+- Then no `container build` is invoked and create uses the existing tag
+
+#### Scenario: Feature option change changes config identity
+- Given the same feature ref but different options object
+- When config hashes (and derived tags) are computed
+- Then the hashes/tags differ (recreate path engages; no silent wrong-feature reuse)
+
+---
+
+### Requirement: build.rosetta consent (one-time, native arm64 BuildKit)
+
+Before Features fetch/build on a create/recreate path, the product MUST ensure Apple container BuildKit is configured with **`build.rosetta=false`** so arm64 image builds do not require Rosetta ([apple/container#1825](https://github.com/apple/container/issues/1825)).
+
+1. Read the **effective** value via `container system property list` (parse `[build]` / `rosetta`).
+2. If already **`false`** → proceed **silently** (no prompt, no warning, no config write).
+3. If **`true`** or **missing** (treat missing as default true for this gate):
+   - On a TTY: print an English explanation and ask **once**:
+     ```
+     Apple container BuildKit is configured with build.rosetta=true, which requires
+     Rosetta even for native arm64 image builds and can fail when Rosetta is unavailable.
+
+     adevcontainer will set build.rosetta=false in <config-path>
+     so feature image builds use native arm64 (closer to @devcontainers/cli behavior).
+
+     Proceed? [Y/n]
+     ```
+   - Accept (empty / Y / yes): merge **only** `[build] rosetta = false` into the host Apple container config.toml (preserve all other keys/sections), restart the builder (`builder delete --force` / stop as needed; system stop+start **only if** the property still shows true after builder restart), emit `==> Configuring native arm64 builds (build.rosetta=false)` only when actually changing.
+   - Decline: fail `up` with structured error `build_rosetta_config`; **do not** change config.
+   - Non-interactive (no TTY / CI): fail with clear error unless env `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1` auto-accepts without prompt.
+4. **MUST NOT** restore `rosetta=true` later (user consented to leave it false).
+5. **MUST NOT** install Rosetta.
+6. Config path is the host Apple container config (typically `~/Library/Application Support/com.apple.container/config/config.toml`).
+
+#### Scenario: Already false is silent
+- Given effective `build.rosetta=false`
+- When Features up create path starts
+- Then no prompt and no config write
+
+#### Scenario: User declines
+- Given effective `build.rosetta=true` and interactive decline
+- When Features up create path starts
+- Then `up` fails with `build_rosetta_config` and config is unchanged
+
+#### Scenario: Env auto-accept in CI
+- Given non-interactive session and `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`
+- When Features up needs to disable rosetta
+- Then config is merged with `rosetta = false` without a prompt
+
+---
+
+### Requirement: Merge feature metadata into create and lifecycle
+
+After features are resolved (and before create for flag contributions; lifecycle hooks from features run after start, with installs already baked into the derived image), the CLI MUST merge **runtime contributions** from feature metadata (and SHOULD merge from image `devcontainer.metadata` label when present) into the effective create/lifecycle request:
+
+| Contribution | Merge behavior |
+|--------------|----------------|
+| `init` | Effective create includes `--init` (union with config `runArgs` `--init`) |
+| `capAdd` | Each capability mapped via the existing **cap-add allowlist path**; disallowed names fail closed with structured error |
+| `containerEnv` | Merged into effective env; **config `containerEnv` wins** on key conflict |
+| mounts | Bind and volume only; sources normalized with **MountNormalizer** for file→dir promotion; incompatible mount types fail structured |
+| lifecycle hooks contributed by features | Appended/merged into the create-path exec order after start (installs already in derived image); same string/argv forms and failure/delete-on-fail policy as config hooks for create-path failures |
+
+Privileged / `securityOpt` contributions remain forever-rejected (see forever-reject requirement).
+
+**SHOULD:** If the base or derived image inspect shows a `devcontainer.metadata` label with JSON metadata, parse and merge compatible fields into the effective model. Absence of the label MUST NOT fail `up`.
+
+#### Scenario: Feature init merges to create --init
+- Given feature metadata with `init: true` and config without `--init` in runArgs
+- When create argv is built after feature resolve
+- Then create includes `--init`
+
+#### Scenario: Feature capAdd uses allowlist path
+- Given feature metadata `capAdd: ["SYS_PTRACE"]`
+- When create argv is built
+- Then cap-add is applied through the same allowlisted mapping as runArgs cap-add
+
+#### Scenario: Config containerEnv wins over feature env
+- Given feature metadata `containerEnv.FOO=from-feature` and config `containerEnv.FOO=from-config`
+- When effective env is computed
+- Then `FOO` is `from-config`
+
+#### Scenario: Feature lifecycle hooks run on fresh create via exec
+- Given feature metadata contributing a post-create-style lifecycle command and a fresh create path
+- When `up` succeeds through create
+- Then the contributed hook runs via runtime exec after start (features already installed in the derived image), and non-zero exit fails `up` under create-path policy
+
+#### Scenario: devcontainer.metadata label merge when present
+- Given a base image with a parseable `devcontainer.metadata` label
+- When features/metadata merge runs
+- Then compatible fields are merged into the effective model and `up` is not failed solely because the label existed
+
+#### Scenario: Missing devcontainer.metadata label is OK
+- Given no `devcontainer.metadata` label on the image
+- When `up` runs with features
+- Then absence alone does not fail `up`
+
+---
+
+### Requirement: Features progress status lines
+
+During Features work on `up`, the CLI MUST emit stderr progress status lines in the existing progress family (`==> …` / StatusPrinter), including at least:
+
+- Resolving features
+- Fetching feature \<ref or id\> (per feature or equivalent clear wording)
+- Building features image \<tag\> (or Reusing features image \<tag\> when the tag exists)
+- Configuring native arm64 builds (build.rosetta=false) — **only** when actually changing config
+
+`ADEVCONTAINER_QUIET=1` MUST silence these status lines. Machine JSON on stdout MUST remain pure when `--json` (or equivalent) is used.
+
+#### Scenario: Progress lines during feature up
+- Given a features config and quiet mode unset
+- When `up` runs the Features path (mocked fetch/build OK)
+- Then stderr includes resolving/fetching/building (or reusing) status lines
+
+#### Scenario: Quiet suppresses features progress
+- Given `ADEVCONTAINER_QUIET=1`
+- When `up` runs the Features path
+- Then Features progress status lines are not printed
+
+---
+
+### Requirement: Features fixtures
+
+The repository MUST provide:
+
+| Path | Content |
+|------|---------|
+| `Tests/Fixtures/features-node.json` | Valid image-based config with **only** a non-ood OCI feature suitable for Node (e.g. `ghcr.io/devcontainers/features/node` with a pinned tag) and options if needed |
+| `Tests/Fixtures/features-local.json` | Valid image-based config with local path features `./.devcontainer/features/sample-a` and `sample-b` (options as needed) |
+| `Tests/Fixtures/features-sample/` | On-disk sample feature packages (`sample-a`, `sample-b`, `sample-privileged`) for unit + local E2E |
+
+Fixtures MUST NOT include `docker-outside-of-docker`, privileged `runArgs`, device flags, or Compose keys (except `sample-privileged` metadata used only to assert forever-reject). OCI fixtures SHOULD remain usable for optional network integration tests. Local E2E copies `features-sample` into the temp workspace `.devcontainer/features/` before `up`.
+
+#### Scenario: features-node fixture admits
+- Given `Tests/Fixtures/features-node.json`
+- When parsed and validated under Features admission rules (without requiring live fetch in pure admission tests)
+- Then admission succeeds for the features object shape and does not hit docker-ood reject
+
+#### Scenario: features-local fixture admits
+- Given `Tests/Fixtures/features-local.json`
+- When parsed and validated under Features admission rules
+- Then admission succeeds for both local path keys
+
+---
+
+### Requirement: Features test strategy
+
+- **Unit tests** MUST mock registry fetch and runtime `build` / image inspect / property list as needed; default `swift run adevcontainerTests` MUST pass without network and without requiring Rosetta installed. Local path load/order/privileged-reject tests use `features-sample` fixtures offline.
+- **Integration tests** MAY exercise real OCI fetch + `container build` + `up` when network and Apple `container` are available; they MUST **skip** cleanly when network is unavailable or Apple `container` is missing. **Local path E2E** (`fixtureE2E_featuresLocal`) MUST run when Apple `container` is available **without** requiring `ADEVCONTAINER_FEATURES_E2E` or ghcr network (still uses rosetta-ensure env for non-interactive CI).
+- Tests MUST NEVER require docker-ood or privileged features to succeed an install path.
+- Features up-path tests MUST assert `container build` with host-native `--platform` and **no** `--rosetta` on the Features build path; create MUST use the derived image tag.
+
+#### Scenario: Offline unit suite
+- Given no network
+- When `swift run adevcontainerTests` runs unit/command Features tests
+- Then those tests pass via mocks and local fixtures
+
+#### Scenario: Integration skips without network or runtime
+- Given integration tests for OCI Features and no network or no Apple `container`
+- When the integration section runs
+- Then it skips without failing the suite solely for absence of network/runtime
+
+#### Scenario: Local features E2E without ghcr gate
+- Given Apple `container` available and local sample features copied into the workspace
+- When `fixtureE2E_featuresLocal` runs
+- Then `up` builds with sample-a then sample-b and smoke finds both in `/usr/local/etc/adev-features/installed.txt`

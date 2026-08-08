@@ -1,0 +1,19 @@
+{
+  "id": "sample-a",
+  "version": "1.0.0",
+  "name": "Sample A",
+  "description": "Fixture feature A",
+  "options": {
+    "greeting": {
+      "type": "string",
+      "default": "hello",
+      "description": "Greeting text"
+    }
+  },
+  "containerEnv": {
+    "SAMPLE_A": "from-feature-a"
+  },
+  "init": true,
+  "capAdd": ["SYS_PTRACE"],
+  "onCreateCommand": "echo feature-a-onCreate"
+}

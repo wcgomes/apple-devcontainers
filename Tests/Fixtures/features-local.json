@@ -1,0 +1,8 @@
+{
+  "name": "Features local sample-a + sample-b",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "./.devcontainer/features/sample-a": { "greeting": "local" },
+    "./.devcontainer/features/sample-b": { "mode": "test" }
+  }
+}

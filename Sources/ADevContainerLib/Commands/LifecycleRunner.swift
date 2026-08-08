@@ -36,31 +36,45 @@ public enum LifecycleRunner {
         }
     }
 
-    /// Create-path order: onCreate → updateContent → postCreate → postStart.
+    /// Create-path order: onCreate → updateContent → postCreate → postStart
+    /// (config hook then any feature-contributed hooks per stage).
     public static func runCreatePath(
         containerId: String,
         config: ResolvedDevContainerConfig,
         runtime: AppleContainerRuntime
     ) throws {
-        let steps: [(String, LifecycleCommand?)] = [
-            ("onCreateCommand", config.onCreateCommand),
-            ("updateContentCommand", config.updateContentCommand),
-            ("postCreateCommand", config.postCreateCommand),
-            ("postStartCommand", config.postStartCommand)
+        let stages: [(String, LifecycleCommand?, [LifecycleCommand])] = [
+            ("onCreateCommand", config.onCreateCommand, config.featureOnCreateCommands),
+            ("updateContentCommand", config.updateContentCommand, config.featureUpdateContentCommands),
+            ("postCreateCommand", config.postCreateCommand, config.featurePostCreateCommands),
+            ("postStartCommand", config.postStartCommand, config.featurePostStartCommands)
         ]
-        for (property, command) in steps {
+        for (property, primary, extras) in stages {
             try runIfPresent(
                 property: property,
-                command: command,
+                command: primary,
                 containerId: containerId,
                 config: config,
                 runtime: runtime,
                 failurePolicy: .deleteContainerThenFail
             )
+            for (index, extra) in extras.enumerated() {
+                let label = extras.count == 1
+                    ? "\(property) (feature)"
+                    : "\(property) (feature \(index + 1))"
+                try runIfPresent(
+                    property: label,
+                    command: extra,
+                    containerId: containerId,
+                    config: config,
+                    runtime: runtime,
+                    failurePolicy: .deleteContainerThenFail
+                )
+            }
         }
     }
 
-    /// Restart path: postStart only; do not delete on failure.
+    /// Restart path: postStart only (config + feature); do not delete on failure.
     public static func runRestartPostStart(
         containerId: String,
         config: ResolvedDevContainerConfig,
@@ -74,11 +88,25 @@ public enum LifecycleRunner {
             runtime: runtime,
             failurePolicy: .failKeepContainer
         )
+        for (index, extra) in config.featurePostStartCommands.enumerated() {
+            let label = config.featurePostStartCommands.count == 1
+                ? "postStartCommand (feature)"
+                : "postStartCommand (feature \(index + 1))"
+            try runIfPresent(
+                property: label,
+                command: extra,
+                containerId: containerId,
+                config: config,
+                runtime: runtime,
+                failurePolicy: .failKeepContainer
+            )
+        }
     }
 
-    /// Emit one-time postAttach skip status when the property is set.
+    /// Emit one-time postAttach skip status when the property is set (config or feature).
     public static func emitPostAttachSkipIfNeeded(config: ResolvedDevContainerConfig) {
-        guard config.postAttachCommand != nil else { return }
+        let hasAttach = config.postAttachCommand != nil || !config.featurePostAttachCommands.isEmpty
+        guard hasAttach else { return }
         StatusPrinter.status("postAttach skipped (no attach hook)")
     }
 
@@ -91,8 +119,16 @@ public enum LifecycleRunner {
             execResult.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
         ].filter { !$0.isEmpty }.joined(separator: " | ")
 
+        // Map feature-labeled properties back to base code family.
+        let baseProperty: String
+        if let range = property.range(of: " (feature") {
+            baseProperty = String(property[..<range.lowerBound])
+        } else {
+            baseProperty = property
+        }
+
         let code: String
-        if property == "postCreateCommand" {
+        if baseProperty == "postCreateCommand" {
             code = CLIErrorCode.postCreateFailed
         } else {
             code = CLIErrorCode.lifecycleFailed
@@ -103,7 +139,7 @@ public enum LifecycleRunner {
             property: property,
             message: "\(property) failed with exit \(execResult.exitCode)"
                 + (detail.isEmpty ? "" : ": \(detail)"),
-            hint: "Fix the \(property) or exec into the container to debug"
+            hint: "Fix the \(baseProperty) or exec into the container to debug"
         )
     }
 }

@@ -1,0 +1,6 @@
+{
+  "id": "sample-privileged",
+  "version": "1.0.0",
+  "name": "Sample Privileged",
+  "privileged": true
+}

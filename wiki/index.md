@@ -4,8 +4,8 @@ macOS Swift CLI (`adevcontainer`): read `devcontainer.json`, drive Apple `contai
 
 ## Architecture
 
-- [architecture.md](architecture.md) — pipeline, package layout, commands (`up` volume reuse, `delete` vs `prune`), progress stderr, identity, lifecycle matrix, runArgs allowlist, hostRequirements; binary `adevcontainer`; host macOS 26+; CLT test suite `swift run adevcontainerTests`
-- Realized contract: `specs/adevcontainer/spec.md` (core + lifecycle + runArgs allowlist + hostRequirements). No active change open. Archived: `specs/changes/archive/20260807-adevcontainer-core/`, `specs/changes/archive/20260807-lifecycle-runargs-host/`. **Next: Features**.
+- [architecture.md](architecture.md) — pipeline, package layout, commands (`up` volume reuse, `delete` vs `prune`), progress stderr, identity, lifecycle matrix, runArgs allowlist, hostRequirements, Features (OCI + local path); binary `adevcontainer`; host macOS 26+; CLT test suite `swift run adevcontainerTests`
+- Realized contract: `specs/adevcontainer/spec.md` (core + lifecycle + runArgs allowlist + hostRequirements + Features). No active changes. Archived: `specs/changes/archive/20260807-adevcontainer-core/`, `specs/changes/archive/20260807-lifecycle-runargs-host/`, `specs/changes/archive/20260807-features-runner/`. Next planning: Phase 6 stretch / advanced parity (optional).
 
 ## Decisions (ADRs)
 
@@ -15,9 +15,9 @@ macOS Swift CLI (`adevcontainer`): read `devcontainer.json`, drive Apple `contai
 
 ## Domain
 
-- [devcontainer-apple-gaps.md](domain/devcontainer-apple-gaps.md) — Apple container vs Docker/devcontainers gaps; file binds rejected (dir only); list/inspect JSON; keep-alive; create --name = id; Compose/privileged/devices; VS Code attach
-- [phase-ladder.md](domain/phase-ladder.md) — delivery planning ladder 0–6 (only place that speaks in phases); next: Features
+- [devcontainer-apple-gaps.md](domain/devcontainer-apple-gaps.md) — Apple container vs Docker/devcontainers gaps; file binds rejected (dir only); list/inspect JSON; keep-alive; create --name = id; Compose/privileged/devices; VS Code attach; Features OCI + local path
+- [phase-ladder.md](domain/phase-ladder.md) — delivery planning ladder 0–6 (only place that speaks in phases); Phase 5 Features done (OCI + local path); next optional Phase 6
 
 ## Conventions
 
-- [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md) — AppleContainerRuntime; MountNormalizer file→dir bind promotion; named volume ensure (list-first reuse); `prune` resource set; progress/`==>` tee; machine JSON; ProcessRunner pipe drain; interactive exec (inherit stdio / `-i -t`) vs non-interactive pipes; lifecycle matrix + create-path delete-on-fail; runArgs allowlist; hostRequirements enforce+apply; names/labels
+- [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md) — AppleContainerRuntime; Features runner (OCI + local path fetch; derived `container build --platform`; build.rosetta consent; docker-* forever-reject; PATH expansion); MountNormalizer file→dir bind promotion; named volume ensure (list-first reuse); `prune` resource set; progress/`==>` tee; machine JSON; ProcessRunner pipe drain; interactive exec (inherit stdio / `-i -t`) vs non-interactive pipes; lifecycle matrix + create-path delete-on-fail; runArgs allowlist; hostRequirements enforce+apply; names/labels
