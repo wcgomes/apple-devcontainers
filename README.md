@@ -50,10 +50,10 @@ adevcontainer doctor
 | Command | Purpose |
 |---------|---------|
 | `adevcontainer doctor` | Check Apple `container` readiness |
-| `adevcontainer up [-w path]` | Create/start workspace from a **host** checkout (only command that uses `-w`; default cwd) |
-| `adevcontainer clone <git-url>` | Clone a git repo into a **named volume** and start the devcontainer (HTTPS or SSH) |
+| `adevcontainer up [-w path] [--vscode]` | Create/start workspace from a **host** checkout (only command that uses `-w`; default cwd) |
+| `adevcontainer clone <git-url> [--vscode]` | Clone a git repo into a **named volume** and start the devcontainer (HTTPS or SSH) |
 | `adevcontainer list [--json]` | List managed containers |
-| `adevcontainer start \| stop \| delete \| prune \| inspect [--name]` | Lifecycle by container name (or interactive picker) |
+| `adevcontainer start [--vscode] \| stop \| delete \| prune \| inspect [--name]` | Lifecycle by container name (or interactive picker) |
 | `adevcontainer exec [-it] [--name] [--] [cmd…]` | Shell or command in a running managed container |
 
 ### Quick start
@@ -143,9 +143,15 @@ The Features path mirrors official Dev Containers (Dockerfile + `container build
 
 **Hash note (v1):** local path identity uses the path string + options; editing files under the same path may not invalidate the derived tag until the path or options change.
 
-### VS Code attach
+### VS Code attach and optional `--vscode`
 
-After `up` or `clone`, the container is running and listable (`adevcontainer list`). Attach manually with experimental **Attach to Running Apple Container**. This CLI does not auto-attach.
+After `up` or `clone`, the container is running and listable (`adevcontainer list`). Attach manually with experimental **Attach to Running Apple Container**.
+
+Optionally pass **`--vscode`** on `up`, `start`, or `clone` for a **best-effort** open of a **new** VS Code window on the resolved remote workspace folder (via the host `code` CLI and Remote - Containers `apple-container` URI). This is a convenience side effect only:
+
+- **Host prereqs:** VS Code, extension `ms-vscode-remote.remote-containers`, experimental Apple support (`dev.containers.experimentalAppleContainerSupport: true`), and a discoverable `code` CLI (`PATH` or the standard macOS app location; Insiders may be tried).
+- **Soft-fail:** If `code` is missing or launch fails, the CLI warns on **stderr** and still reports lifecycle **success** (container is not torn down). `--json` success shape is unchanged.
+- **Not full parity:** `--vscode` does **not** claim full Dev Containers extension parity (up/rebuild driver, extension clone-in-volume, etc.). Manual attach remains valid when the flag is omitted or open soft-fails.
 
 ### Non-goals (current)
 

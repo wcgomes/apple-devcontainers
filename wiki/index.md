@@ -4,7 +4,7 @@ macOS Swift CLI (`adevcontainer`): read `devcontainer.json`, drive Apple `contai
 
 ## Architecture
 
-- [architecture.md](architecture.md) — pipeline, package layout, commands (`up` bind-mode only uses `-w`; `clone` volume-mode + auto Features `git:1` when no git/common-utils, in-container full git clone populate, SSH `--ssh` / HTTPS host credential fill + guest store; `list`/`start`/`exec`/`stop`/`delete`/`prune`/`inspect` via `--name`/picker not `-w`; `up` bind stamps managed labels incl. `workspace_mode=bind`; `delete` vs `prune`), bind vs named-volume workspace, identity (path vs git URL), lifecycle matrix, progress stderr, runArgs allowlist, hostRequirements, Features (OCI + local path); binary `adevcontainer`; repo `apple-devcontainers`; host macOS 26+; tests `swift run adevcontainerTests`
+- [architecture.md](architecture.md) — pipeline, package layout, commands (`up` bind-mode only uses `-w`; `clone` volume-mode + auto Features `git:1` when no git/common-utils, in-container full git clone populate, SSH `--ssh` / HTTPS host credential fill + guest store; `list`/`start`/`exec`/`stop`/`delete`/`prune`/`inspect` via `--name`/picker not `-w`; `up` bind stamps managed labels incl. `workspace_mode=bind`; `delete` vs `prune`), bind vs named-volume workspace, identity (path vs git URL), lifecycle matrix, progress stderr, runArgs allowlist, hostRequirements, Features (OCI + local path); **VS Code `--vscode`** on `up`/`start`/`clone` (best-effort `code --folder-uri` `vscode-remote://apple-container+` hex JSON `{id,image}`, soft-fail; prereqs experimentalAppleContainerSupport + remote-containers; manual attach without flag OK; no full Dev Containers parity; spec WIP `specs/changes/vscode-open-flag/`); binary `adevcontainer`; repo `apple-devcontainers`; host macOS 26+; tests `swift run adevcontainerTests`
 - Contract: [`specs/adevcontainer/spec.md`](../specs/adevcontainer/spec.md) (realized; includes archived `20260808-clone-in-volume`)
 
 ## Decisions (ADRs)
@@ -15,7 +15,7 @@ macOS Swift CLI (`adevcontainer`): read `devcontainer.json`, drive Apple `contai
 
 ## Domain
 
-- [devcontainer-apple-gaps.md](domain/devcontainer-apple-gaps.md) — Apple container vs Docker/devcontainers gaps; bind (virtiofs/APFS) vs named volume (virtio-blk/ext4) I/O; `container cp` silent no-op on named-volume mounts (clone populate = in-container git clone, not cp/tar happy path); SSH `--ssh` / HTTPS host credential fill + guest store (no GCM-in-guest); file binds rejected (dir only); list/inspect JSON; keep-alive `/bin/sleep`; create --name = id; Compose/privileged/devices; VS Code attach + clone-in-volume analogue; Features OCI + local path
+- [devcontainer-apple-gaps.md](domain/devcontainer-apple-gaps.md) — Apple container vs Docker/devcontainers gaps; bind (virtiofs/APFS) vs named volume (virtio-blk/ext4) I/O; `container cp` silent no-op on named-volume mounts (clone populate = in-container git clone, not cp/tar happy path); SSH `--ssh` / HTTPS host credential fill + guest store (no GCM-in-guest); file binds rejected (dir only); list/inspect JSON; keep-alive `/bin/sleep`; create --name = id; Compose/privileged/devices; VS Code `--vscode` on up/start/clone (soft-fail folder-uri open; `apple-container+` hex URI recipe; experimentalAppleContainerSupport; nameConfigs; UI no-folder gap; manual attach without flag) + clone-in-volume analogue; Features OCI + local path
 
 ## Conventions
 

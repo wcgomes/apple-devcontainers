@@ -152,8 +152,12 @@ nonisolated(unsafe) let integrationTests: [(String, () throws -> Void)] = [
     ("fixtureE2E_envUser", {
         try IntegrationSupport.runFixtureE2E(fixtureFile: "env-user.json", extra: { ws, runtime, _ in
             let listed = try ManagedContainers.list(runtime: runtime)
-            try MiniTest.expectEqual(listed.count, 1)
-            let name = listed[0].name
+            let wsPath = (ws.path as NSString).standardizingPath
+            let match = listed.first {
+                ($0.labels[ContainerIdentity.labelLocalFolder] as NSString?)?.standardizingPath == wsPath
+            }
+            try MiniTest.expect(match != nil, "expected managed container for test workspace")
+            let name = match!.name
             let inspected = try InspectCommand.run(name: name, runtime: runtime)
             try MiniTest.expectEqual(inspected.remoteUser, "vscode")
             try MiniTest.expectEqual(
@@ -176,8 +180,12 @@ nonisolated(unsafe) let integrationTests: [(String, () throws -> Void)] = [
     ("fixtureE2E_mountsPorts", {
         try IntegrationSupport.runFixtureE2E(fixtureFile: "mounts-ports.json", ensureKube: true, extra: { ws, runtime, config in
             let listed = try ManagedContainers.list(runtime: runtime)
-            try MiniTest.expectEqual(listed.count, 1)
-            let name = listed[0].name
+            let wsPath = (ws.path as NSString).standardizingPath
+            let match = listed.first {
+                ($0.labels[ContainerIdentity.labelLocalFolder] as NSString?)?.standardizingPath == wsPath
+            }
+            try MiniTest.expect(match != nil, "expected managed container for test workspace")
+            let name = match!.name
             let code = try ExecCommand.run(
                 options: ExecOptions(
                     command: ["sh", "-lc", "test -d /home/vscode/.config/opencode && test -d /home/vscode/.kube"],

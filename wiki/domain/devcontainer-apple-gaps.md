@@ -13,7 +13,7 @@ Facts that constrain the CLI. Not a full Apple container manual — only gaps th
 | Features | OCI + local path feature packages + image build | **Supported** (OCI + local path runner); forever-reject `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker`; native arm64 build (no Rosetta by default) |
 | Events / rich watch APIs | Engine events often used by tools | Do not assume Docker-equivalent event stream |
 | List + label filter | `docker ps --filter label=…` | **No label filter on list** — client-side filter after JSON; prefer deterministic name + inspect; product `list` keeps `devcontainer.managed=adevcontainer` only |
-| VS Code | Dev Containers full up/rebuild + clone-in-volume | **Attach-only** after CLI bring-up (experimental Attach to Running Apple Container); volume-mode via product `clone` (not the VS Code extension) |
+| VS Code | Dev Containers full up/rebuild + clone-in-volume | **Attach** after CLI bring-up (experimental Apple Container support in Remote - Containers). Product `--vscode` on `up`/`start`/`clone` best-effort opens via `code --folder-uri` (soft-fail); manual attach without flag still valid. Not full Dev Containers parity. Volume-mode via product `clone` (not extension clone-in-volume) |
 | Default process | Often long-running or sleep entry | Keep-alive `--entrypoint /bin/sleep` + `infinity` for long-lived devcontainers |
 | Create identity | Name vs id often distinct | `create --name` **is** the id (`configuration.id`) |
 | Bind mounts | File or directory host source OK | **Directory sources only** — file binds rejected by runtime |
@@ -53,6 +53,22 @@ Useful machine-JSON paths documented against Apple container **1.2.x**: `configu
 ### Features build (Rosetta / platform)
 
 Apple BuildKit with `build.rosetta=true` can require Rosetta even for native arm64 image builds. Product ensures `build.rosetta=false` (one-time consent) and passes `--platform linux/arm64` on Features pull/build/create. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
+
+### VS Code attach (`--vscode` + manual)
+
+After lifecycle success, `up` / `start` / `clone` accept **`--vscode`**: best-effort host `code --new-window --folder-uri …`. Missing `code` or launch fail → stderr warn; lifecycle exit stays success. Without the flag, same URI recipe works manually. Full recipe: [architecture.md — VS Code flow](../architecture.md#vs-code-flow). Spec WIP: [`specs/changes/vscode-open-flag/`](../../specs/changes/vscode-open-flag/).
+
+| Piece | Fact |
+|-------|------|
+| Flag | `--vscode` on `up`, `start`, `clone` (post-success only; soft-fail) |
+| Prereq | VS Code + `ms-vscode-remote.remote-containers`; `dev.containers.experimentalAppleContainerSupport: true` |
+| Authority | `apple-container+` + hex(UTF-8 compact JSON `{"id","image"}`) — id = create `--name` |
+| Open | `code --new-window --folder-uri "vscode-remote://apple-container+${HEX}${FOLDER}"` |
+| Folder | `remoteWorkspaceFolder` from labels/resolve; default if config omits `workspaceFolder`: `/workspaces/<basename>` |
+| nameConfigs (optional) | `…/globalStorage/ms-vscode-remote.remote-containers/nameConfigs/<containerName>.json` → `workspaceFolder` + `remoteUser` |
+| UI gap | `remote-containers.attachToAppleContainer` attaches authority **without** folder → empty window; folder-uri avoids it |
+| `open vscode://` | May reuse window; prefer `code --new-window --folder-uri` |
+| Parity | Not full Dev Containers up/rebuild; manual attach without `--vscode` still valid |
 
 ## Config surface implications
 

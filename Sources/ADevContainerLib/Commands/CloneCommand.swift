@@ -3,10 +3,13 @@ import Foundation
 public struct CloneOptions: Sendable {
     public var gitURL: String
     public var skipPull: Bool
+    /// Best-effort open of VS Code on the remote workspace after lifecycle success.
+    public var openVSCode: Bool
 
-    public init(gitURL: String, skipPull: Bool = false) {
+    public init(gitURL: String, skipPull: Bool = false, openVSCode: Bool = false) {
         self.gitURL = gitURL
         self.skipPull = skipPull
+        self.openVSCode = openVSCode
     }
 }
 
@@ -300,7 +303,7 @@ public enum CloneCommand {
         LifecycleRunner.emitPostAttachSkipIfNeeded(config: effectiveConfig)
         StatusPrinter.status("Ready")
 
-        return CloneResult(
+        let result = CloneResult(
             outcome: "success",
             containerId: id,
             remoteUser: effectiveConfig.effectiveUser ?? "",
@@ -309,6 +312,17 @@ public enum CloneCommand {
             gitUrl: identity.normalizedGitURL,
             workspaceVolume: identity.workspaceVolumeName
         )
+        VSCodeOpen.openIfRequested(
+            options.openVSCode,
+            target: VSCodeOpenTarget(
+                containerId: result.containerId,
+                image: effectiveConfig.image,
+                remoteWorkspaceFolder: result.remoteWorkspaceFolder,
+                containerName: result.containerName ?? identity.containerName,
+                remoteUser: result.remoteUser
+            )
+        )
+        return result
     }
 
     // MARK: - Git author identity

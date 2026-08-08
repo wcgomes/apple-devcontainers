@@ -5,17 +5,21 @@ public struct UpOptions: Sendable {
     public var jsonOutput: Bool
     public var recreate: Bool
     public var skipPull: Bool
+    /// Best-effort open of VS Code on the remote workspace after lifecycle success.
+    public var openVSCode: Bool
 
     public init(
         workspacePath: String,
         jsonOutput: Bool = false,
         recreate: Bool = false,
-        skipPull: Bool = false
+        skipPull: Bool = false,
+        openVSCode: Bool = false
     ) {
         self.workspacePath = workspacePath
         self.jsonOutput = jsonOutput
         self.recreate = recreate
         self.skipPull = skipPull
+        self.openVSCode = openVSCode
     }
 }
 
@@ -64,7 +68,13 @@ public enum UpCommand {
                 StatusPrinter.status("Reusing running container \(existing.name)")
                 LifecycleRunner.emitPostAttachSkipIfNeeded(config: resolved.config)
                 StatusPrinter.status("Ready")
-                return successResult(id: existing.id, name: existing.name, config: resolved.config)
+                return finish(
+                    options: options,
+                    id: existing.id,
+                    name: existing.name,
+                    config: resolved.config,
+                    image: existing.image ?? resolved.config.image
+                )
             } else {
                 // Start stopped: no rebuild (features already baked on create).
                 StatusPrinter.status("Starting container")
@@ -76,7 +86,13 @@ public enum UpCommand {
                 )
                 LifecycleRunner.emitPostAttachSkipIfNeeded(config: resolved.config)
                 StatusPrinter.status("Ready")
-                return successResult(id: existing.id, name: existing.name, config: resolved.config)
+                return finish(
+                    options: options,
+                    id: existing.id,
+                    name: existing.name,
+                    config: resolved.config,
+                    image: existing.image ?? resolved.config.image
+                )
             }
         }
 
@@ -160,7 +176,34 @@ public enum UpCommand {
 
         LifecycleRunner.emitPostAttachSkipIfNeeded(config: effectiveConfig)
         StatusPrinter.status("Ready")
-        return successResult(id: id, name: resolved.containerName, config: effectiveConfig)
+        return finish(
+            options: options,
+            id: id,
+            name: resolved.containerName,
+            config: effectiveConfig,
+            image: effectiveConfig.image
+        )
+    }
+
+    private static func finish(
+        options: UpOptions,
+        id: String,
+        name: String,
+        config: ResolvedDevContainerConfig,
+        image: String
+    ) -> UpResult {
+        let result = successResult(id: id, name: name, config: config)
+        VSCodeOpen.openIfRequested(
+            options.openVSCode,
+            target: VSCodeOpenTarget(
+                containerId: result.containerId,
+                image: image,
+                remoteWorkspaceFolder: result.remoteWorkspaceFolder,
+                containerName: result.containerName ?? name,
+                remoteUser: result.remoteUser
+            )
+        )
+        return result
     }
 
     private static func enforceHostRequirements(
