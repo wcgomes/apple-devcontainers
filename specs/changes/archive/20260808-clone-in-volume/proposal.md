@@ -4,14 +4,14 @@
 
 Today `adevcontainer up` always bind-mounts a **host workspace directory**. That model assumes the developer already has a local checkout and wants live host↔container file sharing. Many workflows instead need: clone a git URL once, keep the tree **inside** the container filesystem (named volume), and start/stop that managed container later without a host bind.
 
-On Apple `container`, named volumes sit on ext4/virtio-blk rather than virtiofs bind mounts — a justified performance path for large trees and IDE attach. This change establishes the durable outcome contract for **clone-in-volume**: a `clone` command that materializes a managed container whose workspace is a **named volume** populated by a **full git clone inside the container** (SSH agent forward / host HTTPS credential one-shot for auth; day-2 git works in-guest), plus companion lifecycle commands and prune behavior that cleans up the workspace volume. Day-2 selection is **managed-only** (`--name` / picker); only `up` accepts `-w`.
+On Apple `container`, named volumes sit on ext4/virtio-blk rather than virtiofs bind mounts — a justified performance path for large trees and IDE attach. This change establishes the durable outcome contract for **clone-in-volume**: a `clone` command that materializes a managed container whose workspace is a **named volume** populated by a **full git clone inside the container** (SSH agent forward / host HTTPS credential one-shot for auth; in-container git works in-guest), plus companion lifecycle commands and prune behavior that cleans up the workspace volume. Managed selection is **managed-only** (`--name` / picker); only `up` accepts `-w`.
 
 ## Scope
 
 - Change id: **`clone-in-volume`**
 - Package root: repository root (Swift SPM `adevcontainer`)
 - Library under `Sources/ADevContainerLib/`; suite under `Tests/adevcontainerTests/`; fixtures under `Tests/Fixtures/` as needed
-- Realized base contract: `specs/adevcontainer/spec.md`. This delta **adds** clone / start / list and volume-mode workspace semantics, and **modifies** day-2 resolution (managed-only for `exec`/`stop`/`delete`/`prune`/`inspect`/`start`), prune resource set, bind-mode managed labels, and identity/labels for volume-mode containers.
+- Realized base contract: `specs/adevcontainer/spec.md`. This delta **adds** clone / start / list and volume-mode workspace semantics, and **modifies** managed selection (managed-only for `exec`/`stop`/`delete`/`prune`/`inspect`/`start`), prune resource set, bind-mode managed labels, and identity/labels for volume-mode containers.
 
 ### A. Commands (product surface)
 
@@ -20,9 +20,9 @@ On Apple `container`, named volumes sit on ext4/virtio-blk rather than virtiofs 
 | `adevcontainer clone <git-url>` | Create managed container from git URL; workspace = named volume; v1 accepts **only** the URL (no `--branch` / `--depth`) |
 | `adevcontainer start [--name]` | Start a stopped **managed** container; interactive TTY picker when multiple/unspecified |
 | `adevcontainer list [--json]` | List **only** managed containers (`devcontainer.managed=adevcontainer`), client-side label filter |
-| `adevcontainer exec` / `stop` / `delete` / `prune` / `inspect` | Day-2: resolve via `--name` or picker among managed only — **no `-w`** |
+| `adevcontainer exec` / `stop` / `delete` / `prune` / `inspect` | Managed: resolve via `--name` or picker among managed only — **no `-w`** |
 
-**Identity model:** Only `up` accepts `-w` / `--workspace` (bind-mode create). Passing `-w` to any other command is a usage error. Both `up` (bind) and `clone` (volume) stamp `devcontainer.managed=adevcontainer` plus day-2 labels so containers appear in `list` and selection.
+**Identity model:** Only `up` accepts `-w` / `--workspace` (bind-mode create). Passing `-w` to any other command is a usage error. Both `up` (bind) and `clone` (volume) stamp `devcontainer.managed=adevcontainer` plus managed labels so containers appear in `list` and selection.
 
 `doctor` remains. `delete` stays container-only. `prune` gains volume-mode workspace volume removal (see below).
 
@@ -46,7 +46,7 @@ On Apple `container`, named volumes sit on ext4/virtio-blk rather than virtiofs 
     - `devcontainer.workspace_volume=<volume name>`
     - `devcontainer.workspace_mode=volume`
     - Adapt `devcontainer.local_folder` for volume mode (`volume://…` — no durable host path)
-    - `devcontainer.config_file` + config hash labels; `devcontainer.workspace_folder` / `devcontainer.remote_user` for day-2 `exec`
+    - `devcontainer.config_file` + config hash labels; `devcontainer.workspace_folder` / `devcontainer.remote_user` for exec
     - `devcontainer.config_volumes` when config has `type=volume` mounts
 12. **Start** the container. **SSH URL:** require `SSH_AUTH_SOCK`; inject `create --ssh` if not already in runArgs.
 13. **Populate volume (in-container full clone):** after Features ensure git, run **full `git clone` inside the container** into `workspaceFolder` (before create-path hooks). Verify `workspaceFolder/.git`. No host full clone + tar-pipe on the happy path.
@@ -61,8 +61,8 @@ On Apple `container`, named volumes sit on ext4/virtio-blk rather than virtiofs 
 - **NO** GCM install/detect in the guest; **NO** browser/device-code re-auth product flow; **NO** mounting host `~/.git-credentials`.
 - **NO** PAT/token CLI flags as primary UX (optional env `ADEVCONTAINER_GIT_TOKEN` escape hatch OK; optional `gh auth token` for github.com).
 - Host git receives the **original** caller-supplied URL for config-only fetch; identity/labels/JSON use normalized form with `scheme://` userinfo stripped.
-- **SSH:** require `SSH_AUTH_SOCK`; inject Apple `container create --ssh` so the agent is available in-guest for clone + day-2 push.
-- **HTTPS:** host `git credential fill` (GCM/osxkeychain transparent) → one-shot into in-container clone (GIT_ASKPASS/env; never log secrets) → configure guest `credential.helper store` + approve for day-2.
+- **SSH:** require `SSH_AUTH_SOCK`; inject Apple `container create --ssh` so the agent is available in-guest for clone + later push.
+- **HTTPS:** host `git credential fill` (GCM/osxkeychain transparent) → one-shot into in-container clone (GIT_ASKPASS/env; never log secrets) → configure guest `credential.helper store` + approve after clone.
 - **In-container git binary:** after resolve + identity, clone auto-appends `ghcr.io/devcontainers/features/git:1` when neither `git` nor `common-utils` is admitted. Does not apply to `up`.
 
 ### D. `start`
@@ -74,7 +74,7 @@ On Apple `container`, named volumes sit on ext4/virtio-blk rather than virtiofs 
 - MUST NOT re-clone; MUST NOT run the full `up` / `clone` create path.
 - **Hooks policy (locked):** for volume-mode containers, `start` is **runtime start only** — **no lifecycle hooks**. Existing `up` start-stopped policy (run `postStartCommand` only) remains for **bind-mount** workspaces on the `up` path.
 
-### E. Day-2 selection (`exec` / `stop` / `delete` / `prune` / `inspect`)
+### E. Managed selection (`exec` / `stop` / `delete` / `prune` / `inspect`)
 
 - **Managed-only:** `--name` or interactive picker among containers labeled `devcontainer.managed=adevcontainer`.
 - **No `-w` / cwd workspace resolution** on these commands (or on `start` / `list`). Only `up` accepts `-w`.
@@ -101,7 +101,7 @@ On Apple `container`, named volumes sit on ext4/virtio-blk rather than virtiofs 
 - Host↔volume live sync after populate
 - Docker Compose / multi-service
 - Alternate command names (`play`, `run`) for this flow
-- Day-2 `-w` workspace resolution (superseded by managed-only identity)
+- Former `-w` workspace resolution (superseded by managed-only identity)
 
 ### I. Perf note (approach justification only)
 
@@ -116,7 +116,7 @@ Lite SDD: this proposal + delta `spec.md` + dependency-ordered `tasks.md`. Imple
 3. Host HTTPS credential provider (`git credential fill` + optional token/`gh` fallbacks).
 4. `clone` orchestration: config temp → resolve → identity prompt → ensure git Feature → create/start with SSH forward when needed → **in-container full clone** + verify `.git` → hooks → failure cleanup container+ws volume → JSON.
 5. `list` / `start` with managed-label discovery and TTY picker.
-6. Unified day-2: `exec`/`stop`/`delete`/`prune`/`inspect` managed-only (`--name`/picker); `-w` only on `up`; bind `up` stamps managed labels.
+6. Unified managed selection: `exec`/`stop`/`delete`/`prune`/`inspect` managed-only (`--name`/picker); `-w` only on `up`; bind `up` stamps managed labels.
 7. `prune` extension for `*-ws` workspace volumes and label-driven config volumes.
 8. Test-first MiniTest coverage (`swift run adevcontainerTests`); mock git, credentials, and runtime so the default suite needs no network or live Apple `container` unless opt-in E2E.
 
@@ -129,7 +129,7 @@ All Apple `container` subprocesses remain behind **AppleContainerRuntime**. Host
 | `clone` args | URL only in v1 |
 | Workspace mount | Named volume, not host bind |
 | Populate | **In-container** full `git clone` + verify `.git` (no host full clone/tar-pipe happy path) |
-| Auth SSH | `SSH_AUTH_SOCK` required; inject `create --ssh`; day-2 via same forward |
+| Auth SSH | `SSH_AUTH_SOCK` required; inject `create --ssh`; via same forward |
 | Auth HTTPS | Host `git credential fill` one-shot → guest clone; optional `ADEVCONTAINER_GIT_TOKEN` / `gh auth token`; then guest `credential.helper store` |
 | Auth non-goals | No GCM-in-guest; no PAT CLI primary UX; no host credentials mount |
 | Identity prompt | Before Features/create; host git config + optional env; TTY confirm/collect; apply local after clone |
@@ -143,11 +143,11 @@ All Apple `container` subprocesses remain behind **AppleContainerRuntime**. Host
 | Existing container name | Fail closed (no silent reuse) |
 | Failure cleanup | Delete container + workspace volume |
 | Managed label | `devcontainer.managed=adevcontainer` on **both** bind (`up`) and volume (`clone`) |
-| Bind labels | `workspace_mode=bind` + day-2 `workspace_folder` / `remote_user` on `up` create |
+| Bind labels | `workspace_mode=bind` + `workspace_folder` / `remote_user` on `up` create |
 | `config_volumes` label | Comma-separated config `type=volume` names; prune uses it |
 | `start` hooks (volume-mode) | Runtime start only — no hooks |
 | `up` start-stopped (bind) | Unchanged — `postStart` only |
-| Day-2 selection | Managed-only (`--name`/picker); `-w` **only** on `up` |
+| Managed selection | Managed-only (`--name`/picker); `-w` **only** on `up` |
 | `list` | Managed only; table / `--json` |
 | `delete` | Container only |
 | `prune` | Also remove volume-mode workspace volume (+ config volumes via label) |

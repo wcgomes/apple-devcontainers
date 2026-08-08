@@ -7,7 +7,7 @@ Library: `Sources/ADevContainerLib/`
 Tests: `Tests/adevcontainerTests/` (MiniTest; run with `swift run adevcontainerTests`)  
 Package root: repository root  
 
-> **Supersession note:** Early sections (§2–4) describe tar-pipe populate and `stop -w` selection. Those checkpoints were completed then **superseded** by §9 (in-container full clone + guest auth) and §10 (unified day-2 managed-only; `-w` only on `up`). Do not uncheck completed work. **Current contract is `spec.md`** (and the updated proposal). Treat §2 full-clone staging, §3 tar-pipe populate, and §4 `stop -w` items as historical completed steps, not live product behavior.
+> **Supersession note:** Early sections (§2–4) describe tar-pipe populate and `stop -w` selection. Those checkpoints were completed then **superseded** by §9 (in-container full clone + guest auth) and §10 (unified managed-only; `-w` only on `up`). Do not uncheck completed work. **Current contract is `spec.md`** (and the updated proposal). Treat §2 full-clone staging, §3 tar-pipe populate, and §4 `stop -w` items as historical completed steps, not live product behavior.
 
 Assume Swift 6.x / SPM, Apple `container`, and host `git` already available where E2E needs them. Do **not** install toolchains, GCM, or run network package installs as task steps. Test-first: write failing tests before implementation in each section. Mock git and AppleContainerRuntime boundaries so the default suite needs no network.
 
@@ -184,9 +184,9 @@ Assume Swift 6.x / SPM, Apple `container`, and host `git` already available wher
 
 ---
 
-## 10. Unified CLI identity (day-2 managed-only)
+## 10. Unified CLI identity (managed-only)
 
-- [x] 10.1 `ContainerIdentity.bindModeLabels` + ConfigResolver stamps managed/bind/day-2 labels on `up` create
+- [x] 10.1 `ContainerIdentity.bindModeLabels` + ConfigResolver stamps managed/bind/managed labels on `up` create
 - [x] 10.2 `exec`/`stop`/`delete`/`prune`/`inspect` resolve via `ManagedContainers.resolveSelection` only (no ConfigResolver / `-w`)
 - [x] 10.3 Main: `-w` only for `up`; usage error “-w is only valid for up” on other commands
 - [x] 10.4 Tests + README + delta spec updated; `swift run adevcontainerTests` green

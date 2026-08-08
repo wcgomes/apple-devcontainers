@@ -78,7 +78,7 @@ Set on create and use for reuse/inspect/`list`:
 | Mechanism | Purpose |
 |-----------|---------|
 | Deterministic container name (`create --name` = id) | Stable identity without label-filter list APIs |
-| Label `devcontainer.managed=adevcontainer` | Managed filter for `list` / picker / day-2 commands |
+| Label `devcontainer.managed=adevcontainer` | Managed filter for `list` / picker / lifecycle commands |
 | Label `devcontainer.local_folder` | Bind: host path; volume-mode: `volume://…` |
 | Label `devcontainer.config_file` | Config file identity |
 | App config hash label | Detect config drift / recreate need |
@@ -86,8 +86,8 @@ Set on create and use for reuse/inspect/`list`:
 | Label `devcontainer.workspace_volume` | Workspace volume name (`adev-*-ws`; volume-mode) |
 | Label `devcontainer.git_url` | Normalized remote (userinfo stripped; volume-mode) |
 | Label `devcontainer.config_volumes` | Config `type=volume` names for prune |
-| Label `devcontainer.workspace_folder` | Create-time container workdir for day-2 `exec` (both modes) |
-| Label `devcontainer.remote_user` | Create-time effective user for day-2 `exec` (both modes; may be empty) |
+| Label `devcontainer.workspace_folder` | Create-time container workdir for exec (both modes) |
+| Label `devcontainer.remote_user` | Create-time effective user for exec (both modes; may be empty) |
 
 Bind-mode `up` stamps the full managed label set including `workspace_mode=bind` (not volume-only).
 
@@ -121,11 +121,11 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 5. **Ensure in-container git (Features path, not apt):** after resolve + identity, before the Features gate, if no admitted feature id is `git` or `common-utils` (any registry/tag or local path), append `ghcr.io/devcontainers/features/git:1` (empty options). Status: `==> Ensuring git feature for volume workspace`. Empty features → inject then enter FeaturesRunner. Already covered → no double-add. Config hash / effective features include the inject when added. **`up` does not inject.**
 6. Ensure workspace volume (`adev-{base}-{hash12}-ws`); delete+recreate if present. Existing managed container name → fail closed (no silent reuse).
 7. Create volume-mode container (workspace = named volume; labels as above) and start. Features runner runs when features non-empty after step 5.
-   - **SSH URL:** require host `SSH_AUTH_SOCK` non-empty; inject `AllowlistedRunArg.ssh` (`container create --ssh`) if not already in runArgs. Missing agent → fail structured (hint ssh-agent / HTTPS). Day-2 push uses the same forward.
+   - **SSH URL:** require host `SSH_AUTH_SOCK` non-empty; inject `AllowlistedRunArg.ssh` (`container create --ssh`) if not already in runArgs. Missing agent → fail structured (hint ssh-agent / HTTPS). Later push uses the same forward.
    - **HTTPS:** no create-time auth flag; credentials applied at populate (step 8).
 8. **Populate (in-container full clone)** — happy path is **not** host full clone + tar-pipe (`copyTreeIntoContainer` may remain as unused utility). After Features ensure git:
    - Exec in-container `git clone` of the URL into `workspaceFolder` (as `remoteUser` when set); verify `workspaceFolder/.git`.
-   - **HTTPS auth:** host `git credential fill` (protocol/host/path; GCM/osxkeychain transparent — **no product GCM-in-guest**, no mount of host `~/.git-credentials`). Optional fallbacks: `ADEVCONTAINER_GIT_TOKEN`; `gh auth token` for github.com when `gh` available. When creds exist → one-shot into guest clone via GIT_ASKPASS/env (never log secrets; redact errors) → guest `credential.helper store` + `git credential approve` once for day-2. When fill empty → anonymous in-container clone (public); auth failure → structured hint to configure host credentials or use SSH.
+   - **HTTPS auth:** host `git credential fill` (protocol/host/path; GCM/osxkeychain transparent — **no product GCM-in-guest**, no mount of host `~/.git-credentials`). Optional fallbacks: `ADEVCONTAINER_GIT_TOKEN`; `gh auth token` for github.com when `gh` available. When creds exist → one-shot into guest clone via GIT_ASKPASS/env (never log secrets; redact errors) → guest `credential.helper store` + `git credential approve` once. When fill empty → anonymous in-container clone (public); auth failure → structured hint to configure host credentials or use SSH.
    - **SSH auth:** agent already forwarded via `--ssh` from create.
    - **Author apply:** when **both** name+email from step 4 → guest `git config --local` both; if either missing → warn once, no partial write; no synthetic defaults.
 9. Create-path lifecycle hooks (same order as fresh `up`). On start/populate/hook failure after create: delete container **and** workspace `*-ws` volume.
@@ -133,9 +133,9 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 
 `up` remains bind-mode host workspace only (no auto git Feature). Detail: [architecture.md](../architecture.md); contract [`specs/adevcontainer/spec.md`](../../specs/adevcontainer/spec.md).
 
-## Managed selection (`list` / day-2 commands)
+## Managed selection (`list` / lifecycle commands)
 
-**Only `up` uses `-w`/cwd** (bind workspace path). All other lifecycle/day-2 commands resolve a managed container via `--name` or interactive picker — never `-w`.
+**Only `up` uses `-w`/cwd** (bind workspace path). All other lifecycle commands resolve a managed container via `--name` or interactive picker — never `-w`.
 
 - `list [--json]`: client-side filter to `devcontainer.managed=adevcontainer` only.
 - `start` / `exec` / `stop` / `delete` / `prune` / `inspect`: `--name` or picker among managed; no host workspace path required.

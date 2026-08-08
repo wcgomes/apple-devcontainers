@@ -4,7 +4,7 @@ macOS Swift CLI (`adevcontainer`): read `devcontainer.json`, drive Apple `contai
 
 ## Architecture
 
-- [architecture.md](architecture.md) — pipeline, package layout, commands (`up` bind-mode only uses `-w`; `clone` volume-mode + auto Features `git:1` when no git/common-utils, in-container full git clone populate, SSH `--ssh` / HTTPS host credential fill + guest store; day-2 `list`/`start`/`exec`/`stop`/`delete`/`prune`/`inspect` via `--name`/picker not `-w`; `up` bind stamps managed labels incl. `workspace_mode=bind`; `delete` vs `prune`), bind vs named-volume workspace, identity (path vs git URL), lifecycle matrix, progress stderr, runArgs allowlist, hostRequirements, Features (OCI + local path); binary `adevcontainer`; repo `apple-dev-containers`; host macOS 26+; tests `swift run adevcontainerTests`
+- [architecture.md](architecture.md) — pipeline, package layout, commands (`up` bind-mode only uses `-w`; `clone` volume-mode + auto Features `git:1` when no git/common-utils, in-container full git clone populate, SSH `--ssh` / HTTPS host credential fill + guest store; `list`/`start`/`exec`/`stop`/`delete`/`prune`/`inspect` via `--name`/picker not `-w`; `up` bind stamps managed labels incl. `workspace_mode=bind`; `delete` vs `prune`), bind vs named-volume workspace, identity (path vs git URL), lifecycle matrix, progress stderr, runArgs allowlist, hostRequirements, Features (OCI + local path); binary `adevcontainer`; repo `apple-dev-containers`; host macOS 26+; tests `swift run adevcontainerTests`
 - Contract: [`specs/adevcontainer/spec.md`](../specs/adevcontainer/spec.md) (realized; includes archived `20260808-clone-in-volume`)
 
 ## Decisions (ADRs)

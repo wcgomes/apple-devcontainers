@@ -54,7 +54,7 @@ public enum CloneCommand {
             }
             enableSSHForward = true
         case .https, .other:
-            // Optional: forward agent when present so day-2 SSH remotes still work.
+            // Optional: forward agent when present so SSH after create remotes still work.
             enableSSHForward = !sshAuthSock.isEmpty
         }
 
@@ -381,7 +381,7 @@ public enum CloneCommand {
     // MARK: - Workspace volume ownership
 
     /// Apple named volumes mount as root:root. Chown to remoteUser so in-container
-    /// clone and day-2 git (as remoteUser) can write. No-op when user is root/unset.
+    /// clone and in-container git (as remoteUser) can write. No-op when user is root/unset.
     private static func ensureWorkspaceWritableByRemoteUser(
         containerId: String,
         workspaceFolder: String,
@@ -578,7 +578,7 @@ public enum CloneCommand {
         ]
 
         if configureHTTPSStore {
-            // Day-2 HTTPS: store helper + approve once into ~/.git-credentials (user home layer).
+            // HTTPS after clone: store helper + approve once into ~/.git-credentials (user home layer).
             lines += [
                 "git -C \"$WS\" config credential.helper store",
                 "if [ -n \"${ADEV_CLONE_PROTO:-}\" ] && [ -n \"${ADEV_CLONE_HOST:-}\" ]; then",

@@ -63,7 +63,7 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
 | `prune [--name]` | Remove container **and** config named volumes (label) **and** workspace `*-ws` volume **and** config image (`--name` or picker; not binds; not global prune) |
 | `inspect [--name]` | Show resolved identity/state (`--name` or picker; no `-w`) |
 
-**Selection:** only `up` takes `-w`/cwd (bind workspace). Day-2 commands (`start`/`exec`/`stop`/`delete`/`prune`/`inspect`) resolve managed containers by `--name` or interactive picker — never `-w`.
+**Selection:** only `up` takes `-w`/cwd (bind workspace). Lifecycle commands (`start`/`exec`/`stop`/`delete`/`prune`/`inspect`) resolve managed containers by `--name` or interactive picker — never `-w`.
 
 **delete vs prune:** `delete` drops the workspace container only. `prune` also removes config `type=volume` mounts (by label), the clone workspace volume (`adev-*-ws`), and the config `image` reference. Neither deletes bind-mount host paths or runs global `volume`/`image` prune. Derived Features tags (`adev-{base}:{hash12}` / `adevcontainer:{hash12}`) are not removed by `prune` unless they equal the config `image` field.
 
@@ -107,7 +107,7 @@ Shipped under `Sources/ADevContainerLib/Features/`. On `up`/`clone` when `featur
 4. Order via `dependsOn` / `installsAfter`; build derived image via `container build --platform linux/arm64`; reuse tag when unchanged. If BuildKit was stopped before the build, restore-after-build stops it again (best-effort); already-running / undetermined status → leave alone.
 5. Create from derived image; merge contributions (env **config wins**, `${PATH}` expansion on create and later exec).
 
-**Clone-only:** if no admitted feature id is `git` or `common-utils`, inject `ghcr.io/devcontainers/features/git:1` (Features path, not apt) so populate can run **in-container full `git clone`** and day-2 git works. `up` does not inject. Host git is required only for config-only sparse/shallow fetch and HTTPS `git credential fill`.
+**Clone-only:** if no admitted feature id is `git` or `common-utils`, inject `ghcr.io/devcontainers/features/git:1` (Features path, not apt) so populate can run **in-container full `git clone`** and in-container git works. `up` does not inject. Host git is required only for config-only sparse/shallow fetch and HTTPS `git credential fill`.
 
 Full runner steps, reject list, and progress lines: [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md).
 

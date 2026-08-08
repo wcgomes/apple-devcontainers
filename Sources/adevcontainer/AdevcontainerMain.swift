@@ -33,7 +33,7 @@ struct AdevcontainerMain {
                 code: CLIErrorCode.usage,
                 property: "-w",
                 message: "-w is only valid for up",
-                hint: "Day-2 commands use --name (or picker). Create with: adevcontainer up [-w <path>]"
+                hint: "Lifecycle commands use --name (or picker). Create with: adevcontainer up [-w <path>]"
             )
         }
 
@@ -322,14 +322,14 @@ struct AdevcontainerMain {
 
         Identity:
           - `up` is the only command that accepts -w/--workspace (bind-mode create).
-          - Day-2 commands resolve via --name or an interactive picker among
+          - Lifecycle commands resolve via --name or an interactive picker among
             containers labeled devcontainer.managed=adevcontainer (both bind and volume).
           - Passing -w to a non-up command is a usage error.
 
         Clone notes:
           - Requires host git on PATH (config fetch + HTTPS credential fill)
           - Full clone runs inside the container (named volume workspace)
-          - SSH: needs ssh-agent (SSH_AUTH_SOCK); create --ssh for day-2 push
+          - SSH: needs ssh-agent (SSH_AUTH_SOCK); create --ssh for later push
           - HTTPS: host git credential fill one-shot; guest credential.helper store
           - Auto-adds Features git:1 when config lacks git/common-utils
           - No --branch / PAT CLI / GCM-in-guest
@@ -347,7 +347,7 @@ struct AdevcontainerMain {
 
             Create/start/reuse a bind-mode workspace container for a host checkout.
             -w/--workspace defaults to the current directory. Stamps managed labels
-            so the container appears in list and day-2 commands (--name / picker).
+            so the container appears in list and lifecycle commands (--name / picker).
             """)
         case "clone":
             print("""

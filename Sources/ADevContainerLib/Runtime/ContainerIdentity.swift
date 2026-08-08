@@ -13,9 +13,9 @@ public enum ContainerIdentity {
     public static let labelWorkspaceMode = "devcontainer.workspace_mode"
     /// Comma-separated config `type=volume` mount source names (clone/managed prune).
     public static let labelConfigVolumes = "devcontainer.config_volumes"
-    /// Container workspace folder for day-2 exec (volume-mode).
+    /// Container workspace folder for exec (volume-mode).
     public static let labelWorkspaceFolder = "devcontainer.workspace_folder"
-    /// remoteUser/containerUser effective user for day-2 exec (volume-mode; may be empty).
+    /// remoteUser/containerUser effective user for exec (volume-mode; may be empty).
     public static let labelRemoteUser = "devcontainer.remote_user"
     public static let workspaceModeVolume = "volume"
     public static let workspaceModeBind = "bind"
@@ -78,7 +78,7 @@ public enum ContainerIdentity {
         )
     }
 
-    /// Bind-mode (`up`) labels for day-2 managed selection (`list` / `exec` / `stop` / …).
+    /// Bind-mode (`up`) labels for managed selection (`list` / `exec` / `stop` / …).
     ///
     /// Does **not** set `git_url` or `workspace_volume` (volume-mode only).
     public static func bindModeLabels(

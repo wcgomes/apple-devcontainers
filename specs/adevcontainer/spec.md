@@ -2,7 +2,7 @@
 
 ## Purpose
 
-macOS developers need a native CLI that reads `devcontainer.json` and runs workspaces on Apple’s `container` stack. Upstream `@devcontainers/cli` is Node/Docker-oriented and is not a fit. This specification defines the durable outcome contract for a greenfield Swift CLI (`adevcontainer`): image-based workspaces with host bind mounts via `up`, volume-mode workspaces via `clone` (git URL → named workspace volume, in-container full clone populate), env/user/workspace folder, mounts and ports, lifecycle hooks (`onCreateCommand` through `postStartCommand`, plus admitted `postAttachCommand`), allowlisted `runArgs`, `hostRequirements` preflight with create limits, an OCI and local-path **Features runner** (derived image build on native arm64), managed day-2 commands (`list`, `start`, `exec`, `stop`, `delete`, `inspect`, `prune` with unified managed selection), and named-volume reuse on `up`.
+macOS developers need a native CLI that reads `devcontainer.json` and runs workspaces on Apple’s `container` stack. Upstream `@devcontainers/cli` is Node/Docker-oriented and is not a fit. This specification defines the durable outcome contract for a greenfield Swift CLI (`adevcontainer`): image-based workspaces with host bind mounts via `up`, volume-mode workspaces via `clone` (git URL → named workspace volume, in-container full clone populate), env/user/workspace folder, mounts and ports, lifecycle hooks (`onCreateCommand` through `postStartCommand`, plus admitted `postAttachCommand`), allowlisted `runArgs`, `hostRequirements` preflight with create limits, an OCI and local-path **Features runner** (derived image build on native arm64), managed lifecycle commands (`list`, `start`, `exec`, `stop`, `delete`, `inspect`, `prune` with unified managed selection), and named-volume reuse on `up`.
 
 ## Requirements
 
@@ -378,9 +378,9 @@ Create-path cleanup: if any create-path hook fails before `up` returns success, 
 
 ---
 
-### Requirement: Unified managed selection for day-2 commands
+### Requirement: Unified managed selection for lifecycle commands
 
-Day-2 / lifecycle commands share **one** selection model. Only `up` accepts `-w` / `--workspace`.
+Lifecycle commands share **one** selection model. Only `up` accepts `-w` / `--workspace`.
 
 | Command | Selection |
 |---------|-----------|
@@ -433,7 +433,7 @@ If no container exists, inspect MUST fail structurally or report not-found consi
 - Then the container is gone and the workspace volume still exists
 
 #### Scenario: Inspect from labels
-- Given a managed container with bind or volume day-2 labels
+- Given a managed container with bind or volume managed labels
 - When the user runs `adevcontainer inspect --name <that-name>`
 - Then payload remoteUser/remoteWorkspaceFolder/configPath/workspacePath/configHash match labels and portsAttributes is empty
 
@@ -1365,8 +1365,8 @@ After the container is created and started (and Features have ensured in-contain
 
 | Scheme | Behavior |
 |--------|----------|
-| **SSH** (`git@host:path`, `ssh://…`) | On volume-mode create, inject `AllowlistedRunArg.ssh` (`container create --ssh`) when host `SSH_AUTH_SOCK` is set and non-empty (if not already in runArgs). If SSH URL and `SSH_AUTH_SOCK` unset/empty → fail structured with hint to start ssh-agent / `ssh-add` / use HTTPS. Day-2 push works while the container retains `--ssh` forward from create. |
-| **HTTPS** (`http://`, `https://`) | On the **host**, attempt credentials via `git credential fill` (protocol/host/path from URL) using host env (works with GCM/osxkeychain without product GCM integration). Optional fallbacks: `ADEVCONTAINER_GIT_TOKEN`; if `gh` available and host is github.com, `gh auth token`. When credentials are available, pass them into **one** in-container `git clone` via GIT_ASKPASS / env one-shot (prefer approach that avoids logging secrets; redact errors), then configure in-container `credential.helper store` and `git credential approve` once so day-2 push/pull work without re-prompt. Store MAY persist on volume/home layer. When fill returns nothing, still attempt an anonymous in-container clone (public repos). If that clone fails → structured error hinting to configure git credential on Mac or use SSH URL. |
+| **SSH** (`git@host:path`, `ssh://…`) | On volume-mode create, inject `AllowlistedRunArg.ssh` (`container create --ssh`) when host `SSH_AUTH_SOCK` is set and non-empty (if not already in runArgs). If SSH URL and `SSH_AUTH_SOCK` unset/empty → fail structured with hint to start ssh-agent / `ssh-add` / use HTTPS. Later push works while the container retains `--ssh` forward from create. |
+| **HTTPS** (`http://`, `https://`) | On the **host**, attempt credentials via `git credential fill` (protocol/host/path from URL) using host env (works with GCM/osxkeychain without product GCM integration). Optional fallbacks: `ADEVCONTAINER_GIT_TOKEN`; if `gh` available and host is github.com, `gh auth token`. When credentials are available, pass them into **one** in-container `git clone` via GIT_ASKPASS / env one-shot (prefer approach that avoids logging secrets; redact errors), then configure in-container `credential.helper store` and `git credential approve` once so later push/pull work without re-prompt. Store MAY persist on volume/home layer. When fill returns nothing, still attempt an anonymous in-container clone (public repos). If that clone fails → structured error hinting to configure git credential on Mac or use SSH URL. |
 | **Other** | Fail clear or best-effort passthrough with structured errors on failure. |
 
 **Clone cleanup on failure (after workspace volume / container create) — MUST**
@@ -1396,7 +1396,7 @@ before returning the structured failure. (Create-path hook runners that already 
 #### Scenario: HTTPS uses host credential fill one-shot
 - Given an HTTPS git URL and host `git credential fill` returns username/password
 - When populate runs
-- Then credentials are passed into one in-container clone without appearing in success JSON/labels, and after clone the guest configures `credential.helper store` for day-2
+- Then credentials are passed into one in-container clone without appearing in success JSON/labels, and after clone the guest configures `credential.helper store`.
 
 #### Scenario: HTTPS public works without host credentials
 - Given an HTTPS git URL to a public repository and host credential fill returns nothing
@@ -1490,7 +1490,7 @@ The CLI MUST provide `adevcontainer list` that:
 3. Default output: human-readable **table** (at least name/id and state; SHOULD include git URL and/or workspace mode when labels present).
 4. `--json`: machine-readable listing of the same managed set (array or documented object envelope).
 
-Containers without the managed label MUST NOT appear in `list`. Both `up` (bind) and `clone` (volume) create paths MUST stamp `devcontainer.managed=adevcontainer` so both appear. Historical unlabeled containers (if any) remain invisible to `list` / day-2 selection.
+Containers without the managed label MUST NOT appear in `list`. Both `up` (bind) and `clone` (volume) create paths MUST stamp `devcontainer.managed=adevcontainer` so both appear. Historical unlabeled containers (if any) remain invisible to `list` / managed selection.
 
 #### Scenario: List shows only managed containers
 - Given one managed (clone or up) container and one unlabeled container

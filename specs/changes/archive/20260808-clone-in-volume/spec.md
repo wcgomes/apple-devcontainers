@@ -213,8 +213,8 @@ After the container is created and started (and Features have ensured in-contain
 
 | Scheme | Behavior |
 |--------|----------|
-| **SSH** (`git@host:path`, `ssh://…`) | On volume-mode create, inject `AllowlistedRunArg.ssh` (`container create --ssh`) when host `SSH_AUTH_SOCK` is set and non-empty (if not already in runArgs). If SSH URL and `SSH_AUTH_SOCK` unset/empty → fail structured with hint to start ssh-agent / `ssh-add` / use HTTPS. Day-2 push works while the container retains `--ssh` forward from create. |
-| **HTTPS** (`http://`, `https://`) | On the **host**, attempt credentials via `git credential fill` (protocol/host/path from URL) using host env (works with GCM/osxkeychain without product GCM integration). Optional fallbacks: `ADEVCONTAINER_GIT_TOKEN`; if `gh` available and host is github.com, `gh auth token`. When credentials are available, pass them into **one** in-container `git clone` via GIT_ASKPASS / env one-shot (prefer approach that avoids logging secrets; redact errors), then configure in-container `credential.helper store` and `git credential approve` once so day-2 push/pull work without re-prompt. Store MAY persist on volume/home layer. When fill returns nothing, still attempt an anonymous in-container clone (public repos). If that clone fails → structured error hinting to configure git credential on Mac or use SSH URL. |
+| **SSH** (`git@host:path`, `ssh://…`) | On volume-mode create, inject `AllowlistedRunArg.ssh` (`container create --ssh`) when host `SSH_AUTH_SOCK` is set and non-empty (if not already in runArgs). If SSH URL and `SSH_AUTH_SOCK` unset/empty → fail structured with hint to start ssh-agent / `ssh-add` / use HTTPS. Later push works while the container retains `--ssh` forward from create. |
+| **HTTPS** (`http://`, `https://`) | On the **host**, attempt credentials via `git credential fill` (protocol/host/path from URL) using host env (works with GCM/osxkeychain without product GCM integration). Optional fallbacks: `ADEVCONTAINER_GIT_TOKEN`; if `gh` available and host is github.com, `gh auth token`. When credentials are available, pass them into **one** in-container `git clone` via GIT_ASKPASS / env one-shot (prefer approach that avoids logging secrets; redact errors), then configure in-container `credential.helper store` and `git credential approve` once so later push/pull work without re-prompt. Store MAY persist on volume/home layer. When fill returns nothing, still attempt an anonymous in-container clone (public repos). If that clone fails → structured error hinting to configure git credential on Mac or use SSH URL. |
 | **Other** | Fail clear or best-effort passthrough with structured errors on failure. |
 
 **Clone cleanup on failure (after workspace volume / container create) — MUST**
@@ -244,7 +244,7 @@ before returning the structured failure. (Create-path hook runners that already 
 #### Scenario: HTTPS uses host credential fill one-shot
 - Given an HTTPS git URL and host `git credential fill` returns username/password
 - When populate runs
-- Then credentials are passed into one in-container clone without appearing in success JSON/labels, and after clone the guest configures `credential.helper store` for day-2
+- Then credentials are passed into one in-container clone without appearing in success JSON/labels, and after clone the guest configures `credential.helper store` after clone
 
 #### Scenario: HTTPS public works without host credentials
 - Given an HTTPS git URL to a public repository and host credential fill returns nothing
@@ -338,7 +338,7 @@ The CLI MUST provide `adevcontainer list` that:
 3. Default output: human-readable **table** (at least name/id and state; SHOULD include git URL and/or workspace mode when labels present).
 4. `--json`: machine-readable listing of the same managed set (array or documented object envelope).
 
-Containers without the managed label MUST NOT appear in `list`. Both `up` (bind) and `clone` (volume) create paths MUST stamp `devcontainer.managed=adevcontainer` so both appear. Historical unlabeled containers (if any) remain invisible to `list` / day-2 selection.
+Containers without the managed label MUST NOT appear in `list`. Both `up` (bind) and `clone` (volume) create paths MUST stamp `devcontainer.managed=adevcontainer` so both appear. Historical unlabeled containers (if any) remain invisible to `list` / managed selection.
 
 #### Scenario: List shows only managed containers
 - Given one managed (clone or up) container and one unlabeled container
@@ -527,9 +527,9 @@ This requirement does **not** change `up` bind-path identity behavior.
 
 ## MODIFIED Requirements
 
-### Requirement: Unified managed selection for day-2 commands (MODIFIED)
+### Requirement: Unified managed selection for lifecycle commands (MODIFIED)
 
-Day-2 / lifecycle commands share **one** selection model. Only `up` accepts `-w` / `--workspace`.
+Lifecycle commands share **one** selection model. Only `up` accepts `-w` / `--workspace`.
 
 | Command | Selection |
 |---------|-----------|
@@ -580,7 +580,7 @@ If the user passes `-w` / `--workspace` on any non-`up` command, the CLI MUST fa
 - Then the container is gone and the workspace volume still exists
 
 #### Scenario: Inspect from labels
-- Given a managed container with bind or volume day-2 labels
+- Given a managed container with bind or volume managed labels
 - When the user runs `adevcontainer inspect --name <that-name>`
 - Then payload remoteUser/remoteWorkspaceFolder/configPath/workspacePath/configHash match labels and portsAttributes is empty
 
@@ -674,6 +674,6 @@ The following are **out of scope** for this change and MUST NOT be required for 
 - Command aliases `play` / `run` for this flow
 - Running lifecycle hooks on `start` for volume-mode containers without host workspace
 
-**In scope for populate/day-2 auth (not non-goals):** in-container full clone; SSH agent forward via Apple `container create --ssh` when `SSH_AUTH_SOCK` is set; host HTTPS credential fill one-shot into guest clone; guest `credential.helper store` after HTTPS clone for day-2.
+**In scope for populate and guest auth (not non-goals):** in-container full clone; SSH agent forward via Apple `container create --ssh` when `SSH_AUTH_SOCK` is set; host HTTPS credential fill one-shot into guest clone; guest `credential.helper store` after HTTPS clone after clone.
 
 (End of file)

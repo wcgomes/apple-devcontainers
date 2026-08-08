@@ -2104,7 +2104,7 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
                     guard mounts.contains(where: { $0.contains("type=bind") && $0.contains(wsPath) }) else {
                         return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("expected bind".utf8))
                     }
-                    // Must stamp managed day-2 labels (bind mode)
+                    // Must stamp managed labels (bind mode)
                     let labels = args.enumerated().compactMap { i, a -> String? in
                         a == "-l" && i + 1 < args.count ? args[i + 1] : nil
                     }

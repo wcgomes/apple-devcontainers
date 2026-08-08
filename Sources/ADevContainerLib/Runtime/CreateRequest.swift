@@ -261,7 +261,7 @@ public struct CreateRequest: Equatable, Sendable {
     /// Volume-mode create: workspace is a named volume (clone), not a host bind.
     ///
     /// - Parameter enableSSHForward: When true, ensures `AllowlistedRunArg.ssh` is present
-    ///   so Apple `container create --ssh` forwards the host agent (day-2 SSH git).
+    ///   so Apple `container create --ssh` forwards the host agent (SSH after create git).
     public static func fromVolumeMode(
         resolved: ResolvedDevContainerConfig,
         identityName: String,
