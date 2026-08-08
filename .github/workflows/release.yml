@@ -13,6 +13,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   release:
@@ -45,6 +46,7 @@ jobs:
         run: swift build -c release --product adevcontainer
 
       - name: Package binary and checksum
+        id: package
         shell: bash
         run: |
           set -euo pipefail
@@ -63,7 +65,14 @@ jobs:
           export COPYFILE_DISABLE=1
           tar -C dist -czf adevcontainer-macos-arm64.tar.gz adevcontainer
           shasum -a 256 adevcontainer-macos-arm64.tar.gz > adevcontainer-macos-arm64.tar.gz.sha256
+          SHA256="$(awk '{print $1}' adevcontainer-macos-arm64.tar.gz.sha256)"
+          if [[ ! "$SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "error: failed to parse sha256 from checksum file: ${SHA256}" >&2
+            exit 1
+          fi
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
           ls -la adevcontainer-macos-arm64.tar.gz adevcontainer-macos-arm64.tar.gz.sha256
+          echo "SHA256=${SHA256}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -76,3 +85,79 @@ jobs:
             adevcontainer-macos-arm64.tar.gz.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+      - name: Bump Homebrew tap formula
+        if: ${{ !contains(steps.version.outputs.version, '-') }}
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA256: ${{ steps.package.outputs.sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${HOMEBREW_TAP_TOKEN:-}" ]]; then
+            echo "error: HOMEBREW_TAP_TOKEN secret is not set." >&2
+            echo "Add a fine-grained PAT with Contents read/write on wcgomes/homebrew-tap" >&2
+            echo "(or a classic PAT with repo scope) as repo secret HOMEBREW_TAP_TOKEN." >&2
+            exit 1
+          fi
+          TAP_DIR="${RUNNER_TEMP}/homebrew-tap"
+          git clone --depth 1 \
+            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/wcgomes/homebrew-tap.git" \
+            "${TAP_DIR}"
+          bash scripts/render-homebrew-formula.sh \
+            "${VERSION}" "${SHA256}" "${TAP_DIR}/Formula/adevcontainer.rb"
+          git -C "${TAP_DIR}" config user.name "github-actions[bot]"
+          git -C "${TAP_DIR}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "${TAP_DIR}" add Formula/adevcontainer.rb
+          if git -C "${TAP_DIR}" diff --cached --quiet; then
+            echo "Tap formula already at adevcontainer ${VERSION}; nothing to commit."
+          else
+            git -C "${TAP_DIR}" commit -m "adevcontainer ${VERSION}"
+            git -C "${TAP_DIR}" push origin HEAD:main
+            echo "Pushed Formula/adevcontainer.rb ${VERSION} to wcgomes/homebrew-tap"
+          fi
+
+      - name: Sync packaging formula via PR
+        if: ${{ !contains(steps.version.outputs.version, '-') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA256: ${{ steps.package.outputs.sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BRANCH="brew-bump-v${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Drop inject-version / build dirt; branch from main (protected — PR only)
+          git fetch origin main
+          git checkout -f -B "${BRANCH}" origin/main
+          bash scripts/render-homebrew-formula.sh \
+            "${VERSION}" "${SHA256}" packaging/homebrew/adevcontainer.rb
+          git add packaging/homebrew/adevcontainer.rb
+          if git diff --cached --quiet; then
+            echo "packaging/homebrew/adevcontainer.rb already at ${VERSION}; skipping PR."
+            exit 0
+          fi
+          git commit -m "chore(homebrew): bump packaging formula to ${VERSION}"
+          git push -u origin "${BRANCH}" --force
+          BODY="## Summary
+          Mirror bump of \`packaging/homebrew/adevcontainer.rb\` to **${VERSION}** after the GitHub Release.
+
+          - version: \`${VERSION}\`
+          - sha256: \`${SHA256}\`
+          - tap \`wcgomes/homebrew-tap\` was updated in the same release job
+
+          Auto-opened by the Release workflow."
+          # Collapse accidental leading indent from YAML block
+          BODY="$(printf '%s\n' "${BODY}" | sed 's/^[[:space:]]*//')"
+          if [[ "$(gh pr list --head "${BRANCH}" --base main --json number --jq 'length')" == "0" ]]; then
+            gh pr create \
+              --base main \
+              --head "${BRANCH}" \
+              --title "chore(homebrew): bump packaging formula to ${VERSION}" \
+              --body "${BODY}"
+          else
+            echo "PR for ${BRANCH} already exists; branch updated."
+          fi
