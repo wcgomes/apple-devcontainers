@@ -117,21 +117,30 @@ enum IntegrationSupport {
         )
         try MiniTest.expectEqual(up.outcome, "success")
         try MiniTest.expect(!up.containerId.isEmpty)
+        let managedName = up.containerName ?? up.containerId
 
         let code = try ExecCommand.run(
-            options: ExecOptions(workspacePath: ws.path, command: smokeCommand),
+            options: ExecOptions(command: smokeCommand, name: managedName),
             runtime: runtime
         )
         try MiniTest.expectEqual(code, 0)
 
-        let inspect = try InspectCommand.run(workspacePath: ws.path, runtime: runtime)
+        let inspect = try InspectCommand.run(name: managedName, runtime: runtime)
         try MiniTest.expectEqual(inspect.state.lowercased(), "running")
+        try MiniTest.expectEqual(
+            inspect.labels[ContainerIdentity.labelManaged],
+            ContainerIdentity.managedValue
+        )
+        try MiniTest.expectEqual(
+            inspect.labels[ContainerIdentity.labelWorkspaceMode],
+            ContainerIdentity.workspaceModeBind
+        )
 
         if let extra {
             try extra(ws, runtime, config)
         }
 
-        try DeleteCommand.run(workspacePath: ws.path, runtime: runtime)
+        try DeleteCommand.run(name: managedName, runtime: runtime)
         try MiniTest.expect(try runtime.findByName(up.containerId) == nil)
     }
 }
@@ -142,19 +151,22 @@ nonisolated(unsafe) let integrationTests: [(String, () throws -> Void)] = [
     }),
     ("fixtureE2E_envUser", {
         try IntegrationSupport.runFixtureE2E(fixtureFile: "env-user.json", extra: { ws, runtime, _ in
-            let up = try InspectCommand.run(workspacePath: ws.path, runtime: runtime)
-            try MiniTest.expectEqual(up.remoteUser, "vscode")
+            let listed = try ManagedContainers.list(runtime: runtime)
+            try MiniTest.expectEqual(listed.count, 1)
+            let name = listed[0].name
+            let inspected = try InspectCommand.run(name: name, runtime: runtime)
+            try MiniTest.expectEqual(inspected.remoteUser, "vscode")
             try MiniTest.expectEqual(
-                up.remoteWorkspaceFolder,
+                inspected.remoteWorkspaceFolder,
                 "/workspaces/\(ws.lastPathComponent)"
             )
             let code = try ExecCommand.run(
                 options: ExecOptions(
-                    workspacePath: ws.path,
                     command: [
                         "sh", "-lc",
                         "test \"$ENVIRONMENT\" = Development && test \"$WORKSPACE_BASENAME\" = '\(ws.lastPathComponent)'"
-                    ]
+                    ],
+                    name: name
                 ),
                 runtime: runtime
             )
@@ -163,20 +175,23 @@ nonisolated(unsafe) let integrationTests: [(String, () throws -> Void)] = [
     }),
     ("fixtureE2E_mountsPorts", {
         try IntegrationSupport.runFixtureE2E(fixtureFile: "mounts-ports.json", ensureKube: true, extra: { ws, runtime, config in
+            let listed = try ManagedContainers.list(runtime: runtime)
+            try MiniTest.expectEqual(listed.count, 1)
+            let name = listed[0].name
             let code = try ExecCommand.run(
                 options: ExecOptions(
-                    workspacePath: ws.path,
-                    command: ["sh", "-lc", "test -d /home/vscode/.config/opencode && test -d /home/vscode/.kube"]
+                    command: ["sh", "-lc", "test -d /home/vscode/.config/opencode && test -d /home/vscode/.kube"],
+                    name: name
                 ),
                 runtime: runtime
             )
             try MiniTest.expectEqual(code, 0)
 
-            let inspect = try InspectCommand.run(workspacePath: ws.path, runtime: runtime)
-            try MiniTest.expectEqual(
-                inspect.portsAttributes["\( (config["forwardPorts"] as? [Int])?.first ?? -1 )"]?["label"],
-                "PlantSuite Portal"
-            )
+            let inspect = try InspectCommand.run(name: name, runtime: runtime)
+            // portsAttributes not stored on labels in v1
+            try MiniTest.expect(inspect.portsAttributes.isEmpty)
+            _ = config
+            _ = ws
         })
     }),
     ("fixtureE2E_lifecycle", {

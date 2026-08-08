@@ -42,38 +42,37 @@ public struct InspectPayload: Sendable {
 }
 
 public enum InspectCommand {
+    /// Inspect a managed container via `--name` / picker.
+    ///
+    /// Identity fields come from runtime + labels stamped at create (no ConfigResolver).
+    /// `portsAttributes` is empty in v1 (not stored on labels).
     public static func run(
-        workspacePath: String,
+        name: String? = nil,
         runtime: AppleContainerRuntime,
-        localEnv: [String: String] = ProcessInfo.processInfo.environment
+        picker: InteractivePicker = .default
     ) throws -> InspectPayload {
-        let resolved = try ConfigResolver.resolve(
-            workspacePath: workspacePath,
-            localEnv: localEnv
+        let info = try ManagedContainers.resolveSelection(
+            name: name,
+            runtime: runtime,
+            picker: picker
         )
-        guard let info = try runtime.findByName(resolved.containerName) else {
-            throw CLIError(
-                code: CLIErrorCode.containerNotFound,
-                message: "No container for this workspace (expected \(resolved.containerName))",
-                hint: "Run 'adevcontainer up' first"
-            )
-        }
 
         // Prefer live inspect for freshest state
         let live = (try? runtime.inspect(nameOrId: info.id)) ?? info
+        let labels = live.labels
 
         return InspectPayload(
             containerId: live.id,
             containerName: live.name,
             state: live.state,
             image: live.image,
-            remoteUser: resolved.config.effectiveUser ?? "",
-            remoteWorkspaceFolder: resolved.config.workspaceFolder,
-            labels: live.labels,
-            portsAttributes: resolved.config.portsAttributes,
-            configPath: resolved.configPath,
-            workspacePath: resolved.workspacePath,
-            configHash: resolved.configHash
+            remoteUser: labels[ContainerIdentity.labelRemoteUser] ?? "",
+            remoteWorkspaceFolder: labels[ContainerIdentity.labelWorkspaceFolder] ?? "",
+            labels: labels,
+            portsAttributes: [:],
+            configPath: labels[ContainerIdentity.labelConfigFile] ?? "",
+            workspacePath: labels[ContainerIdentity.labelLocalFolder] ?? "",
+            configHash: labels[ContainerIdentity.labelConfigHash] ?? ""
         )
     }
 }

@@ -12,18 +12,39 @@ Facts that constrain the CLI. Not a full Apple container manual — only gaps th
 | Devices | `--device=…` (e.g. `/dev/net/tun`) | **Rejected** ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)) |
 | Features | OCI + local path feature packages + image build | **Supported** (OCI + local path runner); forever-reject `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker`; native arm64 build (no Rosetta by default) |
 | Events / rich watch APIs | Engine events often used by tools | Do not assume Docker-equivalent event stream |
-| List + label filter | `docker ps --filter label=…` | **No label filter on list** — client-side filter after JSON; prefer deterministic name + inspect |
-| VS Code | Dev Containers full up/rebuild | **Attach-only** after CLI `up` (experimental Attach to Running Apple Container) |
+| List + label filter | `docker ps --filter label=…` | **No label filter on list** — client-side filter after JSON; prefer deterministic name + inspect; product `list` keeps `devcontainer.managed=adevcontainer` only |
+| VS Code | Dev Containers full up/rebuild + clone-in-volume | **Attach-only** after CLI bring-up (experimental Attach to Running Apple Container); volume-mode via product `clone` (not the VS Code extension) |
 | Default process | Often long-running or sleep entry | Keep-alive `--entrypoint /bin/sleep` + `infinity` for long-lived devcontainers |
 | Create identity | Name vs id often distinct | `create --name` **is** the id (`configuration.id`) |
 | Bind mounts | File or directory host source OK | **Directory sources only** — file binds rejected by runtime |
+| Workspace I/O | Often bind or named volume | **Bind:** host APFS via virtiofs. **Named volume:** `volume.img` ext4 via virtio-blk — better metadata I/O; rationale for `clone` volume-mode |
+| Host→guest copy | `docker cp` into bind or volume | **`container cp` into a named-volume mount can exit 0 without writing files** (silent no-op). Rootfs paths may still accept `cp`. Product clone populate avoids host→guest copy entirely (in-container `git clone`); tar-pipe utility remains if ever needed — see below |
 | Env PATH | Shell/`${PATH}` often expanded | Apple `container` does **not** expand `${PATH}` — product expands on **create and exec** (`expandEnvPathRefs`); exec-only miss breaks lifecycle (`sh -lc` needs `/bin` on PATH) |
+
+### Bind vs volume workspace
+
+| | Bind (`up`) | Volume (`clone`) |
+|--|-------------|------------------|
+| Storage | Host directory (virtiofs → APFS) | Named volume `adev-*-ws` (virtio-blk → ext4 in `volume.img`) |
+| Identity hash | workspace path + config path | normalized git URL + config relpath |
+| `local_folder` label | real host path | `volume://…` |
+| Start hooks | bind start-stopped: `postStart` only | volume-mode `start`: **no hooks** |
+| Auth for git | N/A (host tree already present) | **SSH:** `SSH_AUTH_SOCK` + `create --ssh`. **HTTPS:** host `git credential fill` one-shot → guest `credential.helper store`. No GCM-in-guest; no host `~/.git-credentials` mount; no PAT CLI primary UX |
+| Populate | N/A (host tree) | **In-container full `git clone`** + verify `.git` (host = config-only sparse/shallow only; no host full+tar happy path) |
+
+Detail: [architecture.md](../architecture.md), [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md). Contract: [`specs/adevcontainer/spec.md`](../../specs/adevcontainer/spec.md).
 
 ### File bind mounts
 
 Apple `container` rejects bind mounts whose host source is a **file** (source must be a directory). File-path binds in `devcontainer.json` (e.g. `~/.kube/config`) must be promoted to the parent directory on both host and container sides before create. Product behavior: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md) (`MountNormalizer`).
 
 The mounts-ports fixture uses a `~/.kube` **directory** bind; `reference/devcontainer.json` may still declare a file path and relies on auto-promotion.
+
+### `container cp` vs named volume mounts
+
+`container cp` host→guest targeting a path on a **named volume mount** can exit **0** and still write nothing (silent no-op). Rootfs destinations may still work with `cp`.
+
+**Product implication:** volume-mode clone populate does **not** host→guest copy into the workspace volume. Happy path is **in-container full `git clone`** (after Features ensure git) + verify `.git`. Runtime may still expose tar-pipe `copyTreeIntoContainer` as a utility (not the clone happy path). Do not use `container cp` into named-volume mounts. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
 
 ### list/inspect JSON (tested shape: 1.2.x)
 
@@ -38,7 +59,7 @@ Apple BuildKit with `build.rosetta=true` can require Rosetta even for native arm
 - **Hard errors** for unsupported props/flags — never silent ignore.
 - **`forwardPorts`**: map to publish ports; do not promise IDE auto-forward behavior.
 - **`portsAttributes`**: metadata only; no IDE auto-forward.
-- **Lifecycle**: run via `container exec` (hook matrix: create-path full order; start-stopped `postStart` only; reuse none; `postAttach` admit + skip on `up`). Exec must expand `containerEnv` PATH refs (same as create) or login-shell hooks fail (`id`/`bash` not found). Not Docker entrypoint injection parity. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
+- **Lifecycle**: run via `container exec` (hook matrix: create-path full order on `up`/`clone`; bind start-stopped `postStart` only; volume-mode `start` none; reuse none; `postAttach` admit + skip). Exec must expand `containerEnv` PATH refs (same as create) or login-shell hooks fail (`id`/`bash` not found). Not Docker entrypoint injection parity. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
 - **`runArgs`**: allowlist (`--init`, `--cap-add`/`--cap-drop`, …); privileged/tun/device and unknown flags fail closed.
 - **`hostRequirements`**: preflight — fail on memory/cpus shortfall; map requested limits to create `-m`/`-c` when host OK; warn unsupported `gpu`; fail on unparseable/unknown keys.
 - **Features**: OCI + local path fetch/load + derived image build on `up` (see [cli-runtime-boundary](../conventions/cli-runtime-boundary.md)); forever-reject `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker` and privileged/securityOpt metadata ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)).
@@ -56,4 +77,4 @@ Apple BuildKit with `build.rosetta=true` can require Rosetta even for native arm
 
 ## Identity workaround
 
-Because list-by-label may be weak/missing, the CLI owns **deterministic container names** (`adev-{base}-{hash12}`, human base from config `name` or workspace basename) plus labels (`devcontainer.local_folder`, `devcontainer.config_file`, config hash) and resolves via name/inspect rather than Docker-style filter queries. Naming detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
+Because list-by-label may be weak/missing, the CLI owns **deterministic container names** (`adev-{base}-{hash12}`, human base from config `name` or workspace basename) plus managed labels (`devcontainer.managed`, `local_folder`, `config_file`, config hash, `workspace_mode` = `bind`|`volume`, `workspace_folder`, `remote_user`; volume-mode also `git_url`, `workspace_volume`, `config_volumes`) and resolves day-2 via `--name`/picker + client-side managed filter (only `up` uses `-w`). Volume identity keys off git URL + config relpath so reclones stay stable. Naming detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).

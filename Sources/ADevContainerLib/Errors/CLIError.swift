@@ -69,5 +69,13 @@ public enum CLIErrorCode {
     public static let buildRosettaConfig = "build_rosetta_config"
     public static let usage = "usage"
     public static let internalError = "internal_error"
+    /// Host `git` missing or not executable (clone prerequisite).
+    public static let gitMissing = "git_missing"
+    /// Host `git` clone/fetch failed.
+    public static let gitFailed = "git_failed"
+    /// Populate (copy into volume) failed after container create.
+    public static let populateFailed = "populate_failed"
+    /// Multiple managed containers and no `--name` in non-interactive mode.
+    public static let selectionRequired = "selection_required"
 }
 

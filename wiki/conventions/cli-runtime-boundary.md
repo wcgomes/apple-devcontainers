@@ -63,9 +63,9 @@ Fixtures may use directory binds already (`~/.kube`); configs that still use fil
 
 ## hostRequirements preflight
 
-- Evaluate on every `up` before create/start/reuse — never silent ignore.
+- Evaluate on every `up` / `clone` before create/start/reuse — never silent ignore.
 - Supported keys: `memory` (e.g. `8gb` / `8192mb`), `cpus` (number).
-- **Fail `up`** on capacity shortfall or when host memory/cpus cannot be read while required.
+- **Fail `up` / `clone`** on capacity shortfall or when host memory/cpus cannot be read while required.
 - When host has capacity: map **requested** values onto `container create` as `-m` / `-c` (Apple size suffixes); absent/empty → no limit flags.
 - **Warn** that `gpu` is unsupported when present (does not fail alone; no create flags).
 - **Fail** if `hostRequirements` is present but not an object, a supported key is unparseable, or an unknown key appears inside the object.
@@ -73,28 +73,74 @@ Fixtures may use directory binds already (`~/.kube`); configs that still use fil
 
 ## Deterministic names and labels
 
-Set on create and use for reuse/inspect:
+Set on create and use for reuse/inspect/`list`:
 
 | Mechanism | Purpose |
 |-----------|---------|
 | Deterministic container name (`create --name` = id) | Stable identity without label-filter list APIs |
-| Label `devcontainer.local_folder` | Workspace path binding |
+| Label `devcontainer.managed=adevcontainer` | Managed filter for `list` / picker / day-2 commands |
+| Label `devcontainer.local_folder` | Bind: host path; volume-mode: `volume://…` |
 | Label `devcontainer.config_file` | Config file identity |
 | App config hash label | Detect config drift / recreate need |
+| Label `devcontainer.workspace_mode` | `bind` on `up` create; `volume` on `clone` create |
+| Label `devcontainer.workspace_volume` | Workspace volume name (`adev-*-ws`; volume-mode) |
+| Label `devcontainer.git_url` | Normalized remote (userinfo stripped; volume-mode) |
+| Label `devcontainer.config_volumes` | Config `type=volume` names for prune |
+| Label `devcontainer.workspace_folder` | Create-time container workdir for day-2 `exec` (both modes) |
+| Label `devcontainer.remote_user` | Create-time effective user for day-2 `exec` (both modes; may be empty) |
+
+Bind-mode `up` stamps the full managed label set including `workspace_mode=bind` (not volume-only).
 
 **Naming rules**
 
-- **Human base:** `sanitize(devcontainer.json name)` if present and non-empty after trim; else `sanitize(workspace folder basename)`. DNS-safe: lowercase; non-`[a-z0-9-]` → `-`; trim hyphens; clip base ~20 chars. `name` drives identity when set (not metadata-only).
-- **Container name:** `adev-{base}-{hash12}` where `hash12` hashes workspace path + config path; empty base → `adev-{hash12}`; full name ≤63 chars.
+- **Human base:** `sanitize(devcontainer.json name)` if present and non-empty after trim; else mode-specific fallback:
+  - **Bind (`up`):** `sanitize(workspace folder basename)`
+  - **Volume (`clone`):** `sanitize(git URL repo basename)` (not the host temp checkout directory name)
+  - DNS-safe: lowercase; non-`[a-z0-9-]` → `-`; trim hyphens; clip base ~20 chars. `name` drives identity when set (not metadata-only).
+- **Container name:** `adev-{base}-{hash12}`; empty base → `adev-{hash12}`; full name ≤63 chars.
+  - Bind: `hash12` = workspace path + config path.
+  - Volume: `hash12` = normalized git URL + config relpath (not temp checkout path).
+- **Workspace volume (volume-mode):** `adev-{base}-{hash12}-ws`.
 - **Features derived image tag:** `adev-{base}:{hash12}` where `hash12` is the content hash of base image + features; empty base → `adevcontainer:{hash12}`. No `adevcontainer/features:` prefix and no `/features` path segment. Config `image` without a Features build is left as written.
 
 Do not depend on Docker-style `ps --filter label=` as the primary discovery mechanism ([gaps](../domain/devcontainer-apple-gaps.md)).
 
-## Named volumes on `up` (ensure / reuse)
+## Named volumes (ensure / reuse)
 
 - Before create, **ensureVolume** for each config named volume: **list first**.
-- If the volume already exists → status “already exists — reusing” and mount it; **never fail `up` only because the volume exists**.
+- If the volume already exists → status “already exists — reusing” and mount it; **never fail `up`/`clone` only because a config volume exists**.
 - If missing → create, then mount.
+- **Clone workspace volume:** if `adev-*-ws` already exists → **delete + recreate** (fresh tree), then mount as the workspace root (not a host bind).
+
+## `clone` flow (volume-mode)
+
+1. Require host `git` on `PATH` (config-only fetch + HTTPS credential fill). No bundled git; no PAT CLI flags (optional env `ADEVCONTAINER_GIT_TOKEN` escape hatch OK).
+2. Host git: sparse/shallow **config-only** fetch into a temp dir (auth = host helpers/SSH agent; git argv puts `--` before the URL). Identity/labels use **normalized** URL (`scheme://` userinfo stripped); host git still gets the **original** URL.
+3. Resolve `devcontainer.json` from that temp tree. **workspaceFolder** default and `${localWorkspaceFolderBasename}` use the **git URL repo basename**, not the host temp checkout directory name.
+4. **Author identity (before Features/create):** host `git -C <sparse-temp> config --get user.name` / `user.email` (includeIf-aware). Env overrides: `ADEVCONTAINER_GIT_AUTHOR_NAME` / `ADEVCONTAINER_GIT_AUTHOR_EMAIL`. **Both env set** → use env, skip prompt (even on TTY). **TTY** and env incomplete: if both resolved → confirm `Use this identity? [Y/n]` (decline → collect name+email); if either missing → prompt for both (empty → fail structured, no Features/create). **Non-TTY:** no prompt; resolved/env silently when complete; incomplete → continue (warn at apply, no hang). Chosen values applied after populate (step 8).
+5. **Ensure in-container git (Features path, not apt):** after resolve + identity, before the Features gate, if no admitted feature id is `git` or `common-utils` (any registry/tag or local path), append `ghcr.io/devcontainers/features/git:1` (empty options). Status: `==> Ensuring git feature for volume workspace`. Empty features → inject then enter FeaturesRunner. Already covered → no double-add. Config hash / effective features include the inject when added. **`up` does not inject.**
+6. Ensure workspace volume (`adev-{base}-{hash12}-ws`); delete+recreate if present. Existing managed container name → fail closed (no silent reuse).
+7. Create volume-mode container (workspace = named volume; labels as above) and start. Features runner runs when features non-empty after step 5.
+   - **SSH URL:** require host `SSH_AUTH_SOCK` non-empty; inject `AllowlistedRunArg.ssh` (`container create --ssh`) if not already in runArgs. Missing agent → fail structured (hint ssh-agent / HTTPS). Day-2 push uses the same forward.
+   - **HTTPS:** no create-time auth flag; credentials applied at populate (step 8).
+8. **Populate (in-container full clone)** — happy path is **not** host full clone + tar-pipe (`copyTreeIntoContainer` may remain as unused utility). After Features ensure git:
+   - Exec in-container `git clone` of the URL into `workspaceFolder` (as `remoteUser` when set); verify `workspaceFolder/.git`.
+   - **HTTPS auth:** host `git credential fill` (protocol/host/path; GCM/osxkeychain transparent — **no product GCM-in-guest**, no mount of host `~/.git-credentials`). Optional fallbacks: `ADEVCONTAINER_GIT_TOKEN`; `gh auth token` for github.com when `gh` available. When creds exist → one-shot into guest clone via GIT_ASKPASS/env (never log secrets; redact errors) → guest `credential.helper store` + `git credential approve` once for day-2. When fill empty → anonymous in-container clone (public); auth failure → structured hint to configure host credentials or use SSH.
+   - **SSH auth:** agent already forwarded via `--ssh` from create.
+   - **Author apply:** when **both** name+email from step 4 → guest `git config --local` both; if either missing → warn once, no partial write; no synthetic defaults.
+9. Create-path lifecycle hooks (same order as fresh `up`). On start/populate/hook failure after create: delete container **and** workspace `*-ws` volume.
+10. **Always** clean config-fetch temps (success or failure). No host full-clone staging temp on the happy path.
+
+`up` remains bind-mode host workspace only (no auto git Feature). Detail: [architecture.md](../architecture.md); contract [`specs/adevcontainer/spec.md`](../../specs/adevcontainer/spec.md).
+
+## Managed selection (`list` / day-2 commands)
+
+**Only `up` uses `-w`/cwd** (bind workspace path). All other lifecycle/day-2 commands resolve a managed container via `--name` or interactive picker — never `-w`.
+
+- `list [--json]`: client-side filter to `devcontainer.managed=adevcontainer` only.
+- `start` / `exec` / `stop` / `delete` / `prune` / `inspect`: `--name` or picker among managed; no host workspace path required.
+- `start`: runtime start of a managed container; **volume-mode runs no hooks** (bind start-stopped `postStart` stays on `up` path).
+- `exec`: user/workdir from labels `devcontainer.remote_user` / `devcontainer.workspace_folder` when set (both bind and volume create stamp these).
 
 ## `prune` resource set
 
@@ -103,7 +149,8 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 | Resource | Included? |
 |----------|-----------|
 | Workspace container | Yes |
-| Named volumes from config `mounts` (`type=volume`) | Yes |
+| Named volumes from config `mounts` (`type=volume`, via label) | Yes |
+| Workspace volume `adev-*-ws` (volume-mode) | Yes |
 | Config `image` reference | Yes |
 | Derived Features tags (`adev-{base}:{hash12}` / `adevcontainer:{hash12}`) | **No** — not removed unless the tag equals config `image` |
 | Bind-mount host paths | **No** |
@@ -113,7 +160,7 @@ Missing resources are skipped. Exit non-zero only if deleting an **existing** re
 
 ## Features runner
 
-On `up` when `features` is non-empty (code: `Sources/ADevContainerLib/Features/`):
+On `up`/`clone` when `features` is non-empty after resolve (and after clone git-ensure). Code: `Sources/ADevContainerLib/Features/`.
 
 | Step | Behavior |
 |------|----------|
@@ -168,20 +215,22 @@ Apple `container` does **not** expand `${PATH}` / `$PATH` in env values. Product
 
 Hooks run via runtime **exec** into the running container (effective user + workspace folder when set). String or argv-array forms. Omitted properties are no-ops. Exec env PATH expansion applies (see PATH expansion).
 
-| `up` path | Hooks |
-|-----------|--------|
-| Fresh create | `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand` |
+| Path | Hooks |
+|------|--------|
+| Fresh create (`up` bind or `clone` volume) | `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand` |
 | Reuse running | none |
-| Start stopped | `postStartCommand` only |
-| `postAttachCommand` | admitted; **skipped on `up`** (one status line; no attach hook yet) |
+| Bind start-stopped (`up`) | `postStartCommand` only |
+| Volume-mode `start` | **none** |
+| `postAttachCommand` | admitted; **skipped** on `up`/`clone`/`start` (one status line; no attach hook yet) |
 
-- Capture exit codes; failed hook fails `up` — do not pretend success.
-- **Create-path failure** (any of onCreate / updateContent / postCreate / postStart on fresh create): delete the container **before** returning failure from `up`, so reuse cannot treat a half-bootstrapped container as healthy.
-- **Start-stopped `postStartCommand` failure:** fail `up` but **do not** delete.
+- Capture exit codes; failed hook fails the command — do not pretend success.
+- **Create-path failure** (any of onCreate / updateContent / postCreate / postStart on fresh create): delete the container **before** returning failure, so reuse cannot treat a half-bootstrapped container as healthy.
+- **Bind start-stopped `postStartCommand` failure:** fail `up` but **do not** delete.
 
-## `exec`: interactive vs non-interactive
+## `exec`: selection, interactive vs non-interactive
 
-- **Interactive** (`adevcontainer exec` with no command, or with `-i` / `-t` / `-it`): **InteractiveProcessRunner** (inherit stdio) + `container exec -i -t`; default command is `bash`.
+- **Selection:** `--name` or interactive picker among managed only — **no `-w`/cwd** (that flag is `up`-only). Workdir/user from labels `devcontainer.workspace_folder` / `devcontainer.remote_user` when set at create (bind or volume).
+- **Interactive** (no command, or `-i` / `-t` / `-it`): **InteractiveProcessRunner** (inherit stdio) + `container exec -i -t`; default command is `bash`.
 - **Non-interactive** (command exec without those flags): capture stdout/stderr pipes; do **not** pass `-i`/`-t`.
 - Feature/config `containerEnv` on exec expands `${PATH}` / `$PATH` the same as create.
 

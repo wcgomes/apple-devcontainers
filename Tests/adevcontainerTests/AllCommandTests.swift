@@ -200,9 +200,8 @@ nonisolated(unsafe) let execTests: [(String, () throws -> Void)] = [
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         let code = try ExecCommand.run(
-            options: ExecOptions(workspacePath: workspace.path, command: ["echo", "ok"]),
-            runtime: runtime,
-            localEnv: [:]
+            options: ExecOptions(command: ["echo", "ok"], name: resolved.containerName),
+            runtime: runtime
         )
         try MiniTest.expectEqual(code, 0)
         let execCall = mock.calls.first { $0.arguments.first == "exec" }!
@@ -250,12 +249,11 @@ nonisolated(unsafe) let execTests: [(String, () throws -> Void)] = [
         )
         let code = try ExecCommand.run(
             options: ExecOptions(
-                workspacePath: workspace.path,
                 command: ["bash", "-lc", "true"],
-                interactive: true
+                interactive: true,
+                name: resolved.containerName
             ),
-            runtime: runtime,
-            localEnv: [:]
+            runtime: runtime
         )
         try MiniTest.expectEqual(code, 0)
         try MiniTest.expect(listMock.calls.contains { $0.arguments.first == "list" })
@@ -299,9 +297,8 @@ nonisolated(unsafe) let execTests: [(String, () throws -> Void)] = [
             interactiveRunner: interactiveMock
         )
         let code = try ExecCommand.run(
-            options: ExecOptions(workspacePath: workspace.path, command: [], interactive: true),
-            runtime: runtime,
-            localEnv: [:]
+            options: ExecOptions(command: [], interactive: true, name: resolved.containerName),
+            runtime: runtime
         )
         try MiniTest.expectEqual(code, 0)
         let execCall = interactiveMock.calls.first { $0.arguments.first == "exec" }!
@@ -310,8 +307,6 @@ nonisolated(unsafe) let execTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(execCall.arguments.last == "bash")
     }),
     ("execNotRunningMissing", {
-        let workspace = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
-        defer { try? FileManager.default.removeItem(at: workspace) }
         let mock = MockProcessRunner()
         mock.handlers = [
             { args in
@@ -325,9 +320,8 @@ nonisolated(unsafe) let execTests: [(String, () throws -> Void)] = [
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         try MiniTest.expectThrows({
             _ = try ExecCommand.run(
-                options: ExecOptions(workspacePath: workspace.path, command: ["true"]),
-                runtime: runtime,
-                localEnv: [:]
+                options: ExecOptions(command: ["true"], name: "adev-missing"),
+                runtime: runtime
             )
         }) { error in
             try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.containerNotFound)
@@ -355,9 +349,8 @@ nonisolated(unsafe) let execTests: [(String, () throws -> Void)] = [
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         try MiniTest.expectThrows({
             _ = try ExecCommand.run(
-                options: ExecOptions(workspacePath: workspace.path, command: ["true"]),
-                runtime: runtime,
-                localEnv: [:]
+                options: ExecOptions(command: ["true"], name: resolved.containerName),
+                runtime: runtime
             )
         }) { error in
             try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.containerNotRunning)
@@ -387,7 +380,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        try StopCommand.run(workspacePath: workspace.path, runtime: runtime, localEnv: [:])
+        try StopCommand.run(name: resolved.containerName, runtime: runtime)
         try MiniTest.expect(mock.calls.contains { $0.arguments == ["stop", resolved.containerName] })
     }),
     ("deleteContainer", {
@@ -411,7 +404,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        try DeleteCommand.run(workspacePath: workspace.path, runtime: runtime, localEnv: [:])
+        try DeleteCommand.run(name: resolved.containerName, runtime: runtime)
         try MiniTest.expect(mock.calls.contains {
             $0.arguments.starts(with: ["delete"]) && $0.arguments.contains(resolved.containerName)
         })
@@ -434,16 +427,16 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        let payload = try InspectCommand.run(
-            workspacePath: workspace.path, runtime: runtime, localEnv: [:]
-        )
+        let payload = try InspectCommand.run(name: resolved.containerName, runtime: runtime)
         try MiniTest.expectEqual(payload.containerId, resolved.containerName)
         try MiniTest.expectEqual(payload.state, "running")
         try MiniTest.expectEqual(payload.labels[ContainerIdentity.labelConfigHash], resolved.configHash)
+        try MiniTest.expectEqual(payload.remoteWorkspaceFolder, resolved.config.workspaceFolder)
+        try MiniTest.expectEqual(payload.workspacePath, resolved.workspacePath)
+        try MiniTest.expectEqual(payload.configPath, resolved.configPath)
+        try MiniTest.expect(payload.portsAttributes.isEmpty)
     }),
     ("deleteMissingErrors", {
-        let workspace = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
-        defer { try? FileManager.default.removeItem(at: workspace) }
         let mock = MockProcessRunner()
         mock.handlers = [
             { args in
@@ -456,7 +449,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         try MiniTest.expectThrows({
-            try DeleteCommand.run(workspacePath: workspace.path, runtime: runtime, localEnv: [:])
+            try DeleteCommand.run(name: "adev-missing", runtime: runtime)
         }) { error in
             try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.containerNotFound)
         }
@@ -475,8 +468,13 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         defer { try? FileManager.default.removeItem(at: workspace) }
         let mock = MockProcessRunner()
         let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        try MiniTest.expectEqual(
+            resolved.labels[ContainerIdentity.labelConfigVolumes],
+            "vol-a,vol-b"
+        )
         let entry = MockProcessRunner.containerListJSON(
-            id: resolved.containerName, state: "stopped", labels: resolved.labels
+            id: resolved.containerName, state: "stopped", labels: resolved.labels,
+            image: "alpine:3.20"
         )
         let volumeList: [[String: Any]] = [
             ["id": "vol-a"],
@@ -505,7 +503,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        let code = try PruneCommand.run(workspacePath: workspace.path, runtime: runtime, localEnv: [:])
+        let code = try PruneCommand.run(name: resolved.containerName, runtime: runtime)
         try MiniTest.expect(code == 0)
 
         let argSeq = mock.calls.map(\.arguments)
@@ -525,45 +523,23 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         // Bind mounts must not trigger volume delete
         try MiniTest.expect(!argSeq.contains { $0.starts(with: ["volume", "delete"]) && $0.contains("/tmp") })
     }),
-    ("pruneMissingContainerStillDeletesVolumesAndImage", {
-        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
-        {
-          "image": "alpine:3.20",
-          "mounts": [
-            { "source": "orphan-vol", "target": "/data", "type": "volume" }
-          ]
-        }
-        """)
-        defer { try? FileManager.default.removeItem(at: workspace) }
+    ("pruneMissingManagedErrors", {
         let mock = MockProcessRunner()
-        let volumeListData = try JSONSerialization.data(withJSONObject: [["id": "orphan-vol"]] as [[String: Any]])
         mock.handlers = [
             { args in
                 if args.starts(with: ["list"]) {
                     let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
                     return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
                 }
-                if args == ["volume", "list", "--format", "json"] {
-                    return ProcessResult(exitCode: 0, stdout: volumeListData, stderr: Data())
-                }
-                if args.starts(with: ["volume", "delete"]) {
-                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
-                }
-                if args.starts(with: ["image", "delete"]) || args.starts(with: ["image", "rm"]) {
-                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
-                }
                 return nil
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        let code = try PruneCommand.run(workspacePath: workspace.path, runtime: runtime, localEnv: [:])
-        try MiniTest.expect(code == 0)
-        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
-        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "delete", "orphan-vol"] })
-        try MiniTest.expect(mock.calls.contains {
-            $0.arguments == ["image", "delete", "alpine:3.20"]
-                || $0.arguments == ["image", "rm", "alpine:3.20"]
-        })
+        try MiniTest.expectThrows({
+            _ = try PruneCommand.run(name: "adev-missing", runtime: runtime)
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.containerNotFound)
+        }
     })
 ]
 
@@ -711,10 +687,12 @@ nonisolated(unsafe) let phase2Tests: [(String, () throws -> Void)] = [
         try MiniTest.expect(warning.contains(configFile.path))
         try MiniTest.expect(warning.contains("became:"))
     }),
-    ("inspectSurfacesPortsAttributes", {
+    ("inspectFromLabelsEmptyPortsAttributes", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
         {
           "image": "alpine:3.20",
+          "remoteUser": "vscode",
+          "workspaceFolder": "/workspaces/app",
           "forwardPorts": [8080],
           "portsAttributes": { "8080": { "label": "Web" } }
         }
@@ -735,8 +713,19 @@ nonisolated(unsafe) let phase2Tests: [(String, () throws -> Void)] = [
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        let payload = try InspectCommand.run(workspacePath: ws.path, runtime: runtime, localEnv: [:])
-        try MiniTest.expectEqual(payload.portsAttributes["8080"]?["label"], "Web")
+        let payload = try InspectCommand.run(name: resolved.containerName, runtime: runtime)
+        // v1: portsAttributes not stored on labels
+        try MiniTest.expect(payload.portsAttributes.isEmpty)
+        try MiniTest.expectEqual(payload.remoteUser, "vscode")
+        try MiniTest.expectEqual(payload.remoteWorkspaceFolder, "/workspaces/app")
+        try MiniTest.expectEqual(
+            payload.labels[ContainerIdentity.labelManaged],
+            ContainerIdentity.managedValue
+        )
+        try MiniTest.expectEqual(
+            payload.labels[ContainerIdentity.labelWorkspaceMode],
+            ContainerIdentity.workspaceModeBind
+        )
     })
 ]
 
