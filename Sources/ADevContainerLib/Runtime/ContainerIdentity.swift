@@ -6,8 +6,28 @@ public enum ContainerIdentity {
     public static let labelConfigFile = "devcontainer.config_file"
     public static let labelConfigHash = "devcontainer.config_hash"
 
+    /// DNS-safe human base (≤20) from config `name` when non-empty after trim; else workspace basename.
+    public static func humanBase(configName: String?, workspacePath: String) -> String {
+        let raw: String
+        if let name = configName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            raw = name
+        } else {
+            raw = ((workspacePath as NSString).standardizingPath as NSString).lastPathComponent
+        }
+        let base = raw
+            .lowercased()
+            .replacingOccurrences(of: "[^a-z0-9-]", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return String(base.prefix(20)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
     /// Deterministic DNS-safe container name ≤ 63 chars from workspace + config path.
-    public static func containerName(workspacePath: String, configPath: String) -> String {
+    /// Human segment prefers config `name` when set; hash material remains workspace|config paths.
+    public static func containerName(
+        workspacePath: String,
+        configPath: String,
+        configName: String? = nil
+    ) -> String {
         let workspace = (workspacePath as NSString).standardizingPath
         let config = (configPath as NSString).standardizingPath
         let material = "\(workspace)|\(config)"
@@ -15,11 +35,7 @@ public enum ContainerIdentity {
         let hex = digest.map { String(format: "%02x", $0) }.joined()
         let short = String(hex.prefix(12))
 
-        let base = (workspace as NSString).lastPathComponent
-            .lowercased()
-            .replacingOccurrences(of: "[^a-z0-9-]", with: "-", options: .regularExpression)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        let clippedBase = String(base.prefix(20))
+        let clippedBase = humanBase(configName: configName, workspacePath: workspace)
         let candidate = clippedBase.isEmpty
             ? "adev-\(short)"
             : "adev-\(clippedBase)-\(short)"

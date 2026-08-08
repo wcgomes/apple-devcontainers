@@ -1444,7 +1444,9 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(mock.calls.contains { $0.arguments.first == "create" })
         try MiniTest.expect(createHadPlatform)
         // Create uses derived features image, not raw base.
-        try MiniTest.expect(imageInCreate?.hasPrefix("adevcontainer/features:") == true)
+        let expectedBase = ContainerIdentity.humanBase(configName: nil, workspacePath: ws.path)
+        try MiniTest.expect(imageInCreate?.hasPrefix("adev-\(expectedBase):") == true)
+        try MiniTest.expect(imageInCreate?.contains("/features") != true)
         // No in-container feature install on up path.
         try MiniTest.expect(!mock.calls.contains {
             ($0.arguments.first == "cp" || $0.arguments.first == "copy")
@@ -1767,7 +1769,9 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expectEqual(result.outcome, "success")
         try MiniTest.expect(mock.calls.contains { $0.arguments.first == "build" })
-        try MiniTest.expect(imageInCreate?.hasPrefix("adevcontainer/features:") == true)
+        let expectedBase = ContainerIdentity.humanBase(configName: nil, workspacePath: ws.path)
+        try MiniTest.expect(imageInCreate?.hasPrefix("adev-\(expectedBase):") == true)
+        try MiniTest.expect(imageInCreate?.contains("/features") != true)
         // Dockerfile should install sample-a before sample-b
         if let buildCall = mock.calls.first(where: { $0.arguments.first == "build" }),
            let fIdx = buildCall.arguments.firstIndex(of: "-f"),

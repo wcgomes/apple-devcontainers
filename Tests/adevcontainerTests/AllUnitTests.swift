@@ -839,6 +839,33 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(args.contains("OTHER=pre:\(expectedPath):post"))
         try MiniTest.expect(args.contains("PATHNAME=keep-$PATHNAME"))
     }),
+    ("execEnvExpandsPathRefs", {
+        // Lifecycle/exec must expand feature PATH the same way as create.
+        let nvmPrefix = "/usr/local/share/nvm/current/bin"
+        let expectedPath = "\(nvmPrefix):\(CreateRequest.defaultLinuxPath)"
+        let mock = MockProcessRunner()
+        mock.results = [
+            ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try runtime.exec(
+            nameOrId: "ctr",
+            command: ["sh", "-lc", "id && bash --version"],
+            env: [
+                "PATH": "\(nvmPrefix):${PATH}",
+                "OTHER": "pre:$PATH:post",
+                "PATHNAME": "keep-$PATHNAME"
+            ]
+        )
+        let args = mock.calls.last!.arguments
+        try MiniTest.expectEqual(args.first, "exec")
+        try MiniTest.expect(args.contains("PATH=\(expectedPath)"))
+        try MiniTest.expect(!args.contains(where: { $0.contains("${PATH}") }))
+        try MiniTest.expect(args.contains("OTHER=pre:\(expectedPath):post"))
+        try MiniTest.expect(args.contains("PATHNAME=keep-$PATHNAME"))
+        try MiniTest.expect(args.contains("ctr"))
+        try MiniTest.expect(args.contains("sh"))
+    }),
     ("createArgvMapping", {
         let mock = MockProcessRunner()
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
@@ -991,8 +1018,48 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expectEqual(a, b)
         try MiniTest.expect(a.count <= 63)
-        try MiniTest.expect(a.hasPrefix("adev-"))
+        try MiniTest.expect(a.hasPrefix("adev-proj-"))
         try MiniTest.expect(a.range(of: #"^[a-z0-9-]+$"#, options: .regularExpression) != nil)
+    }),
+    ("containerNamePrefersConfigName", {
+        let withName = ContainerIdentity.containerName(
+            workspacePath: "/Users/me/proj",
+            configPath: "/Users/me/proj/.devcontainer/devcontainer.json",
+            configName: "My App!"
+        )
+        let withoutName = ContainerIdentity.containerName(
+            workspacePath: "/Users/me/proj",
+            configPath: "/Users/me/proj/.devcontainer/devcontainer.json"
+        )
+        try MiniTest.expect(withName.hasPrefix("adev-my-app-"))
+        try MiniTest.expect(withoutName.hasPrefix("adev-proj-"))
+        // Hash material is path-only; short hash segment matches.
+        let hashWith = String(withName.split(separator: "-").last ?? "")
+        let hashWithout = String(withoutName.split(separator: "-").last ?? "")
+        try MiniTest.expectEqual(hashWith, hashWithout)
+        try MiniTest.expectEqual(hashWith.count, 12)
+    }),
+    ("containerNameIgnoresBlankConfigName", {
+        let name = ContainerIdentity.containerName(
+            workspacePath: "/Users/me/proj",
+            configPath: "/Users/me/proj/.devcontainer/devcontainer.json",
+            configName: "   "
+        )
+        try MiniTest.expect(name.hasPrefix("adev-proj-"))
+    }),
+    ("resolverContainerNameFromConfigName", {
+        let wsNamed = try TestRepo.makeTempWorkspace(configJSON: """
+        { "name": "Cool App", "image": "alpine:3.20" }
+        """)
+        defer { try? FileManager.default.removeItem(at: wsNamed) }
+        let rNamed = try ConfigResolver.resolve(workspacePath: wsNamed.path, localEnv: [:])
+        try MiniTest.expect(rNamed.containerName.hasPrefix("adev-cool-app-"))
+
+        let wsBare = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: wsBare) }
+        let rBare = try ConfigResolver.resolve(workspacePath: wsBare.path, localEnv: [:])
+        let expectedBase = ContainerIdentity.humanBase(configName: nil, workspacePath: wsBare.path)
+        try MiniTest.expect(rBare.containerName.hasPrefix("adev-\(expectedBase)-"))
     }),
     ("labelsKeys", {
         let labels = ContainerIdentity.labels(
@@ -1496,7 +1563,8 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expectEqual(result.orderedRefs, [refA, refB])
         try MiniTest.expect(!result.reusedExistingImage)
-        try MiniTest.expect(result.derivedImage.hasPrefix("adevcontainer/features:"))
+        try MiniTest.expect(result.derivedImage.hasPrefix("adevcontainer:"))
+        try MiniTest.expect(!result.derivedImage.contains("/features"))
     }),
     ("featureInstallEnvAndSafeName", {
         let metaA = try FeatureMetadata.parse(
@@ -1736,12 +1804,35 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
                 metadata: metaA
             )
         ]
-        let t1 = DerivedImageTag.compute(baseImage: "alpine:3.20", ordered: o1)
-        let t1b = DerivedImageTag.compute(baseImage: "alpine:3.20", ordered: o1)
-        let t2 = DerivedImageTag.compute(baseImage: "alpine:3.20", ordered: o2)
+        let t1 = DerivedImageTag.compute(baseImage: "alpine:3.20", ordered: o1, nameBase: "my-app")
+        let t1b = DerivedImageTag.compute(baseImage: "alpine:3.20", ordered: o1, nameBase: "my-app")
+        let t2 = DerivedImageTag.compute(baseImage: "alpine:3.20", ordered: o2, nameBase: "my-app")
         try MiniTest.expectEqual(t1, t1b)
         try MiniTest.expect(t1 != t2)
-        try MiniTest.expect(t1.hasPrefix("adevcontainer/features:"))
+        try MiniTest.expect(t1.hasPrefix("adev-my-app:"))
+        try MiniTest.expect(!t1.contains("/features"))
+        let tEmpty = DerivedImageTag.compute(baseImage: "alpine:3.20", ordered: o1, nameBase: "")
+        try MiniTest.expect(tEmpty.hasPrefix("adevcontainer:"))
+        try MiniTest.expect(!tEmpty.contains("/features"))
+        // Same content hash regardless of nameBase label.
+        try MiniTest.expectEqual(
+            String(t1.split(separator: ":").last ?? ""),
+            String(tEmpty.split(separator: ":").last ?? "")
+        )
+    }),
+    ("featureDerivedTagUsesWorkspaceBasenameViaHumanBase", {
+        let base = ContainerIdentity.humanBase(configName: nil, workspacePath: "/Users/me/My_Project")
+        try MiniTest.expectEqual(base, "my-project")
+        let named = ContainerIdentity.humanBase(configName: "Cool App", workspacePath: "/Users/me/My_Project")
+        try MiniTest.expectEqual(named, "cool-app")
+        // After clip to 20, re-trim so base cannot end/start with `-`.
+        let clipped = ContainerIdentity.humanBase(
+            configName: "test----------------end",
+            workspacePath: "/Users/me/My_Project"
+        )
+        try MiniTest.expectEqual(clipped, "test")
+        try MiniTest.expect(!clipped.hasPrefix("-"))
+        try MiniTest.expect(!clipped.hasSuffix("-"))
     }),
     ("containerPlatformDefaultArm64", {
         try MiniTest.expectEqual(
@@ -1884,7 +1975,8 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(result.contributions.initProcess)
         try MiniTest.expectEqual(result.orderedRefs, [FeaturesTestSupport.refA])
         try MiniTest.expect(!result.reusedExistingImage)
-        try MiniTest.expect(result.derivedImage.hasPrefix("adevcontainer/features:"))
+        try MiniTest.expect(result.derivedImage.hasPrefix("adevcontainer:"))
+        try MiniTest.expect(!result.derivedImage.contains("/features"))
         guard let buildArgs else {
             throw MiniTest.Failure(message: "expected container build")
         }

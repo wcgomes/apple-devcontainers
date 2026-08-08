@@ -334,7 +334,11 @@ public struct AppleContainerRuntime: Sendable {
         if let workdir, !workdir.isEmpty {
             args += ["-w", workdir]
         }
-        for (k, v) in env.sorted(by: { $0.key < $1.key }) {
+        // Same as create: Apple container does not expand ${PATH}/$PATH in -e values.
+        // Feature containerEnv (e.g. node) sets PATH=…:${PATH}; without expansion,
+        // lifecycle exec (sh -lc) cannot find id/bash under a broken PATH.
+        let expandedEnv = CreateRequest.expandEnvPathRefs(env)
+        for (k, v) in expandedEnv.sorted(by: { $0.key < $1.key }) {
             args += ["-e", "\(k)=\(v)"]
         }
         if interactive {

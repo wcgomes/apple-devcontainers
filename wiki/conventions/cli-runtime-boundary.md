@@ -82,6 +82,12 @@ Set on create and use for reuse/inspect:
 | Label `devcontainer.config_file` | Config file identity |
 | App config hash label | Detect config drift / recreate need |
 
+**Naming rules**
+
+- **Human base:** `sanitize(devcontainer.json name)` if present and non-empty after trim; else `sanitize(workspace folder basename)`. DNS-safe: lowercase; non-`[a-z0-9-]` → `-`; trim hyphens; clip base ~20 chars. `name` drives identity when set (not metadata-only).
+- **Container name:** `adev-{base}-{hash12}` where `hash12` hashes workspace path + config path; empty base → `adev-{hash12}`; full name ≤63 chars.
+- **Features derived image tag:** `adev-{base}:{hash12}` where `hash12` is the content hash of base image + features; empty base → `adevcontainer:{hash12}`. No `adevcontainer/features:` prefix and no `/features` path segment. Config `image` without a Features build is left as written.
+
 Do not depend on Docker-style `ps --filter label=` as the primary discovery mechanism ([gaps](../domain/devcontainer-apple-gaps.md)).
 
 ## Named volumes on `up` (ensure / reuse)
@@ -99,7 +105,7 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 | Workspace container | Yes |
 | Named volumes from config `mounts` (`type=volume`) | Yes |
 | Config `image` reference | Yes |
-| Derived Features tags (`adevcontainer/features:*`) | **No** — not removed unless the tag equals config `image` |
+| Derived Features tags (`adev-{base}:{hash12}` / `adevcontainer:{hash12}`) | **No** — not removed unless the tag equals config `image` |
 | Bind-mount host paths | **No** |
 | Global `volume prune` / `image prune` | **No** |
 
@@ -116,8 +122,8 @@ On `up` when `features` is non-empty (code: `Sources/ADevContainerLib/Features/`
 | build.rosetta | Before fetch/build: ensure Apple BuildKit `build.rosetta=false`. Already false → silent. True/missing → one-time TTY consent (or fail); CI auto-accept via `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`. Never install Rosetta; never restore `true` after consent |
 | Fetch / load | **Local path:** validate package (`devcontainer-feature.json` + `install.sh`) and copy into feature cache. **OCI:** embedded HTTPS client (`OCIFeatureClient`) — **not** `container image pull`, ORAS, or Node |
 | Order | `dependsOn` / `installsAfter` topo-sort (id last-segment match so `./x/sample-a` satisfies `…/sample-a:1`); cycle → structured error |
-| Build | Generate Dockerfile (`RUN` each `install.sh` as root); `container build --platform` host-native (`linux/arm64` on Apple Silicon) via AppleContainerRuntime; **no** `--rosetta` unless user opted in via `runArgs`; deterministic derived tag `adevcontainer/features:<hash>`; reuse when tag exists |
-| Merge | Feature contributions into effective config before create (`init`, `capAdd`, mounts, lifecycle hooks; `containerEnv` **config wins**). Expand `${PATH}` / `$PATH` in env values on create (Apple container does not expand them) |
+| Build | Generate Dockerfile (`RUN` each `install.sh` as root); `container build --platform` host-native (`linux/arm64` on Apple Silicon) via AppleContainerRuntime; **no** `--rosetta` unless user opted in via `runArgs`; deterministic derived tag `adev-{base}:{hash12}` (empty base → `adevcontainer:{hash12}`; no `adevcontainer/features:` prefix); reuse when tag exists |
+| Merge | Feature contributions into effective config before create (`init`, `capAdd`, mounts, lifecycle hooks; `containerEnv` **config wins**). PATH refs in env expanded on create **and** exec — see PATH expansion |
 | Create | Workspace container from **derived image** with same `--platform` |
 | Skip | Reuse-running path: no feature fetch/build |
 
@@ -127,6 +133,19 @@ On `up` when `features` is non-empty (code: `Sources/ADevContainerLib/Features/`
 
 Progress lines: `==> Resolving features`, `==> Fetching features`, `==> Building features` (or Reusing); `==> Configuring native arm64 builds (build.rosetta=false)` only when changing config.
 
+## PATH expansion (`containerEnv`)
+
+Apple `container` does **not** expand `${PATH}` / `$PATH` in env values. Product expands them on **both** create and exec via the same helper (`expandEnvPathRefs`):
+
+| Path | Where |
+|------|--------|
+| Create | `CreateRequest` / create argv env |
+| Exec | `AppleContainerRuntime.exec` (lifecycle hooks + `adevcontainer exec`) |
+
+**Why exec matters:** Features often set e.g. `PATH=/usr/local/share/nvm/current/bin:${PATH}`. If only create expands, `container exec` passes a literal `${PATH}` → no `/bin`/`/usr/bin`. Lifecycle uses `sh -lc` (login shell); profile tools need `id`/`bash` on PATH → failures like `id: not found`, `[: Illegal number:`, `bash: not found` (exit 127) on `postCreateCommand`.
+
+**Test:** `execEnvExpandsPathRefs` (unit).
+
 ## Progress / tee
 
 - Progress status lines on **stderr**: `==> …` (pull, create, start, stop, delete, volume create, Features Resolving/Fetching/Building/Reusing, build.rosetta config when changing, and related long steps).
@@ -135,7 +154,7 @@ Progress lines: `==> Resolving features`, `==> Fetching features`, `==> Building
 
 ## Lifecycle execution (hook matrix)
 
-Hooks run via runtime **exec** into the running container (effective user + workspace folder when set). String or argv-array forms. Omitted properties are no-ops.
+Hooks run via runtime **exec** into the running container (effective user + workspace folder when set). String or argv-array forms. Omitted properties are no-ops. Exec env PATH expansion applies (see PATH expansion).
 
 | `up` path | Hooks |
 |-----------|--------|
@@ -152,6 +171,7 @@ Hooks run via runtime **exec** into the running container (effective user + work
 
 - **Interactive** (`adevcontainer exec` with no command, or with `-i` / `-t` / `-it`): **InteractiveProcessRunner** (inherit stdio) + `container exec -i -t`; default command is `bash`.
 - **Non-interactive** (command exec without those flags): capture stdout/stderr pipes; do **not** pass `-i`/`-t`.
+- Feature/config `containerEnv` on exec expands `${PATH}` / `$PATH` the same as create.
 
 ## Ports
 

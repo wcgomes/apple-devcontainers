@@ -5,7 +5,7 @@ public struct FeaturesRunnerResult: Equatable, Sendable {
     public var orderedRefs: [String]
     /// Fetched packages on disk (same order as fetch; not necessarily install order).
     public var packages: [FetchedFeaturePackage]
-    /// Deterministic local image tag used for create (`adevcontainer/features:<hash>`).
+    /// Deterministic local image tag used for create (`adev-{nameBase}:{hash12}`).
     public var derivedImage: String
     /// True when an existing local tag was reused (no `container build`).
     public var reusedExistingImage: Bool
@@ -56,7 +56,8 @@ public enum FeaturesRunner {
         baseImage: String,
         deps: Dependencies,
         remoteUser: String? = nil,
-        containerUser: String? = nil
+        containerUser: String? = nil,
+        nameBase: String = ""
     ) throws -> FeaturesRunnerResult {
         guard !features.isEmpty else {
             throw CLIError(
@@ -106,7 +107,11 @@ public enum FeaturesRunner {
             contributions = unionContributions(labelContrib, contributions)
         }
 
-        let derivedImage = DerivedImageTag.compute(baseImage: baseImage, ordered: ordered)
+        let derivedImage = DerivedImageTag.compute(
+            baseImage: baseImage,
+            ordered: ordered,
+            nameBase: nameBase
+        )
 
         if try deps.runtime.imageExists(ref: derivedImage) {
             StatusPrinter.status("Reusing features image \(derivedImage)")

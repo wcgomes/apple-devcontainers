@@ -2,14 +2,15 @@ import Foundation
 
 /// Deterministic local image tag for a features-derived image.
 ///
-/// Format: `adevcontainer/features:<hash12>`
+/// Format: `adev-{nameBase}:{hash12}` (fallback `adevcontainer:{hash12}` when nameBase is empty).
 /// Hash material: base image + ordered feature refs + options (stable canonical JSON via ContainerIdentity).
 public enum DerivedImageTag {
-    public static let repository = "adevcontainer/features"
+    public static let emptyBaseFallback = "adevcontainer"
 
     public static func compute(
         baseImage: String,
-        ordered: [FeatureOrder.OrderedFeature]
+        ordered: [FeatureOrder.OrderedFeature],
+        nameBase: String
     ) -> String {
         var featuresMaterial: [[String: Any]] = []
         for f in ordered {
@@ -34,6 +35,7 @@ public enum DerivedImageTag {
         ]
         let hash = ContainerIdentity.configHash(from: material)
         let short = String(hash.prefix(12))
-        return "\(repository):\(short)"
+        let repo = nameBase.isEmpty ? emptyBaseFallback : "adev-\(nameBase)"
+        return "\(repo):\(short)"
     }
 }

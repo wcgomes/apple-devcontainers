@@ -1,0 +1,30 @@
+{
+  "name": "adevcontainer",
+  // Official Swift (Docker Hub library)
+  "image": "swift:6.3.3-noble",
+  "hostRequirements": {
+    "cpus": 4,
+    "memory": "8gb"
+  },
+  "features": {
+    // Node/npm required by .devcontainer/install-tools.sh (codegraph CLI).
+    // opencode + agents-workspace do not install Node.
+    "ghcr.io/devcontainers/features/node:2.1.0": {
+      "version": "lts"
+    },
+    "ghcr.io/wcgomes/devcontainer-features/opencode:0": {},
+    "ghcr.io/wcgomes/devcontainer-features/agents-workspace:0": {
+      "divisions": "engineering,testing,security"
+    }
+  },
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  // Keep-alive is injected by adevcontainer (`/bin/sleep infinity`); no overrideCommand.
+  "postCreateCommand": "bash .devcontainer/install-tools.sh && swift package resolve",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "swiftlang.swift-vscode"
+      ]
+    }
+  }
+}

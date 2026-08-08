@@ -49,13 +49,15 @@ devcontainer.json → Config resolver → [Features runner] → AppleContainerRu
 | `prune` | Remove container **and** named volumes from config **and** config image (not binds; not global prune) |
 | `inspect` | Show resolved identity/state |
 
-**delete vs prune:** `delete` drops the workspace container only. `prune` also removes config `type=volume` mounts and the config `image` reference. Neither deletes bind-mount host paths or runs global `volume`/`image` prune. Derived Features tags (`adevcontainer/features:*`) are not removed by `prune` unless they equal the config `image` field.
+**delete vs prune:** `delete` drops the workspace container only. `prune` also removes config `type=volume` mounts and the config `image` reference. Neither deletes bind-mount host paths or runs global `volume`/`image` prune. Derived Features tags (`adev-{base}:{hash12}` / `adevcontainer:{hash12}`) are not removed by `prune` unless they equal the config `image` field.
 
 **Progress:** long ops print `==> …` progress lines on stderr and tee Apple `container` stderr (pull/create/start/stop/delete/volume create; Features: Resolving/Fetching/Building/Reusing; build.rosetta config when changing). `ADEVCONTAINER_QUIET=1` silences progress status.
 
 ## Identity
 
-- Deterministic container name derived from workspace + config; Apple `container create --name` is the container **id**.
+- **Human base:** sanitize(`devcontainer.json` `name`) when non-empty after trim; else sanitize(workspace folder basename). DNS-safe (lowercase, non-`[a-z0-9-]` → `-`, trim hyphens, base ~20 chars).
+- **Container name:** `adev-{base}-{hash12}` (`hash12` from workspace path + config path); empty base → `adev-{hash12}`; ≤63 chars. Apple `container create --name` is the container **id**.
+- **Features derived tag** (when Features build runs): `adev-{base}:{hash12}` (content hash of base image + features); empty base → `adevcontainer:{hash12}`. No `adevcontainer/features:` prefix. Plain config `image` (no Features) is unchanged.
 - Labels: `devcontainer.local_folder`, `devcontainer.config_file`, app config hash.
 - Enables find/reuse without Docker-style label filter APIs (list has no label filter — client-side filter). See [gaps](domain/devcontainer-apple-gaps.md).
 
@@ -83,7 +85,7 @@ Shipped under `Sources/ADevContainerLib/Features/`. On `up` with a non-empty `fe
 2. One-time consent for `build.rosetta=false` when needed (CI: `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`).
 3. Load local packages or fetch OCI over HTTPS (embedded client).
 4. Order via `dependsOn` / `installsAfter`; build derived image via `container build --platform linux/arm64`; reuse tag when unchanged.
-5. Create from derived image; merge contributions (env **config wins**, `${PATH}` expansion).
+5. Create from derived image; merge contributions (env **config wins**, `${PATH}` expansion on create and later exec).
 
 Full runner steps, reject list, and progress lines: [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md).
 
@@ -94,7 +96,9 @@ Full runner steps, reject list, and progress lines: [cli-runtime-boundary.md](co
 
 ## Reference config
 
-Team sample: `reference/devcontainer.json` — dotnet image, features (incl. docker-ood), privileged+tun `runArgs`, mounts, `postCreateCommand`, `forwardPorts`, VS Code customizations. Several props are explicitly rejected; see [0002](decisions/0002-reject-docker-ood-privileged-tun.md) and [gaps](domain/devcontainer-apple-gaps.md).
+- **Workspace self-devcontainer:** `.devcontainer/devcontainer.json` — `swift:6.3.3-noble` plus OCI Features (`opencode`, `agents-workspace`) for Linux Swift tooling + product fixture; not full macOS product build/test. Detail: [workspace-devcontainer.md](conventions/workspace-devcontainer.md).
+- **Team sample (reject surface):** `reference/devcontainer.json` — dotnet image, features (incl. docker-ood), privileged+tun `runArgs`, mounts, `postCreateCommand`, `forwardPorts`, VS Code customizations. Several props are explicitly rejected; see [0002](decisions/0002-reject-docker-ood-privileged-tun.md) and [gaps](domain/devcontainer-apple-gaps.md).
+
 
 ## Out of scope (product shape)
 

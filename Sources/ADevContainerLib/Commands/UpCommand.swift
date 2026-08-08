@@ -110,12 +110,17 @@ public enum UpCommand {
                 cacheRoot: cacheRoot,
                 platform: platform
             )
+            let nameBase = ContainerIdentity.humanBase(
+                configName: resolved.config.name,
+                workspacePath: resolved.workspacePath
+            )
             let featuresResult = try FeaturesRunner.run(
                 features: resolved.config.features,
                 baseImage: resolved.config.image,
                 deps: deps,
                 remoteUser: resolved.config.remoteUser,
-                containerUser: resolved.config.containerUser
+                containerUser: resolved.config.containerUser,
+                nameBase: nameBase
             )
             // Create uses derived image; merge runtime contributions from feature metadata.
             effectiveConfig = try FeatureContributionMerge.apply(

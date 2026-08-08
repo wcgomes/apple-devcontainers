@@ -122,7 +122,7 @@ The Features path mirrors official Dev Containers (Dockerfile + `container build
 1. **One-time consent** (only if needed): when Apple BuildKit still has `build.rosetta=true` (or the key is missing), `up` explains and asks once to set `build.rosetta=false` in the host Apple container config so feature image builds do not require Rosetta. Already `false` → silent. Decline → fail. Non-interactive: set `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1` to auto-accept, or set the config yourself.
 2. Loads local path packages from disk into the feature cache, or fetches OCI artifacts over HTTPS (embedded registry client — **not** `container image pull`, ORAS, or Node)
 3. Orders installs via `dependsOn` / `installsAfter` (id last-segment match so `./x/sample-a` satisfies `…/sample-a:1`) and merges runtime contributions (`init`, `capAdd`, `containerEnv` with **config wins**, mounts, lifecycle hooks). On create, `${PATH}` / `$PATH` in env values are expanded (Apple `container` does not expand them).
-4. Generates a Dockerfile and runs `container build --platform linux/arm64` (on Apple Silicon) to a deterministic `adevcontainer/features:<hash>` tag (reuse when the tag already exists)
+4. Generates a Dockerfile and runs `container build --platform linux/arm64` (on Apple Silicon) to a deterministic `adev-{base}:{hash12}` tag (empty base → `adevcontainer:{hash12}`; no `adevcontainer/features:` prefix; reuse when the tag already exists)
 5. Creates from the **derived image** with the same platform flag, then runs lifecycle hooks
 
 **Forever-reject:** any feature ref containing `docker-outside-of-docker`, `docker-in-docker`, or `docker-from-docker` (OCI or local path); feature metadata with `privileged: true` or `securityOpt`.

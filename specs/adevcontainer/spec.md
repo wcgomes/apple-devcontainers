@@ -84,7 +84,7 @@ Unsupported substitution tokens MUST cause a structured error naming the token. 
 The CLI MUST accept and honor the property surface below. Properties outside this surface that are forever-rejected or unknown-dangerous MUST hard-error (see Unsupported property policy). Benign editor metadata MAY be ignored per that policy.
 
 **Image & workspace**
-- `name` (optional label; MAY be stored)
+- `name` (optional; when non-empty after trim, drives the human base of deterministic container/image identity — see Deterministic identity and labels)
 - `image` (required for image-based workspaces)
 - Implicit workspace bind: host workspace root → container workspace folder
 
@@ -165,7 +165,9 @@ The CLI MUST fail closed on unsupported or forever-rejected configuration. Error
 
 **May ignore or store as metadata (MUST NOT fail parse)**
 - `customizations.vscode` (and nested extensions/settings)
-- Optional `name` as today
+
+**Not pure metadata (identity-affecting)**
+- Optional `name` — when non-empty after trim, MUST drive the human base of container name and Features derived tag (see Deterministic identity and labels); MUST NOT fail parse
 
 **No longer pure-ignore**
 - `hostRequirements` — MUST evaluate per **hostRequirements preflight** (not silent ignore)
@@ -233,7 +235,22 @@ The CLI MUST fail closed on unsupported or forever-rejected configuration. Error
 
 ### Requirement: Deterministic identity and labels
 
-On create, the CLI MUST assign a deterministic container name derived from workspace path and config identity, and MUST set labels:
+On create, the CLI MUST assign a deterministic container name and MUST set labels. Apple `container create --name` MUST equal the container id used for later inspect/exec/stop/delete.
+
+**Human base**
+
+1. If `devcontainer.json` `name` is present and non-empty after trim → sanitize that value.
+2. Else → sanitize the workspace folder basename.
+
+Sanitize MUST be DNS-safe: lowercase; replace each run of characters outside `[a-z0-9-]` with `-`; trim leading/trailing hyphens; clip the base to about 20 characters (same policy as the implementation).
+
+**Container name**
+
+- Format: `adev-{base}-{hash12}` where `hash12` is a 12-character hash of workspace path + config path (unchanged material).
+- If the human base is empty after sanitize → `adev-{hash12}`.
+- The full name MUST be ≤ 63 characters.
+
+**Labels**
 
 | Label | Purpose |
 |-------|---------|
@@ -245,10 +262,22 @@ Discovery and reuse MUST prefer deterministic name + inspect, NOT Docker-style `
 
 When `features` is present, config hash material MUST include the selected feature refs, options, and ordered identity inputs. Changing features MUST change config hash so reuse and drift detection remain correct (recreate when features change).
 
+`name` is not metadata-only: when set (non-empty after trim), it MUST drive the human base used for the container name and for Features derived image tags.
+
 #### Scenario: Stable name across invocations
 - Given the same workspace path and config content
 - When `up` is invoked twice without delete
 - Then the second invocation reuses the same container identity rather than creating a conflicting duplicate
+
+#### Scenario: Container name uses config name when set
+- Given a config with `"name": "My App"` and a workspace folder basename `other-folder`
+- When the container name is computed
+- Then the human base is derived from `My App` (sanitized), not from `other-folder`, and the name matches `adev-{base}-{hash12}` (or is clipped to ≤ 63 characters)
+
+#### Scenario: Container name falls back to workspace basename
+- Given a config with no `name` (or only whitespace)
+- When the container name is computed
+- Then the human base is the sanitized workspace folder basename and the name matches `adev-{base}-{hash12}` (empty base → `adev-{hash12}`)
 
 #### Scenario: Labels present on inspect
 - Given a container created by `up`
@@ -865,9 +894,11 @@ When `features` is non-empty after admission, on a fresh create path the product
    - `linux/arm64` when the host is arm64 / aarch64 (product default on Apple Silicon)
    - `linux/amd64` only when the host is x86_64
 4. **Build** a derived image with Apple `container build` from a **generated Dockerfile** that `FROM`s the base image and `RUN`s each feature `install.sh` **as root** (options / `_REMOTE_USER` / `_CONTAINER_USER` env). Build argv MUST include the same host-native **`--platform`**.
-5. **Tag** a deterministic local image (`adevcontainer/features:<hash>`); **reuse** when that tag already exists locally (skip rebuild).
+5. **Tag** a deterministic local image as `adev-{base}:{hash12}`, where `base` is the same human base as container identity and `hash12` is a 12-character content hash of base image + features (unchanged material). If `base` is empty → `adevcontainer:{hash12}`. MUST NOT use an `adevcontainer/features:` prefix or a `/features` path segment. **Reuse** when that tag already exists locally (skip rebuild).
 6. **Create** the workspace container **from the derived image** (not the raw config `image`) with the same **`--platform`**. Contributions that affect create flags (`init`, `capAdd`, env, mounts) MUST be merged **before** create.
 7. **Start** the container, then run lifecycle hooks (onCreate → …) as today.
+
+When `features` is absent or empty, create MUST continue to use the config `image` reference as written (no derived tag).
 
 **MUST NOT** pass `--rosetta` on Features pull/build/create unless the user opted in via `runArgs`.
 
@@ -878,7 +909,12 @@ Reuse running / start stopped: MUST NOT re-fetch/rebuild features (already baked
 #### Scenario: Create uses derived image after build
 - Given a config with `image` and one OCI feature
 - When the user runs `up` on a fresh create path (fetch/build available or mocked success)
-- Then `container build` runs with `--platform linux/arm64` on arm64 hosts, create uses `adevcontainer/features:<hash>`, and lifecycle hooks run after start
+- Then `container build` runs with `--platform linux/arm64` on arm64 hosts, create uses the derived tag `adev-{base}:{hash12}` (or `adevcontainer:{hash12}` when base is empty), and lifecycle hooks run after start
+
+#### Scenario: Derived tag has no features path prefix
+- Given a Features build with a non-empty human base
+- When the derived image tag is computed
+- Then the tag is `adev-{base}:{hash12}` and MUST NOT contain `adevcontainer/features` or a `/features` path segment
 
 #### Scenario: Build and pull never pass --rosetta by default
 - Given Features pull/build on the up path

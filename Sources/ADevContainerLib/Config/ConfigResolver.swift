@@ -77,7 +77,11 @@ public enum ConfigResolver {
         let normalized = MountNormalizer.normalize(mounts: resolved.mounts, fileManager: fileManager)
         resolved.mounts = normalized.mounts
         let hash = ContainerIdentity.configHash(from: resolved.hashMaterial())
-        let name = ContainerIdentity.containerName(workspacePath: workspace, configPath: path)
+        let name = ContainerIdentity.containerName(
+            workspacePath: workspace,
+            configPath: path,
+            configName: resolved.name
+        )
         let labels = ContainerIdentity.labels(
             workspacePath: workspace,
             configPath: path,
