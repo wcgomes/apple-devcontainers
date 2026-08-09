@@ -12,9 +12,14 @@ let package = Package(
         // (CLT hosts lack XCTest.framework; this Foundation MiniTest runner is the suite.)
         .executable(name: "adevcontainerTests", targets: ["adevcontainerTests"])
     ],
+    dependencies: [
+        // Cross-platform Crypto (CryptoKit re-exported on Apple platforms).
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "4.5.1")
+    ],
     targets: [
         .target(
             name: "ADevContainerLib",
+            dependencies: [.product(name: "Crypto", package: "swift-crypto")],
             path: "Sources/ADevContainerLib"
         ),
         .executableTarget(

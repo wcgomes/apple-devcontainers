@@ -1,4 +1,5 @@
 import Foundation
+import FoundationNetworking
 
 /// Client-side discovery of clone-managed containers (`devcontainer.managed=adevcontainer`).
 public enum ManagedContainers {
@@ -69,7 +70,7 @@ public struct InteractivePicker: Sendable {
     public init(
         isInteractive: Bool,
         readLine: @escaping @Sendable () -> String?,
-        writeError: @escaping @Sendable (String) -> Void = { fputs($0, stderr) }
+        writeError: @escaping @Sendable (String) -> Void = { FileHandle.standardError.write(Data($0.utf8)) }
     ) {
         self.isInteractive = isInteractive
         self.readLine = readLine
@@ -116,7 +117,7 @@ public struct IdentityPrompt: Sendable {
     public init(
         isInteractive: Bool,
         readLine: @escaping @Sendable () -> String?,
-        writeError: @escaping @Sendable (String) -> Void = { fputs($0, stderr) }
+        writeError: @escaping @Sendable (String) -> Void = { FileHandle.standardError.write(Data($0.utf8)) }
     ) {
         self.isInteractive = isInteractive
         self.readLine = readLine

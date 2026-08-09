@@ -1,4 +1,5 @@
 import Foundation
+import FoundationNetworking
 @testable import ADevContainerLib
 
 enum IntegrationSupport {

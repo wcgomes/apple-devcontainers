@@ -1,5 +1,5 @@
 import Foundation
-import CryptoKit
+import Crypto
 
 public enum ContainerIdentity {
     public static let labelLocalFolder = "devcontainer.local_folder"
@@ -286,10 +286,7 @@ public enum ContainerIdentity {
             return Data((b ? "true" : "false").utf8)
         }
         if let n = value as? NSNumber {
-            // Distinguish bool boxed as NSNumber
-            if CFGetTypeID(n) == CFBooleanGetTypeID() {
-                return Data((n.boolValue ? "true" : "false").utf8)
-            }
+            // Bool is caught above; NSNumber always serializes as a number.
             return Data("\(n)".utf8)
         }
         if value is NSNull {

@@ -1,4 +1,5 @@
 import Foundation
+import FoundationNetworking
 
 /// Embedded OCI distribution client for Dev Container **feature artifacts**.
 ///

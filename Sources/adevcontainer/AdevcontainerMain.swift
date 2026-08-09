@@ -9,10 +9,10 @@ struct AdevcontainerMain {
             let code = try dispatch(args: args)
             exit(code)
         } catch let error as CLIError {
-            fputs(error.formatted() + "\n", stderr)
+            FileHandle.standardError.write(Data((error.formatted() + "\n").utf8))
             exit(error.exitCode)
         } catch {
-            fputs("error[internal]: \(error.localizedDescription)\n", stderr)
+            FileHandle.standardError.write(Data(("error[internal]: \(error.localizedDescription)\n").utf8))
             exit(1)
         }
     }

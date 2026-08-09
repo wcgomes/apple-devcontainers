@@ -139,7 +139,8 @@ public enum CloneCommand {
         }
 
         if !resolved.mountPromotions.isEmpty {
-            fputs(MountNormalizer.warningMessage(promotions: resolved.mountPromotions) + "\n", stderr)
+            let warning = MountNormalizer.warningMessage(promotions: resolved.mountPromotions) + "\n"
+            FileHandle.standardError.write(Data(warning.utf8))
         }
 
         // Confirm/collect author identity before Features build / image pull / create.

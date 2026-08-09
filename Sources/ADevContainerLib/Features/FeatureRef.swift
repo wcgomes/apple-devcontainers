@@ -40,12 +40,8 @@ public enum FeatureOptionValue: Equatable, Sendable {
             self = .bool(b)
             return
         }
-        // NSNumber may box Bool — distinguish.
+        // Bool was handled above; NSNumber is always numeric.
         if let n = json as? NSNumber {
-            if CFGetTypeID(n) == CFBooleanGetTypeID() {
-                self = .bool(n.boolValue)
-                return
-            }
             self = .number(n.doubleValue)
             return
         }
