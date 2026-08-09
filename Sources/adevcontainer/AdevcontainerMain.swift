@@ -339,8 +339,7 @@ struct AdevcontainerMain {
 
         VS Code (--vscode on up/start/clone):
           - Best-effort open of a new window on the resolved remote workspace folder.
-          - Requires host VS Code + Remote - Containers + experimental Apple support
-            (dev.containers.experimentalAppleContainerSupport) and a discoverable `code` CLI.
+          - Requires host VS Code with Remote - Containers and a discoverable `code` CLI.
           - Missing `code` or launch failure warns on stderr; open alone does not fail lifecycle.
           - postAttachCommand runs only after successful open; skipped without flag or on open
             soft-fail (status when present). postAttach non-zero fails command but keeps container.
@@ -375,8 +374,8 @@ struct AdevcontainerMain {
             so the container appears in list and lifecycle commands (--name / picker).
 
             --vscode: best-effort open a new VS Code window on the remote workspace
-            (requires VS Code + Remote - Containers + experimental Apple support and
-            a `code` CLI). Soft-fails with a stderr warning; open alone does not fail up.
+            (requires VS Code with Remote - Containers and a `code` CLI). Soft-fails with
+            a stderr warning; open alone does not fail up.
             postAttachCommand runs only after successful open; skipped without flag /
             open soft-fail; postAttach failure fails up but keeps the container.
             customizations.vscode.settings apply on create-path (not gated on open);
