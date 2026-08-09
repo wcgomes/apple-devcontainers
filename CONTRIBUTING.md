@@ -1,5 +1,9 @@
 # Contributing
 
+## Contributing with AI agents
+
+If you are contributing with AI agents, ideally use [agents-workspace](https://github.com/wcgomes/agents-workspace), the devcontainer Feature already declared in this repo's `.devcontainer/devcontainer.json`. It can help with the workflow, but its main value is the wiki-maintenance and spec-builder skills that keep this repo's docs and specs consistent with the repo's standards: spec-driven changes land in `specs/`, realized knowledge in `wiki/`.
+
 ## Prerequisites
 
 - [Install requirements](README.md#install) (macOS 26+ Apple Silicon, Apple `container`)
