@@ -197,9 +197,6 @@ public struct FeatureMetadata: Equatable, Sendable {
 
     private static func boolValue(_ any: Any?) -> Bool? {
         if let b = any as? Bool { return b }
-        if let n = any as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() {
-            return n.boolValue
-        }
         return nil
     }
 }

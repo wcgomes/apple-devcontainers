@@ -167,8 +167,8 @@ public enum AppleContainerConfig {
             )
         }
 
-        fputs(message, stderr)
-        fflush(stderr)
+        FileHandle.standardError.write(Data(message.utf8))
+        // Prompt must be visible before readLine: FileHandle writes are unbuffered (no fflush needed).
         let line = options.readLine()?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         // Empty or Y/y → accept; n/N/no → decline
         let lowered = line.lowercased()

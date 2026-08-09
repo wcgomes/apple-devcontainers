@@ -31,8 +31,9 @@ public enum ContainerPlatform {
     private static func platformFromUname() -> String {
         var uts = utsname()
         uname(&uts)
+        let machineCapacity = MemoryLayout.size(ofValue: uts.machine)
         let machine = withUnsafePointer(to: &uts.machine) {
-            $0.withMemoryRebound(to: CChar.self, capacity: Int(_SYS_NAMELEN)) {
+            $0.withMemoryRebound(to: CChar.self, capacity: machineCapacity) {
                 String(cString: $0)
             }
         }

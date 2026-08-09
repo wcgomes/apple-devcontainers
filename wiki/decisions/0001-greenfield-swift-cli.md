@@ -2,7 +2,7 @@
 
 ## Context
 
-Need a macOS CLI that reads `devcontainer.json` and runs dev workspaces on Apple’s `container` stack. Upstream [@devcontainers/cli](https://github.com/devcontainers/cli) is Node-based and Docker/Moby-oriented. Target host: macOS 26+ arm64. **Install separately:** Swift 6.x toolchain (Command Line Tools suffice) and Apple `container` CLI ([apple/container](https://github.com/apple/container); tested against 1.2.x machine JSON). `doctor` validates presence and system status.
+Need a macOS CLI that reads `devcontainer.json` and runs dev containers on Apple’s `container` stack. Upstream [@devcontainers/cli](https://github.com/devcontainers/cli) is Node-based and Docker/Moby-oriented. Target host: macOS 26+ arm64. **Install separately:** Swift 6.x toolchain (Command Line Tools suffice) and Apple `container` CLI ([apple/container](https://github.com/apple/container); tested against 1.2.x machine JSON). `doctor` validates presence and system status.
 
 ## Decision
 

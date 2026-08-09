@@ -1,5 +1,5 @@
 import Foundation
-import CryptoKit
+import Crypto
 
 /// Layout for fetched feature packages under a product-controlled cache root.
 ///

@@ -7,13 +7,13 @@ public enum StatusPrinter {
 
     public static func status(_ message: String) {
         guard enabled else { return }
-        fputs("==> \(message)\n", stderr)
+        FileHandle.standardError.write(Data("==> \(message)\n".utf8))
     }
 
     /// Volume-style warning line on stderr (`warning: …`). Honors `enabled`.
     public static func warning(_ message: String) {
         guard enabled else { return }
-        fputs("warning: \(message)\n", stderr)
+        FileHandle.standardError.write(Data("warning: \(message)\n".utf8))
     }
 }
 

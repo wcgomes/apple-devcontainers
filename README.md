@@ -1,12 +1,16 @@
 # Apple Dev Container CLI (adevcontainer)
 
 [![CI](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml/badge.svg)](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-245%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
+[![tests](https://img.shields.io/badge/tests-345%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Native Swift CLI that reads `devcontainer.json` and runs workspaces on **Apple `container`**.
+Native Swift CLI that reads `devcontainer.json` and runs dev containers on **Apple `container`**.
 
-Bring up a workspace with `clone <git-url>` (named volume, faster I/O) or `up` on an existing checkout. Use the terminal (or AI agents) as-is, or pass `--vscode` to open VS Code with extensions and settings applied. Lifecycle hooks and Features included.
+Start a dev container with `up` on an existing local folder, or `clone <git-url>` for a named volume with faster I/O. Use the terminal or AI agents as-is, or pass `--vscode` to open VS Code with extensions and settings applied. Lifecycle hooks and Features included.
+
+## Context
+
+A dev container is a full-featured development environment isolated in a container — the tools, runtimes, and libraries your codebase needs, all reproducible. Use it to run an application, separate toolchains, or drive CI builds. `adevcontainer` brings that workflow to Apple `container` on macOS.
 
 ## Install
 
@@ -35,7 +39,7 @@ sudo mv adevcontainer /usr/local/bin/   # or ~/bin on PATH
 
 ### From source
 
-See [Contributing](#contributing). After a release build: `cp .build/release/adevcontainer /usr/local/bin/`.
+See [CONTRIBUTING.md](CONTRIBUTING.md). After a release build: `cp .build/release/adevcontainer /usr/local/bin/`.
 
 After install:
 
@@ -50,15 +54,15 @@ adevcontainer doctor
 | Command | Purpose |
 |---------|---------|
 | `adevcontainer doctor` | Check Apple `container` readiness |
-| `adevcontainer up [-w path] [--vscode]` | Create/start workspace from a **host** checkout (only command that uses `-w`; default cwd) |
-| `adevcontainer clone <git-url> [--vscode]` | Clone a git repo into a **named volume** and start the devcontainer (HTTPS or SSH) |
-| `adevcontainer list [--json]` | List managed containers |
-| `adevcontainer start [--vscode] \| stop \| delete \| prune \| inspect [--name]` | Lifecycle by container name (or interactive picker) |
-| `adevcontainer exec [-it] [--name] [--] [cmd…]` | Shell or command in a running managed container |
+| `adevcontainer up [-w path] [--vscode]` | Create/start a dev container from a **host** folder (only command that uses `-w`; default cwd) |
+| `adevcontainer clone <git-url> [--vscode]` | Clone a git repo into a **named volume** and start the dev container (HTTPS or SSH) |
+| `adevcontainer list [--json]` | List managed dev containers |
+| `adevcontainer start [--vscode] \| stop \| delete \| prune \| inspect [--name]` | Lifecycle by dev container name (or interactive picker) |
+| `adevcontainer exec [-it] [--name] [--] [cmd…]` | Shell or command in a running managed dev container |
 
 ### Quick start
 
-**Local checkout** (`up`):
+**Local checkout** (`up`) — uses the current directory by default; pass `-w <path>` for another folder:
 
 ```bash
 adevcontainer up --vscode
@@ -168,37 +172,4 @@ Only `AppleContainerRuntime` shells out to `container`.
 
 ## Contributing
 
-### Prerequisites
-
-- [Install requirements](#install) (macOS 26+ Apple Silicon, Apple `container`)
-- Swift 6.x toolchain
-- Integration tests expect `container` system status `running` (typical path `/usr/local/bin/container`; tested **1.2.x**)
-
-### Build from source
-
-```bash
-swift build
-# binary: .build/debug/adevcontainer
-
-swift build -c release
-# binary: .build/release/adevcontainer
-```
-
-### Tests
-
-Command Line Tools hosts do not ship `XCTest.framework`, so the suite of record is the Foundation MiniTest executable `adevcontainerTests` (plain `swift test` may report “no tests found” without full Xcode):
-
-```bash
-swift run adevcontainerTests
-```
-
-Covers discovery, JSONC, substitution, admission, lifecycle, runArgs, hostRequirements, Features, runtime mocks, commands, and clone/volume-mode (plus optional real-container integration).
-
-- Integration skips cleanly if Apple `container` is unavailable.
-- Local features E2E runs when Apple `container` is up (no ghcr gate).
-- Override image: `ADEVCONTAINER_TEST_IMAGE`.
-- Optional live OCI Features E2E: `ADEVCONTAINER_FEATURES_E2E=1`.
-
-### Fixtures
-
-Pure JSON samples under [`Tests/Fixtures/`](Tests/Fixtures/), including smoke, env/user, mounts/ports, lifecycle hooks, runArgs/hostRequirements, OCI and local Features, and forever-reject cases (e.g. docker-ood). On-disk sample feature packages live under `Tests/Fixtures/features-sample/`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for prerequisites, building from source, running tests, fixtures, and working inside the repo's devcontainer.
