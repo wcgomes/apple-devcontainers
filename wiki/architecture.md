@@ -140,7 +140,7 @@ v1: **config-file only** (not feature-contributed / image `devcontainer.metadata
 
 Malformed nested `extensions`/`settings` types soft-skip apply with warn (do not fail whole-config resolve when `customizations.vscode` is an object). Other `customizations.*` namespaces remain non-applied metadata. **Apple attach does not auto-install** — CLI apply does.
 
-**Prereqs (host):** VS Code + extension `ms-vscode-remote.remote-containers`; setting `dev.containers.experimentalAppleContainerSupport: true`.
+**Prereqs (host):** VS Code + extension `ms-vscode-remote.remote-containers`.
 
 **Inputs from a running managed container** (name = id on Apple container): container id/name, image ref, remote workspace folder (as above).
 

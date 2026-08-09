@@ -13,7 +13,7 @@ Facts that constrain the CLI. Not a full Apple container manual — only gaps th
 | Features | OCI + local path feature packages + image build | **Supported** (OCI + local path runner); forever-reject `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker`; native arm64 build (no Rosetta by default) |
 | Events / rich watch APIs | Engine events often used by tools | Do not assume Docker-equivalent event stream |
 | List + label filter | `docker ps --filter label=…` | **No label filter on list** — client-side filter after JSON; prefer deterministic name + inspect; product `list` keeps `devcontainer.managed=adevcontainer` only |
-| VS Code | Dev Containers full up/rebuild + clone-in-volume + IDE-owned customizations apply | **Attach** after CLI bring-up (experimental Apple Container support in Remote - Containers). Product `--vscode` on `up`/`start`/`clone` best-effort opens via `code --folder-uri` (soft-fail). **Apple attach does not auto-install** `customizations.vscode` — CLI applies config-file settings/extensions (see below). Manual attach without flag still valid. Not full Dev Containers parity. Volume-mode via product `clone` (not extension clone-in-volume) |
+| VS Code | Dev Containers full up/rebuild + clone-in-volume + IDE-owned customizations apply | **Attach** after CLI bring-up (Apple Container support in Remote - Containers). Product `--vscode` on `up`/`start`/`clone` best-effort opens via `code --folder-uri` (soft-fail). **Apple attach does not auto-install** `customizations.vscode` — CLI applies config-file settings/extensions (see below). Manual attach without flag still valid. Not full Dev Containers parity. Volume-mode via product `clone` (not extension clone-in-volume) |
 | Default process | Often long-running or sleep entry | Keep-alive `--entrypoint /bin/sleep` + `infinity` for long-lived devcontainers |
 | Create identity | Name vs id often distinct | `create --name` **is** the id (`configuration.id`) |
 | Bind mounts | File or directory host source OK | **Directory sources only** — file binds rejected by runtime |
@@ -61,7 +61,7 @@ After lifecycle success, `up` / `start` / `clone` accept **`--vscode`**: best-ef
 | Piece | Fact |
 |-------|------|
 | Flag | `--vscode` on `up`, `start`, `clone` (post-success only; open soft-fail) |
-| Prereq | VS Code + `ms-vscode-remote.remote-containers`; `dev.containers.experimentalAppleContainerSupport: true` |
+| Prereq | VS Code + `ms-vscode-remote.remote-containers` |
 | Authority | `apple-container+` + hex(UTF-8 compact JSON `{"id","image"}`) — id = create `--name` |
 | Open | `code --new-window --folder-uri "vscode-remote://apple-container+${HEX}${FOLDER}"` |
 | Folder | `remoteWorkspaceFolder` from labels/resolve; default if config omits `workspaceFolder`: `/workspaces/<basename>` |
