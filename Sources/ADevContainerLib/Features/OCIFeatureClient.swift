@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
 import FoundationNetworking
+#endif
 
 /// Embedded OCI distribution client for Dev Container **feature artifacts**.
 ///

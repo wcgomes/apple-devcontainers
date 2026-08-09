@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
 import FoundationNetworking
+#endif
 
 /// Client-side discovery of clone-managed containers (`devcontainer.managed=adevcontainer`).
 public enum ManagedContainers {
