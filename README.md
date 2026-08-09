@@ -56,6 +56,7 @@ adevcontainer doctor
 | `adevcontainer doctor` | Check Apple `container` readiness |
 | `adevcontainer up [-w path] [--vscode]` | Create/start a dev container from a **host** folder (only command that uses `-w`; default cwd) |
 | `adevcontainer clone <git-url> [--vscode]` | Clone a git repo into a **named volume** and start the dev container (HTTPS or SSH) |
+| `adevcontainer rebuild [--name <container>] [--vscode]` | Force-recreate a managed container from its current `devcontainer.json` — bind keeps the name, volume mode keeps the same workspace volume (data preserved) |
 | `adevcontainer list [--json]` | List managed dev containers |
 | `adevcontainer start [--vscode] \| stop \| delete \| prune \| inspect [--name]` | Lifecycle by dev container name (or interactive picker) |
 | `adevcontainer exec [-it] [--name] [--] [cmd…]` | Shell or command in a running managed dev container |
@@ -83,11 +84,18 @@ adevcontainer prune --name <name>
 
 Uses your Mac git credentials (HTTPS helpers / SSH agent), confirms author identity on a TTY, and ensures `git` in the image when needed. Work, commit, and push inside the container.
 
+**Rebuild an existing container** — force-recreate from the container's current `devcontainer.json` (no re-clone). Old container is deleted only after config read, host requirements, and Features succeed; bind keeps the same container name, volume mode keeps the same workspace volume:
+
+```bash
+adevcontainer rebuild --name <name>   # or auto-single / interactive picker
+```
+
 ### Config and workspace behavior
 
 Config: `.devcontainer/devcontainer.json`, else `.devcontainer.json`.
 
 - **`up`** bind-mounts the host folder. **`clone`** uses volume `adev-*-ws` (no host checkout to edit).
+- **`rebuild`** force-recreates from the current config: bind keeps the container name, volume mode reuses the same `adev-*-ws` workspace volume — data preserved, never re-cloned.
 - Config hash mismatch → `up` errors; use `--recreate`.
 - **`delete`** = container only. **`prune`** = container + named volumes (including clone `*-ws`) + config image. Never deletes host bind paths.
 - Progress on **stderr** (`==> …`). `ADEVCONTAINER_QUIET=1` silences it. `--json` keeps stdout clean.
@@ -132,10 +140,11 @@ Preflight on **`up` and `clone`** parses `memory` (`8gb` / `8192mb`) and `cpus`:
 
 ### Features (OCI + local path)
 
-Top-level `features` map (ref → options) on **`up` / `clone`**. Builds a derived image on **native arm64**.
+Top-level `features` map (ref → options) on **`up` / `clone` / `rebuild`**. Builds a derived image on **native arm64**.
 
 - **OCI** — e.g. `ghcr.io/devcontainers/features/node:1`
 - **Local path** — `./…`, `../…`, absolute, or `file://…` (relative to **workspace root**; needs `devcontainer-feature.json` + `install.sh`)
+- **Volume-mode `rebuild`** fetches OCI features only: the host fetcher (`DefaultFeatureFetcher`) and local-path feature refs inside the workspace volume are unsupported there and fail cleanly before the old container is deleted (bind-mode `rebuild` keeps `up` behavior)
 - **Forever-reject:** refs containing `docker-in-docker` / `docker-outside-of-docker` / `docker-from-docker`, or feature metadata with `privileged` / `securityOpt`
 - **Rosetta / BuildKit:** if prompted once to set `build.rosetta=false`, accept — or set `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1` for CI
 

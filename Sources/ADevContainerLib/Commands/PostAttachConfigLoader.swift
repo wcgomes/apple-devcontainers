@@ -12,6 +12,9 @@ import Foundation
 public enum PostAttachConfigLoader {
     /// Best-effort load. Returns nil when labels/paths are insufficient (caller skips postAttach
     /// without a status line — equivalent to “postAttach absent”).
+    ///
+    /// Thin wrapper over the shared `ConfigReader` (best-effort mode): the reader owns the
+    /// dual-mode (bind/volume) label → host file / exec `cat` → temp file logic.
     public static func load(
         labels: [String: String],
         containerId: String,
@@ -20,28 +23,19 @@ public enum PostAttachConfigLoader {
         localEnv: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default
     ) throws -> ResolvedDevContainerConfig? {
-        let mode = labels[ContainerIdentity.labelWorkspaceMode] ?? ContainerIdentity.workspaceModeBind
         let stampedFolder = labels[ContainerIdentity.labelWorkspaceFolder]?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let stampedUser = labels[ContainerIdentity.labelRemoteUser]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        var config: ResolvedDevContainerConfig?
-
-        if mode == ContainerIdentity.workspaceModeVolume {
-            config = try loadVolumeMode(
-                labels: labels,
-                containerId: containerId,
-                runtime: runtime,
-                stampedFolder: stampedFolder
-            )
-        } else {
-            config = try loadBindMode(
-                labels: labels,
-                localEnv: localEnv,
-                fileManager: fileManager
-            )
-        }
+        let config = try ConfigReader.read(
+            labels: labels,
+            containerId: containerId,
+            runtime: runtime,
+            localEnv: localEnv,
+            fileManager: fileManager,
+            mode: .bestEffort
+        )
 
         guard var resolved = config else { return nil }
 
@@ -84,79 +78,5 @@ public enum PostAttachConfigLoader {
         if !meta.postAttachCommands.isEmpty {
             config.featurePostAttachCommands = meta.postAttachCommands
         }
-    }
-
-    // MARK: - Bind
-
-    private static func loadBindMode(
-        labels: [String: String],
-        localEnv: [String: String],
-        fileManager: FileManager
-    ) throws -> ResolvedDevContainerConfig? {
-        let localFolder = labels[ContainerIdentity.labelLocalFolder]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let configFile = labels[ContainerIdentity.labelConfigFile]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !localFolder.isEmpty, !configFile.isEmpty else { return nil }
-        guard fileManager.fileExists(atPath: configFile) else { return nil }
-
-        let resolved = try ConfigResolver.resolve(
-            workspacePath: localFolder,
-            configPath: configFile,
-            localEnv: localEnv,
-            fileManager: fileManager
-        )
-        return resolved.config
-    }
-
-    // MARK: - Volume
-
-    private static func loadVolumeMode(
-        labels: [String: String],
-        containerId: String,
-        runtime: AppleContainerRuntime,
-        stampedFolder: String
-    ) throws -> ResolvedDevContainerConfig? {
-        let configRel = labels[ContainerIdentity.labelConfigFile]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !configRel.isEmpty else { return nil }
-
-        let workspace = !stampedFolder.isEmpty ? stampedFolder : "/workspaces"
-        let pathInContainer: String
-        if configRel.hasPrefix("/") {
-            pathInContainer = configRel
-        } else {
-            pathInContainer = (workspace as NSString).appendingPathComponent(configRel)
-        }
-
-        let result = try runtime.exec(
-            nameOrId: containerId,
-            command: ["cat", pathInContainer],
-            user: nil,
-            workdir: nil,
-            env: [:]
-        )
-        guard result.succeeded else { return nil }
-        let text = result.stdoutString
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-
-        // Write to a temp file so ConfigResolver/JSONCParser can load it.
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("adev-postattach-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-
-        let tempConfig = tempDir.appendingPathComponent("devcontainer.json")
-        try Data(text.utf8).write(to: tempConfig)
-
-        // Basename for default folder: last path component of workspace folder.
-        let basename = (workspace as NSString).lastPathComponent
-        let resolved = try ConfigResolver.resolve(
-            workspacePath: tempDir.path,
-            configPath: tempConfig.path,
-            localEnv: [:],
-            workspaceFolderBasename: basename.isEmpty ? nil : basename
-        )
-        return resolved.config
     }
 }

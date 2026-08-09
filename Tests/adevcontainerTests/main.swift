@@ -35,6 +35,9 @@ let allTests: [(String, () throws -> Void)] = []
     + vscodeCustomizationsParseTests
     + vscodeCustomizationsApplyTests
     + vscodeCustomizationsCommandTests
+    + configReaderTests
+    + rebuildCommandTests
+    + rebuildPhaseTests
     + integrationTests
 
 let code = MiniTest.runAll(allTests)
