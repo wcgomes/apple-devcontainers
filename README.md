@@ -39,7 +39,7 @@ sudo mv adevcontainer /usr/local/bin/   # or ~/bin on PATH
 
 ### From source
 
-See [Contributing](#contributing). After a release build: `cp .build/release/adevcontainer /usr/local/bin/`.
+See [CONTRIBUTING.md](CONTRIBUTING.md). After a release build: `cp .build/release/adevcontainer /usr/local/bin/`.
 
 After install:
 
@@ -172,37 +172,4 @@ Only `AppleContainerRuntime` shells out to `container`.
 
 ## Contributing
 
-### Prerequisites
-
-- [Install requirements](#install) (macOS 26+ Apple Silicon, Apple `container`)
-- Swift 6.x toolchain
-- Integration tests expect `container` system status `running` (typical path `/usr/local/bin/container`; tested **1.2.x**)
-
-### Build from source
-
-```bash
-swift build
-# binary: .build/debug/adevcontainer
-
-swift build -c release
-# binary: .build/release/adevcontainer
-```
-
-### Tests
-
-Command Line Tools hosts do not ship `XCTest.framework`, so the suite of record is the Foundation MiniTest executable `adevcontainerTests` (plain `swift test` may report “no tests found” without full Xcode):
-
-```bash
-swift run adevcontainerTests
-```
-
-Covers discovery, JSONC, substitution, admission, lifecycle, runArgs, hostRequirements, Features, runtime mocks, commands, and clone/volume-mode (plus optional real-container integration).
-
-- Integration skips cleanly if Apple `container` is unavailable.
-- Local features E2E runs when Apple `container` is up (no ghcr gate).
-- Override image: `ADEVCONTAINER_TEST_IMAGE`.
-- Optional live OCI Features E2E: `ADEVCONTAINER_FEATURES_E2E=1`.
-
-### Fixtures
-
-Pure JSON samples under [`Tests/Fixtures/`](Tests/Fixtures/), including smoke, env/user, mounts/ports, lifecycle hooks, runArgs/hostRequirements, OCI and local Features, and forever-reject cases (e.g. docker-ood). On-disk sample feature packages live under `Tests/Fixtures/features-sample/`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for prerequisites, building from source, running tests, fixtures, and working inside the repo's devcontainer.
