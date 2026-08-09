@@ -141,13 +141,13 @@ Top-level `features` map (ref → options) on **`up` / `clone`**. Builds a deriv
 
 ### VS Code (`--vscode` + config customizations)
 
-Recommended: pass **`--vscode`** on `up`, `start`, or `clone` to open a new VS Code window on the remote workspace folder.
+Prerequisites: VS Code with the [Remote - Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) installed (required for `--vscode`) and a discoverable `code` CLI.
+
+Pass **`--vscode`** on `up`, `start`, or `clone` to open a new VS Code window on the remote workspace folder.
 
 - Runs config + feature **`postAttachCommand`** only after a successful open. Without `--vscode`, or if open soft-fails, postAttach is skipped.
 - Soft-fail: missing VS Code/`code` → warn on stderr; container still succeeds.
-- Prereqs: VS Code + Remote - Containers + `dev.containers.experimentalAppleContainerSupport: true` (and a discoverable `code` CLI).
-- Manual attach (experimental **Attach to Running Apple Container**) works without the flag.
-- Not full Dev Containers extension parity — convenience open only.
+- Manual attach: VS Code's experimental **Attach to Running Apple Container** command (separate path; `--vscode` does not need it).
 
 **Config-file `customizations.vscode`:**
 

@@ -104,7 +104,7 @@ When `--vscode` is set and lifecycle has succeeded, the CLI MUST attempt to open
 
 **Host prerequisites (document; soft):**
 
-- VS Code, extension `ms-vscode-remote.remote-containers`, and experimental Apple Container support (`dev.containers.experimentalAppleContainerSupport`) are host prerequisites for a useful open. The CLI SHOULD document them in help and/or README. The CLI MUST NOT claim that `--vscode` provides full Dev Containers extension parity (up/rebuild driver, extension clone-in-volume, etc.).
+- VS Code, extension `ms-vscode-remote.remote-containers`, and a discoverable `code` CLI are host prerequisites for a useful open. The CLI SHOULD document them in help and/or README. The CLI MUST NOT claim that `--vscode` provides full Dev Containers extension parity (up/rebuild driver, extension clone-in-volume, etc.).
 
 **Optional nameConfig (MAY/SHOULD):**
 
