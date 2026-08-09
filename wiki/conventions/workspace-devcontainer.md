@@ -13,7 +13,7 @@ This repo ships `.devcontainer/devcontainer.json` for **Linux Swift tooling** an
 | Keep-alive | product default (`/bin/sleep infinity`) — not overridden in config |
 | `runArgs` | omitted (none) |
 | `hostRequirements` | `cpus: 4`, `memory: "8gb"` — minimum floor; comfortable optional ~6–8 CPUs / 12–16gb |
-| Customizations | `customizations.vscode.extensions`: `swiftlang.swift-vscode`; `settings`: `editor.tabSize: 3`, `files.insertFinalNewline: true`. CLI applies settings on create-path and extensions after successful `--vscode` open (Apple attach does not auto-install). Hard dep `llvm-vs-code-extensions.lldb-dap` comes via Swift’s `extensionDependencies` (BFS auto-install) — not necessarily listed in config. See [architecture.md — VS Code flow](../architecture.md#vs-code-flow) |
+| Customizations | `customizations.vscode.extensions`: `swiftlang.swift-vscode`; `settings`: `editor.mouseWheelZoom: false`, `files.autoGuessEncoding: false` — VS Code defaults kept only to test the CLI’s settings-apply path. CLI applies settings on create-path and extensions after successful `--vscode` open (Apple attach does not auto-install). Hard dep `llvm-vs-code-extensions.lldb-dap` comes via Swift’s `extensionDependencies` (BFS auto-install) — not necessarily listed in config. See [architecture.md — VS Code flow](../architecture.md#vs-code-flow) |
 
 ### Features
 
@@ -39,7 +39,7 @@ These are supported OCI Features (product Features runner). They are not `docker
 
 ### VS Code settings and deps (fixture)
 
-- Fixture settings are editor hygiene only (`editor.tabSize`, `files.insertFinalNewline`) — not Swift path overrides (`swift.path` defaults to PATH; image has `/usr/bin/swift`).
+- Fixture settings are VS Code defaults (`editor.mouseWheelZoom: false`, `files.autoGuessEncoding: false`) — kept only to test the CLI’s settings-apply path, no UX or code-writing behavior change; not Swift path overrides (`swift.path` defaults to PATH; image has `/usr/bin/swift`).
 - `lldb-dap` is **not** listed in config; CLI installs it transitively from Swift’s `package.json` `extensionDependencies` when extensions apply runs. Do not confuse with CodeLLDB `lldb.library` settings.
 
 ## Intended use

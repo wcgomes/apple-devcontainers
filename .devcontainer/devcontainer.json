@@ -18,7 +18,6 @@
     }
   },
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
-  // Keep-alive is injected by adevcontainer (`/bin/sleep infinity`); no overrideCommand.
   "postCreateCommand": "bash .devcontainer/install-tools.sh && swift package resolve",
   "customizations": {
     "vscode": {
@@ -26,8 +25,9 @@
         "swiftlang.swift-vscode"
       ],
       "settings": {
-        "editor.tabSize": 3,
-        "files.insertFinalNewline": true
+        // VSCode defaults; kept only for testing that adevcontainer settings apply.
+        "editor.mouseWheelZoom": false,
+        "files.autoGuessEncoding": false
       }
     }
   }
