@@ -1,12 +1,16 @@
 # Apple Dev Container CLI (adevcontainer)
 
 [![CI](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml/badge.svg)](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-245%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
+[![tests](https://img.shields.io/badge/tests-345%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Native Swift CLI that reads `devcontainer.json` and runs workspaces on **Apple `container`**.
+Native Swift CLI that reads `devcontainer.json` and runs dev containers on **Apple `container`**.
 
-Bring up a workspace with `clone <git-url>` (named volume, faster I/O) or `up` on an existing checkout. Use the terminal (or AI agents) as-is, or pass `--vscode` to open VS Code with extensions and settings applied. Lifecycle hooks and Features included.
+Start a dev container with `up` on an existing local folder, or `clone <git-url>` for a named volume with faster I/O. Use the terminal or AI agents as-is, or pass `--vscode` to open VS Code with extensions and settings applied. Lifecycle hooks and Features included.
+
+## Context
+
+A dev container is a full-featured development environment isolated in a container — the tools, runtimes, and libraries your codebase needs, all reproducible. Use it to run an application, separate toolchains, or drive CI builds. `adevcontainer` brings that workflow to Apple `container` on macOS.
 
 ## Install
 
@@ -50,15 +54,15 @@ adevcontainer doctor
 | Command | Purpose |
 |---------|---------|
 | `adevcontainer doctor` | Check Apple `container` readiness |
-| `adevcontainer up [-w path] [--vscode]` | Create/start workspace from a **host** checkout (only command that uses `-w`; default cwd) |
-| `adevcontainer clone <git-url> [--vscode]` | Clone a git repo into a **named volume** and start the devcontainer (HTTPS or SSH) |
-| `adevcontainer list [--json]` | List managed containers |
-| `adevcontainer start [--vscode] \| stop \| delete \| prune \| inspect [--name]` | Lifecycle by container name (or interactive picker) |
-| `adevcontainer exec [-it] [--name] [--] [cmd…]` | Shell or command in a running managed container |
+| `adevcontainer up [-w path] [--vscode]` | Create/start a dev container from a **host** folder (only command that uses `-w`; default cwd) |
+| `adevcontainer clone <git-url> [--vscode]` | Clone a git repo into a **named volume** and start the dev container (HTTPS or SSH) |
+| `adevcontainer list [--json]` | List managed dev containers |
+| `adevcontainer start [--vscode] \| stop \| delete \| prune \| inspect [--name]` | Lifecycle by dev container name (or interactive picker) |
+| `adevcontainer exec [-it] [--name] [--] [cmd…]` | Shell or command in a running managed dev container |
 
 ### Quick start
 
-**Local checkout** (`up`):
+**Local checkout** (`up`) — uses the current directory by default; pass `-w <path>` for another folder:
 
 ```bash
 adevcontainer up --vscode

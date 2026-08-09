@@ -251,3 +251,7 @@ Hooks run via runtime **exec** into the running container (effective user + work
 - Spawning Docker or Node to “help” Apple container.
 - Emulating privileged or device nodes.
 - Installing Rosetta for Features builds (native arm64 BuildKit only).
+
+## README terminology
+
+User-facing docs (README) use **"dev container"** for the thing `up`/`clone`/`start`/… create and run, and **"workspace"** only for the folder/volume that holds the code (e.g. "workspace root", "remote workspace folder"). Internal names are unaffected — labels `devcontainer.workspace_*`, the `adev-*-ws` volume, and the config key `workspaceFolder` keep their names. Keep README wording consistent with this split.
