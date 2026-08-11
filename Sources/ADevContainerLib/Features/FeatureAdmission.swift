@@ -4,7 +4,10 @@ import Foundation
 public enum FeatureAdmission {
     /// Returns admitted features in declaration key-sorted order for stable ties.
     /// Empty / omitted → empty array.
-    public static func parse(_ features: Any?) throws -> [AdmittedFeature] {
+    /// Docker-* markers are warn-skipped (not admitted); other hard errors still throw.
+    /// - Parameter emitWarnings: When false, still skip docker-* markers but do not warn
+    ///   (used by pre-resolve admission so resolve emits each skip warning once).
+    public static func parse(_ features: Any?, emitWarnings: Bool = true) throws -> [AdmittedFeature] {
         guard let features else { return [] }
 
         guard let dict = features as? [String: Any] else {
@@ -20,23 +23,20 @@ public enum FeatureAdmission {
 
         var admitted: [AdmittedFeature] = []
         for key in dict.keys.sorted() {
-            try rejectDockerOOD(key)
+            if let marker = FeatureRef.warnSkippedDockerMarker(in: key) {
+                if emitWarnings {
+                    StatusPrinter.warning(
+                        "Feature '\(key)' is incompatible with Apple container (no Docker socket / DinD path); skipped (\(marker))"
+                    )
+                }
+                continue
+            }
 
             let optionsRaw = dict[key]
             let options = try parseOptions(optionsRaw, featureKey: key)
             admitted.append(AdmittedFeature(reference: key, options: options))
         }
         return admitted
-    }
-
-    private static func rejectDockerOOD(_ ref: String) throws {
-        guard let marker = FeatureRef.foreverRejectedDockerMarker(in: ref) else { return }
-        throw CLIError(
-            code: CLIErrorCode.unsupportedFeature,
-            property: "features",
-            message: "Feature '\(ref)' is forever-rejected (\(marker))",
-            hint: "Remove \(marker); Apple container has no privileged/device path for this"
-        )
     }
 
     private static func parseOptions(_ value: Any?, featureKey: String) throws -> [String: FeatureOptionValue] {

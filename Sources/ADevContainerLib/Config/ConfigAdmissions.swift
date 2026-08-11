@@ -43,14 +43,16 @@ public enum ConfigAdmissions {
             )
         }
 
-        // Features — OCI map admitted; local path / docker-ood forever-reject.
+        // Features — OCI/local admitted; docker-* markers warn-skipped (no warn here:
+        // ConfigResolver.buildResolved is the single user-facing parse that emits).
         if let features = raw["features"] {
-            _ = try FeatureAdmission.parse(features)
+            _ = try FeatureAdmission.parse(features, emitWarnings: false)
         }
 
-        // runArgs — allowlisted subset only
+        // runArgs — allowlisted subset; known Apple-incompatibles warn-skipped
+        // (warnings deferred to buildResolved; see FeatureAdmission note above).
         if raw["runArgs"] != nil {
-            _ = try RunArgsAdmission.parse(raw["runArgs"])
+            _ = try RunArgsAdmission.parse(raw["runArgs"], emitWarnings: false)
         }
 
         // hostRequirements — parse/validate (no longer pure-ignore)

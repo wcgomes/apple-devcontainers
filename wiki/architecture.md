@@ -70,7 +70,7 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
 
 **delete vs prune:** `delete` drops the workspace container only. `prune` also removes config `type=volume` mounts (by label), the clone workspace volume (`adev-*-ws`), and the config `image` reference. Neither deletes bind-mount host paths or runs global `volume`/`image` prune. Derived Features tags (`adev-{base}:{hash12}` / `adevcontainer:{hash12}`) are not removed by `prune` unless they equal the config `image` field.
 
-**Progress:** long ops print `==> …` progress lines on stderr and tee Apple `container` stderr (pull/create/start/stop/delete/volume create; Features: Resolving/Fetching/Building/Reusing; build.rosetta config when changing). `ADEVCONTAINER_QUIET=1` silences progress status.
+**Progress:** long ops print `==> …` progress lines on stderr and tee Apple `container` stderr (pull/create/start/stop/delete/volume create; Features: Resolving/Fetching/Building/Reusing; build.rosetta config when changing). `ADEVCONTAINER_QUIET=1` silences progress status only — policy warn-skips still emit.
 
 ## Identity
 
@@ -107,7 +107,7 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
 
 Shipped under `Sources/ADevContainerLib/Features/`. On `up`/`clone`/`rebuild` when `features` is non-empty (after clone git-ensure; volume-mode rebuild: OCI only):
 
-1. Admit **OCI** and **local path** refs; forever-reject docker-* markers and metadata `privileged` / `securityOpt`.
+1. Admit **OCI** and **local path** refs; **warn-skip** docker-* markers (omit from admitted list) and warn-strip metadata `privileged` / `securityOpt` (not applied).
 2. One-time consent for `build.rosetta=false` when needed (CI: `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`).
 3. Load local packages or fetch OCI over HTTPS (embedded client).
 4. Order via `dependsOn` / `installsAfter`; build derived image via `container build --platform linux/arm64`; reuse tag when unchanged. If BuildKit was stopped before the build, restore-after-build stops it again (best-effort); already-running / undetermined status → leave alone.
@@ -170,11 +170,11 @@ Not full Dev Containers up/rebuild or IDE-owned customizations parity; volume-mo
 ## Reference config
 
 - **Workspace self-devcontainer:** `.devcontainer/devcontainer.json` — `swift:6.3.3-noble` plus OCI Features (`opencode`, `agents-workspace`) for Linux Swift tooling + product fixture; not full macOS product build/test. Detail: [workspace-devcontainer.md](conventions/workspace-devcontainer.md).
-- **Team sample (reject surface):** `reference/devcontainer.json` — dotnet image, features (incl. docker-ood), privileged+tun `runArgs`, mounts, `postCreateCommand`, `forwardPorts`, VS Code customizations. Several props are explicitly rejected; see [0002](decisions/0002-reject-docker-ood-privileged-tun.md) and [gaps](domain/devcontainer-apple-gaps.md).
+- **Team sample (warn-skip surface):** `reference/devcontainer.json` — dotnet image, features (incl. docker-ood), privileged+tun `runArgs`, mounts, `postCreateCommand`, `forwardPorts`, VS Code customizations. Docker-oriented bits warn-skip; Compose/unknown still fail-closed; see [0003](decisions/0003-warn-skip-apple-incompatibles.md) and [gaps](domain/devcontainer-apple-gaps.md).
 
 
 ## Out of scope (product shape)
 
 - Not a fork of https://github.com/devcontainers/cli
 - No Docker Compose driver
-- No docker-outside-of-docker / docker-in-docker / docker-from-docker / privileged / tun device (hard reject)
+- No docker-outside-of-docker / docker-in-docker / docker-from-docker / privileged / tun device **emulation** (warn-skip optional bits; do not implement DinD/device paths)

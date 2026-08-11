@@ -112,7 +112,7 @@ Config: `.devcontainer/devcontainer.json`, else `.devcontainer.json`.
 - **`rebuild`** force-recreates from the current config: bind keeps the container name, volume mode reuses the same `adev-*-ws` workspace volume — data preserved, never re-cloned.
 - Config hash mismatch → `up` errors with `config_hash_mismatch`; run `adevcontainer rebuild` (managed selection: `--name` or auto). No `--recreate`.
 - **`delete`** = container only. **`prune`** = container + named volumes (including clone `*-ws`) + config image. Never deletes host bind paths. Ordinary `prune` skips marked recovery helpers.
-- Progress on **stderr** (`==> …`). `ADEVCONTAINER_QUIET=1` silences it. `--json` keeps stdout clean.
+- Progress on **stderr** (`==> …`). `ADEVCONTAINER_QUIET=1` silences progress only — policy warn-skips still emit. `--json` keeps stdout clean.
 
 ### Lifecycle hooks
 
@@ -138,10 +138,20 @@ Mapped onto `container create` (empty/`[]` OK; `=VALUE` or two-token):
 | `--shm-size`, `--dns`, `--dns-search`, `--dns-option`, `--dns-domain`, `--no-dns` | |
 | `--ulimit`, `--tmpfs` | path before `:` if Docker opts present |
 | `--cpus`/`-c`, `--memory`/`-m` | merge into create `-c`/`-m`; hostRequirements wins per dimension when set |
-| `--network=NAME` | named only; not host/bridge/none/container:\* |
+| `--network=NAME` | named only; Docker-only modes (`host`/`bridge`/`none`/`container:*`) warn-skip; empty name hard-error |
 | `--rosetta`, `--ssh`, `--read-only` | |
 
-**Forever-reject:** `--privileged`, `--device…`, `--security-opt`, `--gpus`, Docker-only network modes, first-class flags (`-e`/`-p`/`-v`/…), and any other non-allowlisted flag.
+**Warn-skip (ignored with stderr warning; see [ADR 0003](wiki/decisions/0003-warn-skip-apple-incompatibles.md)):**
+
+| Family | Items |
+|--------|--------|
+| runArgs | `--privileged`, `--device…`, `--security-opt`, `--gpus`, `--ipc`, `--pid`, `--userns`, `--cgroupns`, `--hostname`, `--add-host`, `--sysctl`, `--group-add`, `--runtime`, Docker-only `--network` modes (`host`/`bridge`/`none`/`container:*`) |
+| Features | refs containing `docker-outside-of-docker` / `docker-in-docker` / `docker-from-docker` (dropped from admitted list) |
+| Metadata | feature/image `privileged: true` / non-empty `securityOpt` (not applied; feature may still install — install.sh that *requires* them can still fail) |
+
+When privileged/device are skipped and `cap-add NET_ADMIN` remains, one extra warning notes that caps alone do not provide device/privileged/VPN-in-container on Apple container.
+
+**Hard-error:** Docker Compose keys, first-class flags smuggled via runArgs (`-e`/`-p`/`-v`/…), and any other non-allowlisted flag.
 
 ### hostRequirements
 
@@ -160,7 +170,7 @@ Top-level `features` map (ref → options) on **`up` / `clone` / `rebuild`**. Bu
 - **Local path** — `./…`, `../…`, absolute, or `file://…` (relative to **workspace root**; needs `devcontainer-feature.json` + `install.sh`)
 - **Volume-mode `rebuild`** fetches OCI features only: the host fetcher (`DefaultFeatureFetcher`) and local-path feature refs inside the workspace volume are unsupported there and fail cleanly before the old container is deleted (bind-mode `rebuild` keeps `up` behavior)
 - **Derived-tag reuse** on `rebuild`: unchanged base image + features material reuses `adev-{base}:{hash12}` (no `container build`)
-- **Forever-reject:** refs containing `docker-in-docker` / `docker-outside-of-docker` / `docker-from-docker`, or feature metadata with `privileged` / `securityOpt`
+- **Warn-skip:** docker-* feature refs and privileged/securityOpt metadata — see table above / [ADR 0003](wiki/decisions/0003-warn-skip-apple-incompatibles.md)
 - **Rosetta / BuildKit:** if prompted once to set `build.rosetta=false`, accept — or set `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1` for CI
 
 ### VS Code (`--vscode` + config customizations)

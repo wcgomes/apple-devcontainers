@@ -241,6 +241,11 @@ public enum CommandSurface {
             TTY: error then "Open the recovery editor now? [Y/n]" (default Y);
             non-TTY/--json: retain + retry commands; named rebuild skips the prompt.
 
+        Config notes:
+          - Optional Apple-incompatibles (docker-* features, privileged/device runArgs,
+            privileged/securityOpt metadata) are warn-skipped — up continues with a warning.
+          - Docker Compose keys, unknown runArgs, and first-class smuggling still hard-error.
+
         Exit codes: 0 success, non-zero failure
         """
     }

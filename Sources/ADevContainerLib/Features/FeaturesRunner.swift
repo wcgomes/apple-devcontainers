@@ -92,7 +92,7 @@ public enum FeaturesRunner {
             }
             let data = try Data(contentsOf: URL(fileURLWithPath: metaPath))
             let metadata = try FeatureMetadata.parse(data: data, featureRef: feature.reference)
-            try metadata.rejectUnsafeContributions(featureRef: feature.reference)
+            metadata.warnStripUnsafeContributions(featureRef: feature.reference)
             orderedInput.append(FeatureOrder.OrderedFeature(admitted: feature, metadata: metadata))
         }
 
@@ -102,7 +102,7 @@ public enum FeaturesRunner {
 
         // Optional: merge base image metadata label when inspect is available.
         if let labels = try? deps.runtime.imageLabels(ref: baseImage) {
-            try DevContainerMetadataLabel.rejectUnsafe(from: labels, imageRef: baseImage)
+            DevContainerMetadataLabel.warnStripUnsafe(from: labels, imageRef: baseImage)
             let labelContrib = DevContainerMetadataLabel.parseContributions(from: labels)
             contributions = unionContributions(labelContrib, contributions)
         }

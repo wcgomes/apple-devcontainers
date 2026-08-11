@@ -72,11 +72,11 @@ public enum FeatureOptionValue: Equatable, Sendable {
 }
 
 public enum FeatureRef {
-    /// Substring forever-rejected in any feature reference (legacy name for OOD).
+    /// Substring warn-skipped in any feature reference (legacy name for OOD).
     public static let dockerOODMarker = "docker-outside-of-docker"
 
-    /// Docker-related feature id substrings forever-rejected (any registry/tag).
-    public static let foreverRejectedDockerMarkers = [
+    /// Docker-related feature id substrings warn-skipped at admission (any registry/tag).
+    public static let warnSkippedDockerMarkers = [
         "docker-outside-of-docker",
         "docker-in-docker",
         "docker-from-docker"
@@ -98,13 +98,9 @@ public enum FeatureRef {
         return false
     }
 
-    /// Matched forever-rejected docker marker in `ref`, if any.
-    public static func foreverRejectedDockerMarker(in ref: String) -> String? {
-        foreverRejectedDockerMarkers.first { ref.contains($0) }
-    }
-
-    public static func containsDockerOOD(_ ref: String) -> Bool {
-        foreverRejectedDockerMarker(in: ref) != nil
+    /// Matched warn-skipped docker marker in `ref`, if any.
+    public static func warnSkippedDockerMarker(in ref: String) -> String? {
+        warnSkippedDockerMarkers.first { ref.contains($0) }
     }
 
     /// Bare feature id without registry/tag for soft matching (last path segment before `:`).

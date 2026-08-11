@@ -94,8 +94,7 @@ public enum DevContainerMetadataLabel {
         if let cmd = try? LifecycleCommand.parse(dict["postAttachCommand"], property: "postAttachCommand") {
             c.postAttachCommands = [cmd]
         }
-        // Reject privileged silently for label merge? Spec: forever-reject.
-        // If label says privileged, caller should reject — check here.
+        // privileged / securityOpt are not merged; caller warns via warnStripUnsafe.
         return c
     }
 
@@ -117,9 +116,9 @@ public enum DevContainerMetadataLabel {
         return out
     }
 
-    /// If metadata label requires privileged/securityOpt, throw.
+    /// Warn when metadata label requires privileged/securityOpt (do not apply; do not fail).
     /// Checks each fragment when the label is a top-level array.
-    public static func rejectUnsafe(from labels: [String: String], imageRef: String) throws {
+    public static func warnStripUnsafe(from labels: [String: String], imageRef: String) {
         guard let raw = labels[labelKey], let data = raw.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) else {
             return
@@ -134,19 +133,17 @@ public enum DevContainerMetadataLabel {
         }
         for obj in fragments {
             if let p = obj["privileged"] as? Bool, p {
-                throw CLIError(
-                    code: CLIErrorCode.unsupportedFeature,
-                    property: "features",
-                    message: "Image '\(imageRef)' devcontainer.metadata requires privileged and is forever-rejected",
-                    hint: "Use an image without privileged metadata"
+                StatusPrinter.warning(
+                    "Image '\(imageRef)' devcontainer.metadata sets privileged: true; ignored (not applied on Apple container)"
                 )
             }
             if let s = obj["securityOpt"] as? [Any], !s.isEmpty {
-                throw CLIError(
-                    code: CLIErrorCode.unsupportedFeature,
-                    property: "features",
-                    message: "Image '\(imageRef)' devcontainer.metadata requires securityOpt and is forever-rejected",
-                    hint: "Use an image without securityOpt metadata"
+                StatusPrinter.warning(
+                    "Image '\(imageRef)' devcontainer.metadata sets securityOpt; ignored (not applied on Apple container)"
+                )
+            } else if let s = obj["securityOpt"] as? String, !s.isEmpty {
+                StatusPrinter.warning(
+                    "Image '\(imageRef)' devcontainer.metadata sets securityOpt; ignored (not applied on Apple container)"
                 )
             }
         }

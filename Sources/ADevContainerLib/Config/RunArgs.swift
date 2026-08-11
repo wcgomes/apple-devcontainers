@@ -93,7 +93,9 @@ public enum RunArgsAdmission {
         + "--network (named only), --rosetta, --ssh, --read-only"
 
     /// Parse `runArgs` array. Omitted/`nil` → empty. Empty array → empty.
-    public static func parse(_ value: Any?) throws -> [AllowlistedRunArg] {
+    /// - Parameter emitWarnings: When false, still skip Apple-incompatible entries but do not warn
+    ///   (used by pre-resolve admission so resolve emits each skip warning once).
+    public static func parse(_ value: Any?, emitWarnings: Bool = true) throws -> [AllowlistedRunArg] {
         guard let value else { return [] }
         guard let items = value as? [Any] else {
             throw CLIError(
@@ -109,6 +111,7 @@ public enum RunArgsAdmission {
         var sawRosetta = false
         var sawSsh = false
         var sawReadOnly = false
+        var skippedPrivilegedOrDevice = false
         var index = 0
         while index < items.count {
             guard let arg = items[index] as? String else {
@@ -119,19 +122,40 @@ public enum RunArgsAdmission {
                 )
             }
 
-            // --- Forever rejects (explicit) ---
+            // --- Apple-incompatible flags: warn + skip (do not apply) ---
             if arg == "--privileged" || arg.hasPrefix("--privileged=") {
-                throw foreverReject(arg: "--privileged", hint: "Remove --privileged from runArgs")
+                skippedPrivilegedOrDevice = true
+                if emitWarnings {
+                    StatusPrinter.warning(
+                        "runArgs entry '--privileged' is incompatible with Apple container; ignored"
+                    )
+                }
+                index += 1
+                continue
             }
             if isDeviceArg(arg) || arg == "--device" {
-                throw foreverReject(
-                    arg: arg == "--device" ? "--device" : arg,
-                    message: "runArgs entry '\(arg == "--device" ? "--device" : arg)' (device passthrough) is forever-rejected",
-                    hint: "Remove --device flags from runArgs"
-                )
+                skippedPrivilegedOrDevice = true
+                let display = arg == "--device" ? "--device" : arg
+                if emitWarnings {
+                    StatusPrinter.warning(
+                        "runArgs entry '\(display)' is incompatible with Apple container (no device passthrough); ignored"
+                    )
+                }
+                index = advancePastOptionalValue(items: items, index: index, bareFlag: arg == "--device")
+                continue
             }
-            if let rejected = foreverRejectedFlag(arg) {
-                throw foreverReject(arg: rejected.display, hint: rejected.hint)
+            if let rejected = incompatibleSkippedFlag(arg) {
+                if emitWarnings {
+                    StatusPrinter.warning(
+                        "runArgs entry '\(rejected.display)' is incompatible with Apple container; ignored"
+                    )
+                }
+                index = advancePastOptionalValue(
+                    items: items,
+                    index: index,
+                    bareFlag: arg == rejected.prefix
+                )
+                continue
             }
 
             // --- Boolean flags ---
@@ -261,7 +285,10 @@ public enum RunArgsAdmission {
             }
 
             if let (name, nextIndex) = try takeValue("--network", items: items, index: index) {
-                try validateNamedNetwork(name, displayArg: arg)
+                if try shouldSkipDockerOnlyNetwork(name, displayArg: arg, emitWarnings: emitWarnings) {
+                    index = nextIndex
+                    continue
+                }
                 result.append(.network(name))
                 index = nextIndex
                 continue
@@ -304,7 +331,20 @@ public enum RunArgsAdmission {
             )
         }
 
+        if emitWarnings, skippedPrivilegedOrDevice, result.contains(where: isNetAdminCapAdd) {
+            StatusPrinter.warning(
+                "cap-add NET_ADMIN alone does not provide device/privileged/VPN-in-container on Apple container (privileged/device were skipped)"
+            )
+        }
+
         return result
+    }
+
+    private static func isNetAdminCapAdd(_ arg: AllowlistedRunArg) -> Bool {
+        if case .capAdd(let name) = arg {
+            return name.uppercased() == "NET_ADMIN"
+        }
+        return false
     }
 
     // MARK: - takeValue
@@ -375,7 +415,12 @@ public enum RunArgsAdmission {
         return raw
     }
 
-    private static func validateNamedNetwork(_ name: String, displayArg: String) throws {
+    /// Returns true when the network mode was warn-skipped. Empty name still hard-errors.
+    private static func shouldSkipDockerOnlyNetwork(
+        _ name: String,
+        displayArg: String,
+        emitWarnings: Bool
+    ) throws -> Bool {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw CLIError(
@@ -387,13 +432,23 @@ public enum RunArgsAdmission {
         }
         let lower = trimmed.lowercased()
         if lower == "host" || lower == "bridge" || lower == "none" || lower.hasPrefix("container:") {
-            throw CLIError(
-                code: CLIErrorCode.unsupportedProperty,
-                property: "runArgs",
-                message: "runArgs network mode '\(trimmed)' is forever-rejected",
-                hint: "Use a named network only; host/bridge/none/container:* are not allowed"
-            )
+            if emitWarnings {
+                StatusPrinter.warning(
+                    "runArgs network mode '\(trimmed)' is incompatible with Apple container; ignored (use a named network)"
+                )
+            }
+            return true
         }
+        return false
+    }
+
+    /// After a bare flag token, skip the following value token when present.
+    private static func advancePastOptionalValue(items: [Any], index: Int, bareFlag: Bool) -> Int {
+        guard bareFlag, index + 1 < items.count else { return index + 1 }
+        guard let next = items[index + 1] as? String, !next.hasPrefix("-") else {
+            return index + 1
+        }
+        return index + 2
     }
 
     private static func isFirstClassOnlyFlag(_ arg: String) -> Bool {
@@ -411,40 +466,27 @@ public enum RunArgsAdmission {
         return false
     }
 
-    /// Forever-rejected flags (beyond privileged/device handled above).
-    private static func foreverRejectedFlag(_ arg: String) -> (display: String, hint: String)? {
-        let pairs: [(prefix: String, display: String, hint: String)] = [
-            ("--security-opt", "--security-opt", "Remove --security-opt from runArgs"),
-            ("--gpus", "--gpus", "Remove --gpus from runArgs"),
-            ("--ipc", "--ipc", "Remove --ipc from runArgs"),
-            ("--pid", "--pid", "Remove --pid from runArgs"),
-            ("--userns", "--userns", "Remove --userns from runArgs"),
-            ("--cgroupns", "--cgroupns", "Remove --cgroupns from runArgs"),
-            ("--hostname", "--hostname", "Remove --hostname from runArgs"),
-            ("--add-host", "--add-host", "Remove --add-host from runArgs"),
-            ("--sysctl", "--sysctl", "Remove --sysctl from runArgs"),
-            ("--group-add", "--group-add", "Remove --group-add from runArgs"),
-            ("--runtime", "--runtime", "Remove --runtime from runArgs"),
+    /// Known Apple-incompatible flags (beyond privileged/device handled above) → warn-skip.
+    private static func incompatibleSkippedFlag(_ arg: String) -> (prefix: String, display: String)? {
+        let prefixes = [
+            "--security-opt",
+            "--gpus",
+            "--ipc",
+            "--pid",
+            "--userns",
+            "--cgroupns",
+            "--hostname",
+            "--add-host",
+            "--sysctl",
+            "--group-add",
+            "--runtime",
         ]
-        for p in pairs {
-            if arg == p.prefix || arg.hasPrefix(p.prefix + "=") {
-                return (p.display, p.hint)
+        for prefix in prefixes {
+            if arg == prefix || arg.hasPrefix(prefix + "=") {
+                return (prefix, prefix)
             }
         }
         return nil
-    }
-
-    private static func foreverReject(
-        arg: String,
-        message: String? = nil,
-        hint: String
-    ) -> CLIError {
-        CLIError(
-            code: CLIErrorCode.unsupportedProperty,
-            property: "runArgs",
-            message: message ?? "runArgs entry '\(arg)' is forever-rejected",
-            hint: hint
-        )
     }
 
     private static func invalidValue(flag: String, value: String, arg: String) -> CLIError {

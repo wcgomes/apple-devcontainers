@@ -1,8 +1,10 @@
 import Foundation
 @testable import ADevContainerLib
 
-// Keep phase status off during the suite (stderr noise + non-deterministic output).
+// Keep progress + warning stderr off during the suite (noise + non-deterministic output).
+// onWarning still fires for assertions; product QUIET only silences progress, not warnings.
 StatusPrinter.enabled = false
+StatusPrinter.suppressWarningStderr = true
 
 // Force-link test translation units by referencing their register functions.
 let allTests: [(String, () throws -> Void)] = []

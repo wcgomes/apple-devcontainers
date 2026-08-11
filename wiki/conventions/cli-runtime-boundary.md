@@ -56,11 +56,21 @@ Fixtures may use directory binds already (`~/.kube`); configs that still use fil
   - `--ulimit=type=soft[:hard]`
   - `--tmpfs=PATH` (if value contains `:`, path before first `:` only)
   - `--cpus`/`-c`, `--memory`/`-m` — **merge into** create `-c`/`-m` (no duplicate tokens); hostRequirements wins when set for that dimension
-  - `--network=NAME` — **named networks only** (reject host/bridge/none/container:*)
+  - `--network=NAME` — **named networks only** (host/bridge/none/container:* warn-skipped)
   - `--rosetta`, `--ssh`, `--read-only`
-- **Not via runArgs** (first-class props): `-e`/`-u`/`-w`/`-p`/`-v`/`--mount`/`--name`/`--label`/`-i`/`-t`/`-d`/`--rm`/`--entrypoint`.
-- Forever-reject: `--privileged`, `--device=…` (incl. `/dev/net/tun`), `--security-opt`, `--gpus`, `--ipc`, `--pid`, `--userns`, `--cgroupns`, `--hostname`, `--add-host`, `--sysctl`, `--group-add`, `--runtime`, Docker-only network modes, and any flag not on the allowlist. See [0002](../decisions/0002-reject-docker-ood-privileged-tun.md).
+- **Not via runArgs** (first-class props; hard-error if smuggled): `-e`/`-u`/`-w`/`-p`/`-v`/`--mount`/`--name`/`--label`/`-i`/`-t`/`-d`/`--rm`/`--entrypoint`.
+- **Warn-skip** (not applied): `--privileged`, `--device=…` (incl. `/dev/net/tun`), `--security-opt`, `--gpus`, `--ipc`, `--pid`, `--userns`, `--cgroupns`, `--hostname`, `--add-host`, `--sysctl`, `--group-add`, `--runtime`, Docker-only network modes. See [0003](../decisions/0003-warn-skip-apple-incompatibles.md).
 - Unknown or incomplete entries (e.g. bare `--cap-add` with no name) → structured error naming the entry.
+
+### Warn-skip emit once (Features + runArgs)
+
+Do **not** reintroduce triple skip-warnings on resolve. Admission parsers gate user-facing warns:
+
+- `FeatureAdmission.parse` / `RunArgsAdmission.parse` take `emitWarnings: Bool` (default `true`).
+- `ConfigAdmissions.admit` calls both with `emitWarnings: false` (skip/hard-error only; no stderr).
+- User-facing warn-skip emits **once** from `ConfigResolver.buildResolved` (default `true` on parse).
+
+**Goal:** exactly one warning per skipped item per resolve ([0003](../decisions/0003-warn-skip-apple-incompatibles.md) “warns at least once” → product emits once).
 
 ## hostRequirements preflight
 
@@ -176,7 +186,7 @@ On `up`/`clone`/`rebuild` when `features` is non-empty after resolve (and after 
 | Step | Behavior |
 |------|----------|
 | Admit | Feature ref → options map; **OCI** (`ghcr.io/…/node:1`) and **local path** (`./…`, `../…`, absolute `/…`, `file://…` relative to workspace root); declaration key-sorted for stable ties |
-| Reject | Any ref containing `docker-outside-of-docker`, `docker-in-docker`, or `docker-from-docker` (forever, OCI or local); metadata `privileged` / `securityOpt` ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)) |
+| Warn-skip | Any ref containing `docker-outside-of-docker`, `docker-in-docker`, or `docker-from-docker` (OCI or local) — drop from admitted list with warning; metadata `privileged` / `securityOpt` warn-stripped (not applied; feature may still install) ([0003](../decisions/0003-warn-skip-apple-incompatibles.md)). Emit once per resolve — see [Warn-skip emit once](#warn-skip-emit-once-features--runargs) |
 | build.rosetta | Before fetch/build: ensure Apple BuildKit `build.rosetta=false`. Already false → silent. True/missing → one-time TTY consent (or fail); CI auto-accept via `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`. Never install Rosetta; never restore `true` after consent. Config pickup uses `restartBuilderForConfig` (stop+delete only) — **not** the restore-after-build path below |
 | Fetch / load | **Local path:** validate package (`devcontainer-feature.json` + `install.sh`) and copy into feature cache. **OCI:** embedded HTTPS client (`OCIFeatureClient`) — **not** `container image pull`, ORAS, or Node |
 | Order | `dependsOn` / `installsAfter` topo-sort (id last-segment match so `./x/sample-a` satisfies `…/sample-a:1`); cycle → structured error |
@@ -220,7 +230,7 @@ Apple `container` does **not** expand `${PATH}` / `$PATH` in env values. Product
 
 - Progress status lines on **stderr**: `==> …` (pull, create, start, stop, delete, volume create, Features Resolving/Fetching/Building/Reusing, build.rosetta config when changing, and related long steps).
 - Tee Apple `container` stderr onto the same stream for those operations.
-- `--json` keeps **stdout** pure JSON. `ADEVCONTAINER_QUIET=1` silences progress status lines.
+- `--json` keeps **stdout** pure JSON. `ADEVCONTAINER_QUIET=1` silences progress status lines only (policy warn-skips still emit).
 
 ## Lifecycle execution (hook matrix)
 

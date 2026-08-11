@@ -8,7 +8,7 @@ This repo ships `.devcontainer/devcontainer.json` for **Linux Swift tooling** an
 |------|--------|
 | Path | `.devcontainer/devcontainer.json` |
 | Image | `swift:6.3.3-noble` (official Docker Hub Swift; no Dockerfile/Compose) |
-| Features | OCI (see below) — not docker-* forever-rejects |
+| Features | OCI (see below) — not docker-* (those warn-skip) |
 | `postCreateCommand` | `bash .devcontainer/install-tools.sh && swift package resolve` |
 | Keep-alive | product default (`/bin/sleep infinity`) — not overridden in config |
 | `runArgs` | omitted (none) |
@@ -26,7 +26,7 @@ This repo ships `.devcontainer/devcontainer.json` for **Linux Swift tooling** an
 - **node:1 (lts)** — required for npm/global tools (codegraph). Opencode/agents-workspace Features do **not** provide Node.
 - Opencode + agents-workspace unchanged from prior fixture.
 
-These are supported OCI Features (product Features runner). They are not `docker-outside-of-docker` / `docker-in-docker` / `docker-from-docker` forever-rejects.
+These are supported OCI Features (product Features runner). They are not `docker-outside-of-docker` / `docker-in-docker` / `docker-from-docker` (those are warn-skipped).
 
 ### postCreate / install-tools.sh
 
@@ -65,6 +65,6 @@ These are supported OCI Features (product Features runner). They are not `docker
 
 ## Related
 
-- Product sample (includes intentionally rejected props): `reference/devcontainer.json` — see [architecture.md](../architecture.md) and [0002](../decisions/0002-reject-docker-ood-privileged-tun.md).
+- Product sample (warn-skip surface: docker-ood, privileged/device runArgs): `reference/devcontainer.json` — see [architecture.md](../architecture.md) and [0003](../decisions/0003-warn-skip-apple-incompatibles.md).
 - Features runner: [cli-runtime-boundary.md](cli-runtime-boundary.md).
 - Keep-alive and lifecycle: [devcontainer-apple-gaps.md](../domain/devcontainer-apple-gaps.md), [architecture.md](../architecture.md).

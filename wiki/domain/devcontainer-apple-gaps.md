@@ -8,9 +8,9 @@ Facts that constrain the CLI. Not a full Apple container manual — only gaps th
 |------|------------------------------|--------------------------------|
 | Driver | Docker/Moby engine API | Apple `container` CLI subprocess |
 | Compose | Docker Compose common | **Unsupported** — hard reject |
-| Privileged | `--privileged` widely used | **Rejected** ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)) |
-| Devices | `--device=…` (e.g. `/dev/net/tun`) | **Rejected** ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)) |
-| Features | OCI + local path feature packages + image build | **Supported** (OCI + local path runner); forever-reject `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker`; native arm64 build (no Rosetta by default) |
+| Privileged | `--privileged` widely used | **Warn-skip** — not applied ([0003](../decisions/0003-warn-skip-apple-incompatibles.md)) |
+| Devices | `--device=…` (e.g. `/dev/net/tun`) | **Warn-skip** — not applied ([0003](../decisions/0003-warn-skip-apple-incompatibles.md)) |
+| Features | OCI + local path feature packages + image build | **Supported** (OCI + local path runner); **warn-skip** `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker` and privileged/securityOpt metadata ([0003](../decisions/0003-warn-skip-apple-incompatibles.md)); native arm64 build (no Rosetta by default) |
 | Events / rich watch APIs | Engine events often used by tools | Do not assume Docker-equivalent event stream |
 | List + label filter | `docker ps --filter label=…` | **No label filter on list** — client-side filter after JSON; prefer deterministic name + inspect; product `list` keeps `devcontainer.managed=adevcontainer` only |
 | VS Code | Dev Containers full up/rebuild + clone-in-volume + IDE-owned customizations apply | **Attach** after CLI bring-up (Apple Container support in Remote - Containers). Product `--vscode` on `up`/`start`/`clone`/`rebuild` best-effort opens via `code --folder-uri` (soft-fail). **Apple attach does not auto-install** `customizations.vscode` — CLI applies config-file settings/extensions (see below). Manual attach without flag still valid. Not full Dev Containers parity. Volume-mode via product `clone` (not extension clone-in-volume) |
@@ -120,20 +120,20 @@ After lifecycle success, `up` / `start` / `clone` / `rebuild` accept **`--vscode
 
 ## Config surface implications
 
-- **Hard errors** for unsupported props/flags — never silent ignore.
+- **Hard errors** for unknown-dangerous props/flags and Compose — never silent ignore. Known optional Apple-incompatibles **warn-skip**.
 - **`forwardPorts`**: map to publish ports; do not promise IDE auto-forward behavior.
 - **`portsAttributes`**: metadata only; no IDE auto-forward.
 - **Lifecycle**: run via `container exec` (hook matrix: create-path full order on `up`/`clone`; bind start-stopped `postStart` only; bare `start` no create-path/postStart; reuse none for create-path; **postAttach implemented** — runs after successful `--vscode` open only, skip otherwise, fail-keep; `start` loads config from labels; feature postAttach from image metadata on reuse/`start`). Exec must expand `containerEnv` PATH refs (same as create) or login-shell hooks fail (`id`/`bash` not found). Not Docker entrypoint injection parity. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
-- **`runArgs`**: allowlist (`--init`, `--cap-add`/`--cap-drop`, …); privileged/tun/device and unknown flags fail closed.
+- **`runArgs`**: allowlist (`--init`, `--cap-add`/`--cap-drop`, …); privileged/tun/device/security family **warn-skip**; unknown and first-class smuggling flags fail closed.
 - **`hostRequirements`**: preflight — fail on memory/cpus shortfall; map requested limits to create `-m`/`-c` when host OK; warn unsupported `gpu`; fail on unparseable/unknown keys.
-- **Features**: OCI + local path fetch/load + derived image build on `up` (see [cli-runtime-boundary](../conventions/cli-runtime-boundary.md)); forever-reject `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker` and privileged/securityOpt metadata ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)).
+- **Features**: OCI + local path fetch/load + derived image build on `up` (see [cli-runtime-boundary](../conventions/cli-runtime-boundary.md)); **warn-skip** `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker` and privileged/securityOpt metadata ([0003](../decisions/0003-warn-skip-apple-incompatibles.md)).
 
 ## Reference config hotspots
 
 `reference/devcontainer.json` exercises several gaps at once:
 
-- Features block (ood, node, third-party) — ood forever-rejected; other OCI/local features run via Features runner
-- `runArgs` privileged + `NET_ADMIN` + tun device — rejected
+- Features block (ood, node, third-party) — ood warn-skipped; other OCI/local features run via Features runner
+- `runArgs` privileged + `NET_ADMIN` + tun device — privileged/tun warn-skipped; `NET_ADMIN` allowlisted (extra warning that caps alone ≠ device/VPN on Apple container)
 - Bind + named volume mounts — supported
 - `postCreateCommand` — supported
 - Large `forwardPorts` / `portsAttributes` — publish + metadata

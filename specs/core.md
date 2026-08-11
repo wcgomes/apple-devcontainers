@@ -81,7 +81,7 @@ Unsupported substitution tokens MUST cause a structured error naming the token. 
 
 ### Requirement: Supported property surface (core + lifecycle/runArgs/host)
 
-The CLI MUST accept and honor the property surface below. Properties outside this surface that are forever-rejected or unknown-dangerous MUST hard-error (see Unsupported property policy). Parseable `customizations.vscode.extensions` / `settings` are **honored by apply**, not ignored, while still never failing parse solely for presence. Other benign editor metadata MAY be ignored per Unsupported property policy.
+The CLI MUST accept and honor the property surface below. Properties outside this surface that are hard-error (Compose, unknown-dangerous) or unknown-dangerous MUST hard-error (see Unsupported property policy). Known optional Apple-incompatibles are warn-skip, not hard-error. Parseable `customizations.vscode.extensions` / `settings` are **honored by apply**, not ignored, while still never failing parse solely for presence. Other benign editor metadata MAY be ignored per Unsupported property policy.
 
 **Image & workspace**
 - `name` (optional; when non-empty after trim, drives the human base of deterministic container/image identity — see Deterministic identity and labels)
@@ -145,7 +145,7 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - Then validation does not fail with unsupported-property for those keys
 
 #### Scenario: features is on the supported surface
-- Given a config that includes only previously supported keys plus an OCI `features` map without forever-rejected entries
+- Given a config that includes only previously supported keys plus an OCI `features` map without warn-skipped docker-* markers
 - When config is validated
 - Then validation does not fail with unsupported-property for `features`
 
@@ -160,20 +160,26 @@ See also: [lifecycle-hooks.md](lifecycle-hooks.md), [runargs-host.md](runargs-ho
 
 ### Requirement: Unsupported property policy
 
-The CLI MUST fail closed on unsupported or forever-rejected configuration. Errors MUST be structured and actionable: identify the property/flag, state that it is unsupported, and indicate what to remove or change. The CLI MUST NEVER silently ignore forever-rejected or unknown-dangerous entries.
+The CLI MUST fail closed on unsupported or unknown-dangerous configuration. Errors MUST be structured and actionable: identify the property/flag, state that it is unsupported, and indicate what to remove or change. Known Apple-incompatible **optional** bits MUST warn-and-skip (never silent ignore). The CLI MUST NEVER silently ignore unknown-dangerous entries.
 
-**Forever reject (v1) — Features-aware**
+**Warn-skip (v1) — continue `up` with effective config stripped**
 
-- Feature refs containing `docker-outside-of-docker` / `docker-in-docker` / `docker-from-docker` (any registry/tag or local path)
-- Feature metadata requiring `privileged: true` or `securityOpt` (or equivalent)
-- `runArgs` containing `--privileged` or `--device…`
-- `runArgs` entries not on the runArgs allowlist
+- Feature refs containing `docker-outside-of-docker` / `docker-in-docker` / `docker-from-docker` (any registry/tag or local path) — drop from admitted features; warn
+- Feature/image metadata `privileged: true` or non-empty `securityOpt` — warn; do not apply to create; feature may still install if admitted
+- `runArgs` known-incompatible family (`--privileged`, `--device…`, `--security-opt`, `--gpus`, `--ipc`, `--pid`, `--userns`, `--cgroupns`, `--hostname`, `--add-host`, `--sysctl`, `--group-add`, `--runtime`, Docker-only `--network` modes) — skip entry with warn; keep allowlisted siblings
+
+**Hard-error (v1) — Features-aware**
+
+- `runArgs` entries not on the runArgs allowlist (and not in the warn-skip family)
+- First-class smuggling via runArgs (`-e`, `-u`, `-w`, `-p`, `-v`, …)
 - Docker Compose keys / compose-file driven multi-service config
+- Unknown top-level dangerous properties; missing `image`; invalid feature option shapes; hostRequirements shortfalls; unsupported substitutions
 
 **No longer reject**
 
 - Non-ood OCI `features` entries solely for being features — they MUST enter the Features runner path
 - Local path feature refs — they MUST enter the Features runner path (load from disk relative to workspace)
+- Presence of docker-* features or privileged/device runArgs alone — warn-skip instead of failing whole config
 
 **May ignore or store as metadata (MUST NOT fail parse)**
 - Other benign editor metadata and other `customizations.*` namespaces that are not applied in v1 (MUST NOT fail parse). `customizations.vscode` is **no longer pure ignore** for apply purposes (see **No longer pure-ignore** below).
@@ -188,25 +194,25 @@ The CLI MUST fail closed on unsupported or forever-rejected configuration. Error
 **Unknown non-metadata top-level properties**
 - MUST hard-error (fail closed), except keys explicitly supported in core plus lifecycle hooks, allowlisted `runArgs`, `hostRequirements`, and **`features`**.
 
-#### Scenario: Reject docker-outside-of-docker (policy retained)
-- Given a config with `features` including a docker-outside-of-docker ref
+#### Scenario: Warn-skip docker-outside-of-docker
+- Given a config with `features` including a docker-outside-of-docker ref (optionally plus a non-docker feature)
 - When config is validated
-- Then the CLI fails with a structured error naming the feature and the reject policy
+- Then admission succeeds; the docker-* ref is absent from admitted features; stderr warns naming the feature
 
 #### Scenario: Non-ood features no longer rejected as blanket-unsupported
 - Given `features` with only `ghcr.io/devcontainers/features/node:1`
 - When config is validated at admission
 - Then the CLI does not fail with a blanket “features are not supported” error
 
-#### Scenario: Reject privileged runArgs
-- Given `runArgs` including `--privileged`
+#### Scenario: Warn-skip privileged runArgs
+- Given `runArgs` including `--privileged` and an allowlisted flag (e.g. `--init`)
 - When config is validated
-- Then the CLI fails naming `--privileged`
+- Then admission succeeds; `--privileged` is absent from effective runArgs; stderr warns
 
-#### Scenario: Reject device runArgs
+#### Scenario: Warn-skip device runArgs
 - Given `runArgs` including `--device=/dev/net/tun:/dev/net/tun`
 - When config is validated
-- Then the CLI fails naming the device flag
+- Then admission succeeds; the device entry is absent from effective runArgs; stderr warns
 
 #### Scenario: Reject Compose keys
 - Given a config with `dockerComposeFile` set
@@ -471,7 +477,7 @@ The repository MUST provide pure JSON capability fixtures used by tests and docs
 | `Tests/Fixtures/features-node.json` | OCI Features runner (node only; no docker-ood) |
 | `Tests/Fixtures/features-local.json` | Local path Features runner (sample-a + sample-b) |
 
-Fixtures MUST be valid for their capability (no forever-rejected props). They SHOULD align field styles with `reference/devcontainer.json` where applicable (image family, env keys, mount shapes, ports) while remaining Apple-container-runnable. Existing core fixtures MUST remain valid under lifecycle / runArgs / hostRequirements / Features-aware admission (configs without `features` behave as today).
+Fixtures MUST be valid for their capability (no hard-error props such as Compose). They MAY include warn-skip surface when testing that path; ordinary fixtures SHOULD remain free of docker-* / privileged noise. They SHOULD align field styles with `reference/devcontainer.json` where applicable (image family, env keys, mount shapes, ports) while remaining Apple-container-runnable after warn-skips. Existing core fixtures MUST remain valid under lifecycle / runArgs / hostRequirements / Features-aware admission (configs without `features` behave as today).
 
 #### Scenario: Fixtures are parseable configs
 - Given each file under `Tests/Fixtures/`

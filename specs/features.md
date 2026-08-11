@@ -2,7 +2,7 @@
 
 ## Purpose
 
-OCI and local-path Features runner: admission, forever-reject policies, metadata resolve and dependency order, artifact fetch, derived image build on native arm64, build.rosetta consent, contribution merge, progress status, fixtures, and test strategy.
+OCI and local-path Features runner: admission, warn-skip for Apple-incompatible optional bits, metadata resolve and dependency order, artifact fetch, derived image build on native arm64, build.rosetta consent, contribution merge, progress status, fixtures, and test strategy.
 
 ## Requirements
 
@@ -21,7 +21,10 @@ Options object MAY supply feature options (e.g. `"version": "lts"`).
 
 - Non-object `features` value (array, string, number, boolean).
 - Non-object option values for a feature entry (unless the entry value is explicitly empty object).
-- Forever-rejected docker-* feature markers (see forever-reject requirement) even when expressed as a local path.
+
+**Warn-skip (v1) — continue without admitting:**
+
+- Docker-* feature markers (see warn-skip requirement) even when expressed as a local path — emit stderr warning and omit from the admitted list (do not hard-error solely for these).
 
 Error messages MUST name the feature key (when applicable) and indicate supported OCI and/or local path forms.
 
@@ -56,25 +59,25 @@ Omitted `features` MUST NOT fail validation solely for absence.
 
 ---
 
-### Requirement: Forever-reject docker-ood and privileged feature contributions
+### Requirement: Warn-skip docker-* features and privileged/securityOpt contributions
 
-Independent of general Features support, the CLI MUST forever-reject:
+Independent of general Features support, the CLI MUST **warn-and-skip** (not hard-error) these Apple-incompatible optional bits so multi-platform configs can still `up`:
 
-1. **docker-outside-of-docker** — any feature reference whose id/path contains the segment or substring `docker-outside-of-docker` (case-sensitive match on the conventional id), regardless of registry host or tag (e.g. `ghcr.io/devcontainers/features/docker-outside-of-docker:1`, alternate registries, any version tag). Also forever-reject refs containing `docker-in-docker` or `docker-from-docker` (any registry/tag or local path).
-2. **Privileged / securityOpt contributions** — after metadata resolve, any feature whose `devcontainer-feature.json` (or merged effective contribution) requires `privileged: true`, non-empty `securityOpt` / equivalent security-opt list, or an install posture that mandatorily needs them.
-3. **Compose** — unchanged; Compose keys remain forever-rejected.
+1. **docker-outside-of-docker / docker-in-docker / docker-from-docker** — any feature reference whose id/path contains the substring `docker-outside-of-docker`, `docker-in-docker`, or `docker-from-docker` (case-sensitive; any registry/tag or local path). Emit a stderr warning naming the feature and that it is incompatible with Apple container (no Docker socket / DinD path); **omit** the ref from the admitted features list; continue. Other non-matching features in the same map MUST remain admitted. When every feature is skipped this way, treat as empty features (no Features runner work) and still succeed admission/`up` when otherwise valid.
+2. **Privileged / securityOpt contributions** — after metadata resolve, when a feature’s `devcontainer-feature.json` (or image `devcontainer.metadata` label) sets `privileged: true` or non-empty `securityOpt`, emit a stderr warning naming the feature/image and that the contribution is ignored/not applied on Apple container; **do not** apply privileged or securityOpt to create; **do** allow the feature to install if it was admitted. Do **not** map privileged → `--virtualization`.
+3. **Compose** — unchanged; Compose keys remain hard-error.
 
-Errors MUST be structured and actionable: name the feature id, state the reject policy, and indicate what to remove. The CLI MUST NEVER silently skip docker-ood or privileged contributions.
+Warnings MUST be actionable via `StatusPrinter.warning` (or equivalent stderr pattern): name the item, say ignored/disabled/skipped, brief why. The CLI MUST NEVER silently skip these items. Config hash / identity MUST use the **effective** admitted config after skips (skipped docker-* features MUST NOT appear in hash material).
 
-#### Scenario: Reject docker-ood under any registry/tag
-- Given `features` includes `ghcr.io/devcontainers/features/docker-outside-of-docker:1` (or another host/tag with `docker-outside-of-docker` in the ref)
-- When config is validated (or at latest before fetch)
-- Then the CLI fails with a structured error naming the feature and the forever-reject policy
+#### Scenario: Warn-skip docker-ood under any registry/tag
+- Given `features` includes `ghcr.io/devcontainers/features/docker-outside-of-docker:1` (or another host/tag with `docker-outside-of-docker` in the ref) plus a non-docker feature (e.g. node)
+- When config is validated
+- Then admission succeeds; the docker-* ref is absent from the admitted list; the non-docker feature remains; stderr warns naming the skipped feature
 
-#### Scenario: Reject privileged feature metadata
-- Given an OCI feature whose resolved `devcontainer-feature.json` sets `privileged` to true (or requires `securityOpt`)
+#### Scenario: Warn-strip privileged feature metadata
+- Given an admitted feature whose resolved `devcontainer-feature.json` sets `privileged` to true (or requires `securityOpt`)
 - When features are resolved for `up`
-- Then the CLI fails with a structured error naming the feature and the privileged/securityOpt reject policy, and MUST NOT install features into a container for that set
+- Then the CLI does **not** fail solely for privileged/securityOpt; emits a warning; does not apply privileged/securityOpt to create; and MAY still install the feature
 
 #### Scenario: Non-ood feature is not rejected solely as features-unsupported
 - Given only `ghcr.io/devcontainers/features/node:1` in `features` (no ood)
@@ -283,7 +286,7 @@ After features are resolved (and before create for flag contributions; lifecycle
 | mounts | Bind and volume only; sources normalized with **MountNormalizer** for file→dir promotion; incompatible mount types fail structured |
 | lifecycle hooks contributed by features | Appended/merged into the create-path exec order after start (installs already in derived image); same string/argv forms and failure/delete-on-fail policy as config hooks for create-path failures |
 
-Privileged / `securityOpt` contributions remain forever-rejected (see forever-reject requirement).
+Privileged / `securityOpt` contributions are warn-stripped and not applied to create (see warn-skip requirement); other contributions still merge.
 
 **SHOULD:** If the base or derived image inspect shows a `devcontainer.metadata` label with JSON metadata, parse and merge compatible fields into the effective model. Absence of the label MUST NOT fail `up`.
 
@@ -328,7 +331,7 @@ During Features work on `up`, the CLI MUST emit stderr progress status lines in 
 - Building features image \<tag\> (or Reusing features image \<tag\> when the tag exists)
 - Configuring native arm64 builds (build.rosetta=false) — **only** when actually changing config
 
-`ADEVCONTAINER_QUIET=1` MUST silence these status lines. Machine JSON on stdout MUST remain pure when `--json` (or equivalent) is used.
+`ADEVCONTAINER_QUIET=1` MUST silence these status lines (progress only). Policy warn-skip warnings MUST still emit under QUIET. Machine JSON on stdout MUST remain pure when `--json` (or equivalent) is used.
 
 #### Scenario: Progress lines during feature up
 - Given a features config and quiet mode unset
@@ -352,12 +355,12 @@ The repository MUST provide:
 | `Tests/Fixtures/features-local.json` | Valid image-based config with local path features `./.devcontainer/features/sample-a` and `sample-b` (options as needed) |
 | `Tests/Fixtures/features-sample/` | On-disk sample feature packages (`sample-a`, `sample-b`, `sample-privileged`) for unit + local E2E |
 
-Fixtures MUST NOT include `docker-outside-of-docker`, privileged `runArgs`, device flags, or Compose keys (except `sample-privileged` metadata used only to assert forever-reject). OCI fixtures SHOULD remain usable for optional network integration tests. Local E2E copies `features-sample` into the temp workspace `.devcontainer/features/` before `up`.
+Fixtures MUST NOT include Compose keys. `features-docker-ood` and `sample-privileged` exercise warn-skip paths. OCI fixtures SHOULD remain usable for optional network integration tests. Local E2E copies `features-sample` into the temp workspace `.devcontainer/features/` before `up`.
 
 #### Scenario: features-node fixture admits
 - Given `Tests/Fixtures/features-node.json`
 - When parsed and validated under Features admission rules (without requiring live fetch in pure admission tests)
-- Then admission succeeds for the features object shape and does not hit docker-ood reject
+- Then admission succeeds for the features object shape and does not warn-skip the node feature
 
 #### Scenario: features-local fixture admits
 - Given `Tests/Fixtures/features-local.json`
@@ -368,9 +371,9 @@ Fixtures MUST NOT include `docker-outside-of-docker`, privileged `runArgs`, devi
 
 ### Requirement: Features test strategy
 
-- **Unit tests** MUST mock registry fetch and runtime `build` / image inspect / property list as needed; default `swift run adevcontainerTests` MUST pass without network and without requiring Rosetta installed. Local path load/order/privileged-reject tests use `features-sample` fixtures offline.
+- **Unit tests** MUST mock registry fetch and runtime `build` / image inspect / property list as needed; default `swift run adevcontainerTests` MUST pass without network and without requiring Rosetta installed. Local path load/order/privileged warn-skip tests use `features-sample` fixtures offline.
 - **Integration tests** MAY exercise real OCI fetch + `container build` + `up` when network and Apple `container` are available; they MUST **skip** cleanly when network is unavailable or Apple `container` is missing. **Local path E2E** (`fixtureE2E_featuresLocal`) MUST run when Apple `container` is available **without** requiring `ADEVCONTAINER_FEATURES_E2E` or ghcr network (still uses rosetta-ensure env for non-interactive CI).
-- Tests MUST NEVER require docker-ood or privileged features to succeed an install path.
+- Tests MUST cover docker-* and privileged/securityOpt **warn-skip** (no throw; stripped from effective config) without requiring a real install of those contributions.
 - Features up-path tests MUST assert `container build` with host-native `--platform` and **no** `--rosetta` on the Features build path; create MUST use the derived image tag.
 
 #### Scenario: Offline unit suite

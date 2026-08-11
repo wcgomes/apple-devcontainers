@@ -60,7 +60,7 @@ On `clone`, the CLI MUST:
 - An explicit `workspaceFolder` in config still wins after substitution (including forms that embed `${localWorkspaceFolderBasename}`).
 
 #### Scenario: Public happy path discovers nested config
-- Given a public repository containing `.devcontainer/devcontainer.json` with a valid `image` (and no forever-rejected properties)
+- Given a public repository containing `.devcontainer/devcontainer.json` with a valid `image` (and no hard-error properties such as Compose)
 - When the user runs `adevcontainer clone <git-url>` with host git and runtime available (or mocked success)
 - Then config is discovered from `.devcontainer/devcontainer.json`, resolve succeeds, and the clone flow continues to create
 
@@ -363,7 +363,7 @@ On `adevcontainer clone` only, after config resolve and **before** the Features 
 5. Progress on stderr MUST report e.g. `==> Ensuring git feature for volume workspace` when injecting (StatusPrinter).
 6. Prefer a small helper (e.g. `FeatureGitEnsure.ensurePresent`) under Features/.
 
-**MUST NOT** apply this inject on `up` bind-mode. Forever-rejected docker-* Features policy is unchanged. The git feature is the official OCI feature — not a docker-* id.
+**MUST NOT** apply this inject on `up` bind-mode. docker-* Features remain warn-skip (not hard-error). The git feature is the official OCI feature — not a docker-* id.
 
 Rationale: volume-mode workspaces need git inside the container for **full clone populate** and day-to-day work; probing the base image is heavy without a one-shot run API, and Feature install is idempotent enough when the base already has git.
 

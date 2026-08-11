@@ -113,7 +113,7 @@ nonisolated(unsafe) let errorModelTests: [(String, () throws -> Void)] = [
         let err = CLIError(
             code: CLIErrorCode.unsupportedProperty,
             property: "runArgs",
-            message: "runArgs entry '--privileged' is forever-rejected",
+            message: "runArgs entry '--privileged' is incompatible with Apple container; ignored",
             hint: "Remove --privileged from runArgs"
         )
         try MiniTest.expectEqual(err.property, "runArgs")
@@ -304,18 +304,18 @@ nonisolated(unsafe) let substitutionTests: [(String, () throws -> Void)] = [
 ]
 
 nonisolated(unsafe) let admissionTests: [(String, () throws -> Void)] = [
-    ("rejectDockerOOD", {
+    ("warnSkipDockerOOD", {
         let raw: [String: Any] = [
             "image": "alpine:3.20",
             "features": [
-                "ghcr.io/devcontainers/features/docker-outside-of-docker:1": [:] as [String: Any]
+                "ghcr.io/devcontainers/features/docker-outside-of-docker:1": [:] as [String: Any],
+                "ghcr.io/devcontainers/features/node:2": ["version": "22"] as [String: Any]
             ]
         ]
-        try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
-            let err = error as! CLIError
-            try MiniTest.expectEqual(err.code, CLIErrorCode.unsupportedFeature)
-            try MiniTest.expect(err.message.contains("docker-outside-of-docker"))
-        }
+        try ConfigAdmissions.admit(raw)
+        let features = try FeatureAdmission.parse(raw["features"])
+        try MiniTest.expectEqual(features.count, 1)
+        try MiniTest.expectEqual(features[0].reference, "ghcr.io/devcontainers/features/node:2")
     }),
     ("admitOciNodeFeature", {
         let raw: [String: Any] = [
@@ -328,22 +328,169 @@ nonisolated(unsafe) let admissionTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(features[0].reference, "ghcr.io/devcontainers/features/node:2")
         try MiniTest.expectEqual(features[0].options["version"]?.stringValue, "22")
     }),
-    ("rejectPrivileged", {
-        let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--privileged"]]
-        try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
-            let err = error as! CLIError
-            try MiniTest.expectEqual(err.property, "runArgs")
-            try MiniTest.expect(err.message.contains("--privileged"))
-        }
+    ("warnSkipPrivilegedKeepsInit", {
+        let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--privileged", "--init"]]
+        try ConfigAdmissions.admit(raw)
+        let parsed = try RunArgsAdmission.parse(raw["runArgs"])
+        try MiniTest.expectEqual(parsed, [.initFlag])
     }),
-    ("rejectDevice", {
+    ("warnSkipOncePerResolve", {
+        // admit (×2) + buildResolved parse used to triple-warn; only final parse may warn.
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "runArgs": ["--privileged", "--init"],
+          "features": {
+            "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
+            "ghcr.io/devcontainers/features/node:1": {}
+          }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        try MiniTest.expectEqual(resolved.config.runArgs, [.initFlag])
+        try MiniTest.expectEqual(resolved.config.features.count, 1)
+
+        let privilegedWarns = warnings.filter { $0.contains("--privileged") }
+        let oodWarns = warnings.filter { $0.contains("docker-outside-of-docker") }
+        try MiniTest.expectEqual(privilegedWarns.count, 1)
+        try MiniTest.expectEqual(oodWarns.count, 1)
+    }),
+    ("hashNeutralSkippedRunArgs", {
+        let withNoise = try RunArgsAdmission.parse(["--privileged", "--init"] as [Any])
+        let clean = try RunArgsAdmission.parse(["--init"] as [Any])
+        try MiniTest.expectEqual(withNoise, clean)
+        try MiniTest.expectEqual(withNoise, [.initFlag])
+        let a = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/x",
+            runArgs: withNoise
+        )
+        let b = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/x",
+            runArgs: clean
+        )
+        let h1 = ContainerIdentity.configHash(from: a.hashMaterial())
+        let h2 = ContainerIdentity.configHash(from: b.hashMaterial())
+        try MiniTest.expectEqual(h1, h2)
+    }),
+    ("hashNeutralSkippedFeatures", {
+        let withOOD = try FeatureAdmission.parse([
+            "ghcr.io/devcontainers/features/docker-outside-of-docker:1": [:] as [String: Any],
+            "ghcr.io/devcontainers/features/node:1": ["version": "22"] as [String: Any]
+        ] as [String: Any])
+        let nodeOnly = try FeatureAdmission.parse([
+            "ghcr.io/devcontainers/features/node:1": ["version": "22"] as [String: Any]
+        ] as [String: Any])
+        try MiniTest.expectEqual(withOOD, nodeOnly)
+        try MiniTest.expectEqual(withOOD.count, 1)
+        let a = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/x",
+            features: withOOD
+        )
+        let b = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/x",
+            features: nodeOnly
+        )
+        let h1 = ContainerIdentity.configHash(from: a.hashMaterial())
+        let h2 = ContainerIdentity.configHash(from: b.hashMaterial())
+        try MiniTest.expectEqual(h1, h2)
+    }),
+    ("warnSkipDevice", {
         let raw: [String: Any] = [
             "image": "alpine:3.20",
-            "runArgs": ["--device=/dev/net/tun:/dev/net/tun"]
+            "runArgs": ["--device=/dev/net/tun:/dev/net/tun", "--init"]
         ]
-        try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
-            try MiniTest.expect((error as! CLIError).message.contains("--device"))
+        try ConfigAdmissions.admit(raw)
+        let parsed = try RunArgsAdmission.parse(raw["runArgs"])
+        try MiniTest.expectEqual(parsed, [.initFlag])
+    }),
+    ("warnSkipDeviceTwoToken", {
+        let raw: [String: Any] = [
+            "image": "alpine:3.20",
+            "runArgs": ["--device", "/dev/net/tun", "--init"]
+        ]
+        try ConfigAdmissions.admit(raw)
+        let parsed = try RunArgsAdmission.parse(raw["runArgs"])
+        try MiniTest.expectEqual(parsed, [.initFlag])
+    }),
+    ("warnSkipPrivilegedNetAdminPairing", {
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+
+        let parsed = try RunArgsAdmission.parse([
+            "--privileged",
+            "--cap-add=NET_ADMIN",
+            "--init"
+        ] as [Any])
+        try MiniTest.expectEqual(parsed, [.capAdd("NET_ADMIN"), .initFlag])
+        let pairing = warnings.filter { $0.contains("NET_ADMIN") && $0.contains("privileged/device") }
+        try MiniTest.expectEqual(pairing.count, 1)
+        try MiniTest.expect(warnings.contains { $0.contains("--privileged") })
+    }),
+    ("warnSkipStillFiresWhenQuiet", {
+        let previousEnabled = StatusPrinter.enabled
+        let previousSuppress = StatusPrinter.suppressWarningStderr
+        let previousOn = StatusPrinter.onWarning
+        defer {
+            StatusPrinter.enabled = previousEnabled
+            StatusPrinter.suppressWarningStderr = previousSuppress
+            StatusPrinter.onWarning = previousOn
         }
+        // QUIET silences progress only; onWarning (and product stderr) still receive policy warns.
+        StatusPrinter.enabled = false
+        StatusPrinter.suppressWarningStderr = true
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+        StatusPrinter.status("should-be-silent")
+        _ = try RunArgsAdmission.parse(["--privileged", "--init"] as [Any])
+        try MiniTest.expect(warnings.contains { $0.contains("--privileged") })
+    }),
+    ("featurePrivilegedMetadataOnWarning", {
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+
+        let data = try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-privileged"))
+            .appendingPathComponent("devcontainer-feature.json"))
+        let meta = try FeatureMetadata.parse(data: data, featureRef: FeaturesTestSupport.refPriv)
+        meta.warnStripUnsafeContributions(featureRef: FeaturesTestSupport.refPriv)
+        try MiniTest.expect(warnings.contains { $0.contains("privileged") && $0.contains("ignored") })
+    }),
+    ("featureSecurityOptOnWarning", {
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+
+        let meta = FeatureMetadata(id: "x", securityOpt: ["label=disable"])
+        meta.warnStripUnsafeContributions(featureRef: "ghcr.io/x:1")
+        try MiniTest.expect(warnings.contains { $0.contains("securityOpt") && $0.contains("ignored") })
+    }),
+    ("featureMetadataLabelPrivilegedOnWarning", {
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+
+        let labels = [
+            DevContainerMetadataLabel.labelKey:
+                #"[{"containerEnv":{"OK":"1"}},{"privileged":true,"securityOpt":["label=disable"]}]"#
+        ]
+        DevContainerMetadataLabel.warnStripUnsafe(from: labels, imageRef: "img:1")
+        try MiniTest.expect(warnings.contains { $0.contains("privileged") })
+        try MiniTest.expect(warnings.contains { $0.contains("securityOpt") })
     }),
     ("rejectUnknownRunArgs", {
         let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--not-a-real-flag"]]
@@ -353,35 +500,30 @@ nonisolated(unsafe) let admissionTests: [(String, () throws -> Void)] = [
             try MiniTest.expect(err.message.lowercased().contains("allowlist"))
         }
     }),
-    ("rejectNetworkHost", {
-        let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--network=host"]]
-        try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
-            let err = error as! CLIError
-            try MiniTest.expect(err.message.lowercased().contains("host"))
-            try MiniTest.expect(
-                err.message.lowercased().contains("forever-rejected")
-                    || err.message.lowercased().contains("not allowed")
-            )
-        }
+    ("warnSkipNetworkHost", {
+        let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--network=host", "--init"]]
+        try ConfigAdmissions.admit(raw)
+        let parsed = try RunArgsAdmission.parse(raw["runArgs"])
+        try MiniTest.expectEqual(parsed, [.initFlag])
     }),
-    ("rejectNetworkBridgeNoneContainer", {
+    ("warnSkipNetworkBridgeNoneContainer", {
         for mode in ["bridge", "none", "container:abc", "HOST"] {
-            let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--network=\(mode)"]]
-            try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
-                try MiniTest.expectEqual((error as! CLIError).property, "runArgs")
-            }
+            let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--network=\(mode)", "--init"]]
+            try ConfigAdmissions.admit(raw)
+            let parsed = try RunArgsAdmission.parse(raw["runArgs"])
+            try MiniTest.expectEqual(parsed, [.initFlag])
         }
-        let twoTok: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--network", "host"]]
-        try MiniTest.expectThrows({ try ConfigAdmissions.admit(twoTok) }) { error in
-            try MiniTest.expect((error as! CLIError).message.lowercased().contains("host"))
-        }
+        let twoTok: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--network", "host", "--init"]]
+        try ConfigAdmissions.admit(twoTok)
+        let parsed = try RunArgsAdmission.parse(twoTok["runArgs"])
+        try MiniTest.expectEqual(parsed, [.initFlag])
     }),
-    ("rejectSecurityOptAndGpus", {
+    ("warnSkipSecurityOptAndGpus", {
         for flag in ["--security-opt=label=disable", "--gpus=all", "--ipc=host", "--pid=host"] {
-            let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": [flag]]
-            try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
-                try MiniTest.expect((error as! CLIError).message.lowercased().contains("forever-rejected"))
-            }
+            let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": [flag, "--init"]]
+            try ConfigAdmissions.admit(raw)
+            let parsed = try RunArgsAdmission.parse(raw["runArgs"])
+            try MiniTest.expectEqual(parsed, [.initFlag])
         }
     }),
     ("rejectFirstClassRunArgsFlags", {
@@ -1444,10 +1586,10 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(features.contains { $0.reference.contains("sample-b") })
         for f in features {
             try MiniTest.expect(FeatureRef.isLocalPath(f.reference))
-            try MiniTest.expect(!FeatureRef.containsDockerOOD(f.reference))
+            try MiniTest.expect(FeatureRef.warnSkippedDockerMarker(in: f.reference) == nil)
         }
     }),
-    ("featuresDockerOODAnyRegistryTag", {
+    ("featuresDockerOODAnyRegistryTagWarnSkip", {
         let refs = [
             "ghcr.io/devcontainers/features/docker-outside-of-docker:1",
             "ghcr.io/devcontainers/features/docker-outside-of-docker:2.0",
@@ -1455,21 +1597,16 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             "ghcr.io/other/docker-outside-of-docker"
         ]
         for ref in refs {
-            try MiniTest.expectThrows({
-                try ConfigAdmissions.admit([
-                    "image": "alpine:3.20",
-                    "features": [ref: [:] as [String: Any]]
-                ])
-            }) { error in
-                let err = error as! CLIError
-                try MiniTest.expect(err.message.contains("docker-outside-of-docker"))
-                try MiniTest.expect(err.message.lowercased().contains("forever-rejected")
-                    || (err.hint?.contains("docker-outside-of-docker") == true))
-            }
+            try ConfigAdmissions.admit([
+                "image": "alpine:3.20",
+                "features": [ref: [:] as [String: Any]]
+            ])
+            let features = try FeatureAdmission.parse([ref: [:] as [String: Any]])
+            try MiniTest.expectEqual(features.count, 0)
         }
     }),
-    ("featuresDockerRelatedForeverRejectByName", {
-        // Offline: admit fails immediately (no network) for docker-in-docker / ood / from-docker.
+    ("featuresDockerRelatedWarnSkipByName", {
+        // Offline: admit succeeds and drops docker-in-docker / ood / from-docker (no network).
         let cases: [(ref: String, marker: String)] = [
             ("ghcr.io/devcontainers/features/docker-in-docker:2", "docker-in-docker"),
             ("ghcr.io/devcontainers/features/docker-outside-of-docker:1", "docker-outside-of-docker"),
@@ -1477,32 +1614,28 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             ("example.com/mirror/docker-in-docker:latest", "docker-in-docker")
         ]
         for item in cases {
-            try MiniTest.expectThrows({
-                try ConfigAdmissions.admit([
-                    "image": "alpine:3.20",
-                    "features": [item.ref: [:] as [String: Any]]
-                ])
-            }) { error in
-                let err = error as! CLIError
-                try MiniTest.expectEqual(err.code, CLIErrorCode.unsupportedFeature)
-                try MiniTest.expect(err.message.contains(item.marker))
-                try MiniTest.expect(err.message.lowercased().contains("forever-rejected"))
-            }
+            try ConfigAdmissions.admit([
+                "image": "alpine:3.20",
+                "features": [
+                    item.ref: [:] as [String: Any],
+                    "ghcr.io/devcontainers/features/node:1": [:] as [String: Any]
+                ]
+            ])
+            let features = try FeatureAdmission.parse([
+                item.ref: [:] as [String: Any],
+                "ghcr.io/devcontainers/features/node:1": [:] as [String: Any]
+            ])
+            try MiniTest.expectEqual(features.count, 1)
+            try MiniTest.expect(features[0].reference.contains("node"))
+            try MiniTest.expect(!features.contains { $0.reference.contains(item.marker) })
         }
     }),
-    ("featuresDockerOODFixtureRejects", {
+    ("featuresDockerOODFixtureWarnSkips", {
         let path = TestRepo.root().appendingPathComponent("Tests/Fixtures/features-docker-ood.json").path
         let obj = try JSONCParser.loadFile(at: path)
-        try MiniTest.expectThrows({ try ConfigAdmissions.admit(obj) }) { error in
-            let err = error as! CLIError
-            try MiniTest.expectEqual(err.code, CLIErrorCode.unsupportedFeature)
-            try MiniTest.expect(err.message.contains("docker-outside-of-docker"))
-            try MiniTest.expect(err.message.lowercased().contains("forever-rejected"))
-        }
-        try MiniTest.expectThrows({ _ = try FeatureAdmission.parse(obj["features"]) }) { error in
-            let err = error as! CLIError
-            try MiniTest.expect(err.message.contains("docker-outside-of-docker"))
-        }
+        try ConfigAdmissions.admit(obj)
+        let features = try FeatureAdmission.parse(obj["features"])
+        try MiniTest.expectEqual(features.count, 0)
     }),
     ("featuresNodeFixtureAdmits", {
         let path = TestRepo.root().appendingPathComponent("Tests/Fixtures/features-node.json").path
@@ -1511,7 +1644,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         let features = try FeatureAdmission.parse(obj["features"])
         try MiniTest.expectEqual(features.count, 1)
         try MiniTest.expect(features[0].reference.contains("node"))
-        try MiniTest.expect(!FeatureRef.containsDockerOOD(features[0].reference))
+        try MiniTest.expect(FeatureRef.warnSkippedDockerMarker(in: features[0].reference) == nil)
     }),
     ("featuresTripleFixtureAdmits", {
         let path = TestRepo.root().appendingPathComponent("Tests/Fixtures/features-triple.json").path
@@ -1524,7 +1657,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(refs.contains(where: { $0.contains("/git:") || $0.hasSuffix("/git:1") || $0.contains("features/git") }))
         try MiniTest.expect(refs.contains(where: { $0.contains("github-cli") }))
         for ref in refs {
-            try MiniTest.expect(!FeatureRef.containsDockerOOD(ref), ref)
+            try MiniTest.expect(FeatureRef.warnSkippedDockerMarker(in: ref) == nil, ref)
         }
     }),
     ("featureMetadataParseFixture", {
@@ -1620,27 +1753,19 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             try MiniTest.expect(err.message.lowercased().contains("cycle"))
         }
     }),
-    ("featurePrivilegedMetadataReject", {
+    ("featurePrivilegedMetadataWarnSkip", {
         let data = try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-privileged"))
             .appendingPathComponent("devcontainer-feature.json"))
         let meta = try FeatureMetadata.parse(data: data, featureRef: FeaturesTestSupport.refPriv)
-        try MiniTest.expectThrows({
-            try meta.rejectUnsafeContributions(featureRef: FeaturesTestSupport.refPriv)
-        }) { error in
-            let err = error as! CLIError
-            try MiniTest.expect(err.message.lowercased().contains("privileged"))
-            try MiniTest.expect(err.message.lowercased().contains("forever-rejected")
-                || (err.hint?.lowercased().contains("privileged") == true))
-        }
+        try MiniTest.expect(meta.privileged)
+        // Must not throw — privileged is warn-stripped; feature may still install.
+        meta.warnStripUnsafeContributions(featureRef: FeaturesTestSupport.refPriv)
     }),
-    ("featureSecurityOptReject", {
+    ("featureSecurityOptWarnSkip", {
         let meta = FeatureMetadata(id: "x", securityOpt: ["label=disable"])
-        try MiniTest.expectThrows({
-            try meta.rejectUnsafeContributions(featureRef: "ghcr.io/x:1")
-        }) { error in
-            try MiniTest.expect((error as! CLIError).message.lowercased().contains("securityopt")
-                || (error as! CLIError).message.contains("securityOpt"))
-        }
+        try MiniTest.expect(!meta.securityOpt.isEmpty)
+        // Must not throw — securityOpt is warn-stripped.
+        meta.warnStripUnsafeContributions(featureRef: "ghcr.io/x:1")
     }),
     ("featureOptionsEnvNames", {
         try MiniTest.expectEqual(FeatureOptions.envName(forOption: "version"), "VERSION")
@@ -1777,20 +1902,14 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         ])
         try MiniTest.expectEqual(ordered.map(\.admitted.reference), [refA, refB])
     }),
-    ("featureLocalPrivilegedStillRejects", {
+    ("featureLocalPrivilegedWarnSkip", {
         let meta = try FeatureMetadata.parse(
             data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-privileged"))
                 .appendingPathComponent("devcontainer-feature.json")),
             featureRef: "./.devcontainer/features/sample-privileged"
         )
-        try MiniTest.expectThrows({
-            try meta.rejectUnsafeContributions(featureRef: "./.devcontainer/features/sample-privileged")
-        }) { error in
-            let err = error as! CLIError
-            try MiniTest.expect(err.message.lowercased().contains("privileged"))
-            try MiniTest.expect(err.message.lowercased().contains("forever-rejected")
-                || (err.hint?.lowercased().contains("privileged") == true))
-        }
+        try MiniTest.expect(meta.privileged)
+        meta.warnStripUnsafeContributions(featureRef: "./.devcontainer/features/sample-privileged")
     }),
     ("featuresRunnerLocalSampleAAndBOrder", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
@@ -2190,17 +2309,15 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(c.containerEnv["B"], "2")
         try MiniTest.expect(c.initProcess)
     }),
-    ("featureMetadataLabelArrayPrivilegedReject", {
+    ("featureMetadataLabelArrayPrivilegedWarnSkip", {
         let labels = [
             DevContainerMetadataLabel.labelKey:
                 #"[{"containerEnv":{"OK":"1"}},{"privileged":true}]"#
         ]
-        try MiniTest.expectThrows({
-            try DevContainerMetadataLabel.rejectUnsafe(from: labels, imageRef: "img:1")
-        }) { error in
-            let err = error as! CLIError
-            try MiniTest.expect(err.message.lowercased().contains("privileged"))
-        }
+        // Must not throw — privileged from image metadata is warn-stripped.
+        DevContainerMetadataLabel.warnStripUnsafe(from: labels, imageRef: "img:1")
+        let c = DevContainerMetadataLabel.parseContributions(from: labels)
+        try MiniTest.expectEqual(c.containerEnv["OK"], "1")
     }),
     ("featuresRunnerBuildWithPlatformNoRosetta", {
         let cache = FileManager.default.temporaryDirectory
