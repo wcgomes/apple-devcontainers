@@ -57,22 +57,22 @@ The CLI MUST admit and honor these lifecycle properties in addition to existing 
 
 When a create-path hook, restart `postStartCommand`, or running `postAttachCommand` executes, the CLI MUST:
 
-1. Emit a stderr progress status line in the existing StatusPrinter family before the hook runs: `==> Running <property>` (string/argv form), or the labeled form `==> Running <property> (<name>)` for each object-map entry.
-2. Live-tee the hook command’s **stdout and stderr** to **host stderr** while the command runs, and still capture that output for failure diagnostics (structured error text). Non-lifecycle `exec` MAY remain capture-then-print.
+1. Emit a stderr progress status line in the StatusPrinter family before the hook runs: `==> Running <property>` (string/argv form), or the labeled form `==> Running <property> (<name>)` for each object-map entry. Presentation MAY apply color and phase section spacing per [terminal-output.md](terminal-output.md); the monochrome text family MUST remain greppable as `==> Running …`.
+2. Live-tee the hook command’s **stdout and stderr** to **host stderr** while the command runs, **framed as internal tool output** (each displayed line prefixed with `| ` and indented per [terminal-output.md](terminal-output.md) **Internal tool output framing**), and still capture that output as **unprefixed raw** text for failure diagnostics (structured error text). Non-lifecycle `exec` MAY remain capture-then-print unless another requirement enables streaming.
 3. Keep machine JSON on stdout pure when `--json` (or equivalent) is used — hook script stdout MUST NOT write to host stdout (tee to host stderr only).
-4. Treat `ADEVCONTAINER_QUIET=1` as silencing **status lines only** (`==> Running …`); hook script output MUST still emit on host stderr under QUIET.
+4. Treat `ADEVCONTAINER_QUIET=1` as silencing **status lines only** (`==> Running …`); hook script output MUST still emit on host stderr under QUIET (framed as internal tool lines).
 
 This requirement MUST NOT change hook order, admitted forms, fail/delete-on-fail policy, or postAttach gating.
 
-#### Scenario: Hook run emits status and live-tees I/O
+#### Scenario: Hook run emits status and framed live-tees I/O
 - Given a create-path (or restart postStart / running postAttach) hook that prints to stdout and stderr and exits 0, and quiet mode unset
 - When the CLI executes that hook
-- Then stderr includes `==> Running <property>` (or labeled form), the hook’s stdout and stderr appear live on host stderr, and with `--json` host stdout remains pure machine JSON
+- Then stderr includes `==> Running <property>` (or labeled form), the hook’s stdout and stderr appear live on host stderr as framed `| ` tool lines, captured diagnostics remain available as raw text on failure paths, and with `--json` host stdout remains pure machine JSON
 
 #### Scenario: Quiet silences status not hook output
 - Given `ADEVCONTAINER_QUIET=1` and a hook that prints a recognizable line to stdout
 - When the CLI executes that hook
-- Then `==> Running …` status lines are not printed and the hook’s output still appears on host stderr
+- Then `==> Running …` status lines are not printed and the hook’s output still appears on host stderr as framed internal tool lines
 
-See also: [core.md](core.md) **Up lifecycle** for the create/reuse/start path matrix (including postAttach and vscode customizations rows); [vscode.md](vscode.md) for **postAttachCommand policy (CLI-only)**; [features.md](features.md) **Features progress status lines** for StatusPrinter / QUIET / `--json` norms.
+See also: [core.md](core.md) **Up lifecycle** for the create/reuse/start path matrix (including postAttach and vscode customizations rows); [vscode.md](vscode.md) for **postAttachCommand policy (CLI-only)**; [features.md](features.md) **Features progress status lines** for StatusPrinter / QUIET / `--json` norms; [terminal-output.md](terminal-output.md) for framing/color/QUIET presentation.
 

@@ -21,7 +21,7 @@ MVP acceptance for editor integration is:
 #### Scenario: Running container is attachable target
 - Given a successful `up` (or `clone`)
 - When the user lists/inspects containers via the CLI
-- Then the workspace container is identifiable for manual VS Code attach
+- Then the managed dev container is identifiable for manual VS Code attach
 
 #### Scenario: Optional open does not replace manual attach
 - Given a successful lifecycle without or with `--vscode`
