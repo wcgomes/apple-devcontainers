@@ -29,7 +29,7 @@ enum TestRepo {
     }
 }
 
-final class MockProcessRunner: ProcessRunning, @unchecked Sendable {
+final class MockProcessRunner: StreamTeeingProcessRunning, @unchecked Sendable {
     var calls: [MockProcessCall] = []
     var results: [ProcessResult] = []
     var handlers: [([String]) -> ProcessResult?] = []
@@ -37,12 +37,17 @@ final class MockProcessRunner: ProcessRunning, @unchecked Sendable {
     /// Optional handlers that also receive stdin (for credential fill tests).
     var stdinHandlers: [([String], Data?) -> ProcessResult?] = []
     var defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+    /// Last streaming flags from `StreamTeeingProcessRunning` (nil if plain `run` was used).
+    var lastStreamStderr: Bool?
+    var lastTeeStdoutToStderr: Bool?
 
     struct MockProcessCall: Equatable {
         var executable: String
         var arguments: [String]
         var stdinData: Data?
         var environment: [String: String]?
+        var streamStderr: Bool?
+        var teeStdoutToStderr: Bool?
 
         static func == (lhs: MockProcessCall, rhs: MockProcessCall) -> Bool {
             lhs.executable == rhs.executable
@@ -62,8 +67,36 @@ final class MockProcessRunner: ProcessRunning, @unchecked Sendable {
             executable: executable,
             arguments: arguments,
             stdinData: stdinData,
-            environment: environment
+            environment: environment,
+            streamStderr: nil,
+            teeStdoutToStderr: nil
         ))
+        return try dispatch(arguments: arguments, stdinData: stdinData)
+    }
+
+    func run(
+        executable: String,
+        arguments: [String],
+        environment: [String: String]?,
+        currentDirectory: String?,
+        stdinData: Data?,
+        streamStderr: Bool,
+        teeStdoutToStderr: Bool
+    ) throws -> ProcessResult {
+        lastStreamStderr = streamStderr
+        lastTeeStdoutToStderr = teeStdoutToStderr
+        calls.append(MockProcessCall(
+            executable: executable,
+            arguments: arguments,
+            stdinData: stdinData,
+            environment: environment,
+            streamStderr: streamStderr,
+            teeStdoutToStderr: teeStdoutToStderr
+        ))
+        return try dispatch(arguments: arguments, stdinData: stdinData)
+    }
+
+    private func dispatch(arguments: [String], stdinData: Data?) throws -> ProcessResult {
         for handler in stdinHandlers {
             if let r = handler(arguments, stdinData) { return r }
         }
@@ -1584,6 +1617,104 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expect(result.succeeded)
         try MiniTest.expect(result.stderrString.contains("streamed-err"))
+    }),
+    ("foundationProcessRunnerCapturesTeedStdout", {
+        // teeStdoutToStderr must still capture stdout for failure diagnostics.
+        let runner = FoundationProcessRunner()
+        let result = try runner.run(
+            executable: "/bin/sh",
+            arguments: ["-c", "echo streamed-out; echo streamed-err 1>&2"],
+            environment: nil,
+            currentDirectory: nil,
+            streamStderr: true,
+            teeStdoutToStderr: true
+        )
+        try MiniTest.expect(result.succeeded)
+        try MiniTest.expect(result.stdoutString.contains("streamed-out"))
+        try MiniTest.expect(result.stderrString.contains("streamed-err"))
+    }),
+    ("lifecycleRunnerStreamsHookExecOutput", {
+        // Lifecycle hooks must request streamOutput so long-running scripts tee live.
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.first == "exec" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("hook-stdout\n".utf8),
+                        stderr: Data("hook-stderr\n".utf8)
+                    )
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/app",
+            postCreateCommand: .shell("echo slow-hook")
+        )
+        try LifecycleRunner.runIfPresent(
+            property: "postCreateCommand",
+            command: config.postCreateCommand,
+            containerId: "ctr-stream",
+            config: config,
+            runtime: runtime,
+            failurePolicy: .deleteContainerThenFail
+        )
+        try MiniTest.expect(mock.lastStreamStderr == true)
+        try MiniTest.expect(mock.lastTeeStdoutToStderr == true)
+        let execCalls = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execCalls.count, 1)
+        try MiniTest.expect(execCalls[0].streamStderr == true)
+        try MiniTest.expect(execCalls[0].teeStdoutToStderr == true)
+    }),
+    ("lifecycleRunnerStreamFailureKeepsDiagnostics", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.first == "exec" {
+                    return ProcessResult(
+                        exitCode: 3,
+                        stdout: Data("out-detail\n".utf8),
+                        stderr: Data("err-detail\n".utf8)
+                    )
+                }
+                if args.first == "delete" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/app",
+            postCreateCommand: .shell("false")
+        )
+        try MiniTest.expectThrows({
+            try LifecycleRunner.runIfPresent(
+                property: "postCreateCommand",
+                command: config.postCreateCommand,
+                containerId: "ctr-fail-stream",
+                config: config,
+                runtime: runtime,
+                failurePolicy: .deleteContainerThenFail
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.postCreateFailed)
+            try MiniTest.expect(err.message.contains("err-detail"))
+            try MiniTest.expect(err.message.contains("out-detail"))
+            try MiniTest.expect(err.message.contains("exit 3"))
+        }
+        // Streaming path was used on exec; captured detail still reaches the structured error.
+        // (delete-on-fail also streams stderr and must not be confused with the hook exec flags.)
+        let execCalls = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execCalls.count, 1)
+        try MiniTest.expect(execCalls[0].streamStderr == true)
+        try MiniTest.expect(execCalls[0].teeStdoutToStderr == true)
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" })
     }),
     ("isBuilderRunningParsesStatusJSON", {
         let mock = MockProcessRunner()

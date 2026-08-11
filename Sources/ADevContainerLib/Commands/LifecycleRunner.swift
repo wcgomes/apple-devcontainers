@@ -54,12 +54,15 @@ public enum LifecycleRunner {
         failurePolicy: FailurePolicy
     ) throws {
         StatusPrinter.status("Running \(property)")
+        // Stream hook logs live (teed to host stderr) so long postCreate/etc scripts do not
+        // look stuck. Capture is retained for failure diagnostics; QUIET only silences status.
         let execResult = try runtime.exec(
             nameOrId: containerId,
             command: command.execArguments,
             user: config.effectiveUser,
             workdir: config.workspaceFolder,
-            env: config.containerEnv
+            env: config.containerEnv,
+            streamOutput: true
         )
         guard execResult.succeeded else {
             if failurePolicy == .deleteContainerThenFail {

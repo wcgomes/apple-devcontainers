@@ -70,7 +70,7 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
 
 **delete vs prune:** `delete` drops the workspace container only. `prune` also removes config `type=volume` mounts (by label), the clone workspace volume (`adev-*-ws`), and the config `image` reference. Neither deletes bind-mount host paths or runs global `volume`/`image` prune. Derived Features tags (`adev-{base}:{hash12}` / `adevcontainer:{hash12}`) are not removed by `prune` unless they equal the config `image` field.
 
-**Progress:** long ops print `==> …` progress lines on stderr and tee Apple `container` stderr (pull/create/start/stop/delete/volume create; Features: Resolving/Fetching/Building/Reusing; build.rosetta config when changing). `ADEVCONTAINER_QUIET=1` silences progress status only — policy warn-skips still emit.
+**Progress:** long ops print `==> …` progress lines on stderr and tee Apple `container` stderr (pull/create/start/stop/delete/volume create; Features: Resolving/Fetching/Building/Reusing; build.rosetta config when changing; lifecycle `==> Running …`). Lifecycle hook script stdout+stderr stream live to host stderr (still captured for failures; `--json` purity → not host stdout). Non-lifecycle `exec` remains capture-then-print. `ADEVCONTAINER_QUIET=1` silences `==> …` status only — policy warn-skips and hook script output still emit. Detail: [cli-runtime-boundary — Progress/tee](conventions/cli-runtime-boundary.md#progress--tee).
 
 ## Identity
 

@@ -240,13 +240,16 @@ Apple `container` does **not** expand `${PATH}` / `$PATH` in env values. Product
 
 ## Progress / tee
 
-- Progress status lines on **stderr**: `==> …` (pull, create, start, stop, delete, volume create, Features Resolving/Fetching/Building/Reusing, build.rosetta config when changing, and related long steps).
+- Progress status lines on **stderr**: `==> …` (pull, create, start, stop, delete, volume create, Features Resolving/Fetching/Building/Reusing, build.rosetta config when changing, lifecycle `==> Running <property>`, and related long steps). StatusPrinter only — not hook script I/O.
 - Tee Apple `container` stderr onto the same stream for those operations.
-- `--json` keeps **stdout** pure JSON. `ADEVCONTAINER_QUIET=1` silences progress status lines only (policy warn-skips still emit).
+- **Lifecycle hook live stream (distinct from status):** hook child **stdout and stderr** are teed **live** to **host stderr** while still captured for failure diagnostics. Prevents long hooks looking stuck (previously capture-until-exit). Non-lifecycle `exec` stays capture-then-print (stream off by default).
+- `--json` keeps **stdout** pure JSON — hook script stdout is teed to host **stderr**, never host stdout. `ADEVCONTAINER_QUIET=1` silences `==> …` status lines only (policy warn-skips and hook script output still emit).
+- Under heavy dual-stream load, dual drain threads may interleave stdout/stderr bytes on host stderr.
+- **Test tip:** assert stream flags on the lifecycle `exec` call itself — delete-on-fail invoke also streams and can overwrite mock “last flag” fields.
 
 ## Lifecycle execution (hook matrix)
 
-Hooks run via runtime **exec** into the running container (effective user + workspace folder when set). Omitted properties and empty `{}` maps are no-ops. Nested objects rejected. Exec env PATH expansion applies (see PATH expansion). Contract: [`specs/lifecycle-hooks.md`](../../specs/lifecycle-hooks.md).
+Hooks run via runtime **exec** into the running container (effective user + workspace folder when set). Omitted properties and empty `{}` maps are no-ops. Nested objects rejected. Exec env PATH expansion applies (see PATH expansion). **Live I/O:** lifecycle exec enables streamOutput — child stdout+stderr teed live to host stderr (still captured for error messages); status `==> Running …` is separate StatusPrinter output. Contract: [`specs/lifecycle-hooks.md`](../../specs/lifecycle-hooks.md).
 
 ### Command forms (`LifecycleCommand`)
 

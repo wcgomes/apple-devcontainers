@@ -646,7 +646,8 @@ public struct AppleContainerRuntime: Sendable {
         workdir: String? = nil,
         env: [String: String] = [:],
         interactive: Bool = false,
-        stdinData: Data? = nil
+        stdinData: Data? = nil,
+        streamOutput: Bool = false
     ) throws -> ProcessResult {
         var args = ["exec"]
         if let user, !user.isEmpty {
@@ -673,6 +674,19 @@ public struct AppleContainerRuntime: Sendable {
         args.append(contentsOf: command)
 
         let selected = interactive ? interactiveRunner : runner
+        // Lifecycle hooks: tee child stdout+stderr to host stderr while capturing both so
+        // long-running scripts are visible and `--json` host stdout stays pure.
+        if streamOutput, !interactive, let streaming = selected as? any StreamTeeingProcessRunning {
+            return try streaming.run(
+                executable: executablePath,
+                arguments: args,
+                environment: nil,
+                currentDirectory: nil,
+                stdinData: stdinData,
+                streamStderr: true,
+                teeStdoutToStderr: true
+            )
+        }
         return try selected.run(
             executable: executablePath,
             arguments: args,
@@ -1103,13 +1117,15 @@ printf 'RECOVERY_APPLIED:%s\n' "$actual"
 
     @discardableResult
     public func invoke(_ arguments: [String], streamStderr: Bool = false) throws -> ProcessResult {
-        if streamStderr, let foundation = runner as? FoundationProcessRunner {
-            return try foundation.run(
+        if streamStderr, let streaming = runner as? any StreamTeeingProcessRunning {
+            return try streaming.run(
                 executable: executablePath,
                 arguments: arguments,
                 environment: nil,
                 currentDirectory: nil,
-                streamStderr: true
+                stdinData: nil,
+                streamStderr: true,
+                teeStdoutToStderr: false
             )
         }
         return try runner.run(

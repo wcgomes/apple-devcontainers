@@ -55,6 +55,20 @@ public protocol ProcessRunning: Sendable {
     ) throws -> ProcessResult
 }
 
+/// Runners that can tee child output to the host while still capturing it.
+/// Used by lifecycle exec and (via `FoundationProcessRunner`) long-running container CLI ops.
+public protocol StreamTeeingProcessRunning: ProcessRunning {
+    func run(
+        executable: String,
+        arguments: [String],
+        environment: [String: String]?,
+        currentDirectory: String?,
+        stdinData: Data?,
+        streamStderr: Bool,
+        teeStdoutToStderr: Bool
+    ) throws -> ProcessResult
+}
+
 extension ProcessRunning {
     /// Convenience: no stdin payload.
     public func run(
@@ -73,7 +87,7 @@ extension ProcessRunning {
     }
 }
 
-public struct FoundationProcessRunner: ProcessRunning {
+public struct FoundationProcessRunner: StreamTeeingProcessRunning {
     public init() {}
 
     public func run(
@@ -89,18 +103,22 @@ public struct FoundationProcessRunner: ProcessRunning {
             environment: environment,
             currentDirectory: currentDirectory,
             stdinData: stdinData,
-            streamStderr: false
+            streamStderr: false,
+            teeStdoutToStderr: false
         )
     }
 
     /// When `streamStderr` is true, tee child stderr to the host while still capturing it.
+    /// When `teeStdoutToStderr` is true, also tee child stdout to host stderr (keeps host
+    /// stdout pure for `--json`) while still capturing stdout for diagnostics.
     public func run(
         executable: String,
         arguments: [String],
         environment: [String: String]?,
         currentDirectory: String?,
         stdinData: Data? = nil,
-        streamStderr: Bool
+        streamStderr: Bool,
+        teeStdoutToStderr: Bool = false
     ) throws -> ProcessResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -144,7 +162,20 @@ public struct FoundationProcessRunner: ProcessRunning {
 
         group.enter()
         DispatchQueue.global(qos: .userInitiated).async {
-            stdoutBox.value = outPipe.fileHandleForReading.readDataToEndOfFile()
+            let handle = outPipe.fileHandleForReading
+            if teeStdoutToStderr {
+                var accumulated = Data()
+                while true {
+                    let chunk = handle.availableData
+                    if chunk.isEmpty { break }
+                    accumulated.append(chunk)
+                    // Host stderr: progress/hook logs must not pollute `--json` stdout.
+                    try? FileHandle.standardError.write(contentsOf: chunk)
+                }
+                stdoutBox.value = accumulated
+            } else {
+                stdoutBox.value = handle.readDataToEndOfFile()
+            }
             group.leave()
         }
         group.enter()
