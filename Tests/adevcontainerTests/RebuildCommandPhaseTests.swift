@@ -1844,10 +1844,13 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         let guest = RecordingGuestOps()
         let restore = RebuildOpenSupport.install(launcher: launcher, resolverPath: "/usr/local/bin/code")
         defer { restore() }
-        try withRebuildCustomizationsOverrides(guest: guest) {
-            _ = try RebuildCommand.run(options: RebuildOptions(openVSCode: true), runtime: s.runtime)
+        let stderr = try withEnabledStatusStderr {
+            try withRebuildCustomizationsOverrides(guest: guest) {
+                _ = try RebuildCommand.run(options: RebuildOptions(openVSCode: true), runtime: s.runtime)
+            }
         }
         try MiniTest.expectEqual(launcher.calls.count, 1, "VS Code opened once")
+        try expectNoPostSuccessConnectionHints(stderr)
         try MiniTest.expect(guest.writes.contains { $0.contains("extensions.json") }, "extensions applied after open")
         let postAttachIdx = s.mock.calls.firstIndex { $0.arguments.last?.contains("postAttachCustom") == true }
         try MiniTest.expect(postAttachIdx != nil, "postAttach ran after open")
@@ -1929,13 +1932,18 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         )
         s.containers = [info]
         s.install()
-        let result = try RebuildCommand.run(options: RebuildOptions(), runtime: s.runtime)
+        var capturedResult: RebuildResult?
+        let stderr = try withEnabledStatusStderr {
+            capturedResult = try RebuildCommand.run(options: RebuildOptions(), runtime: s.runtime)
+        }
+        let result = capturedResult!
         let obj = result.jsonObject()
         let parsed = try JSONSerialization.jsonObject(with: result.jsonString().data(using: .utf8)!) as? [String: Any]
         try MiniTest.expect(parsed?["outcome"] as? String == "success", "json round-trip")
         try MiniTest.expect(parsed?["containerId"] as? String == s.newContainerId, "json containerId")
         try MiniTest.expect(obj["containerName"] as? String == "adev-mybase-abc123def456", "json containerName")
         try MiniTest.expect(obj["gitUrl"] == nil && obj["workspaceVolume"] == nil, "bind json omits volume fields")
+        try expectPostSuccessConnectionHints(stderr, nameOrId: "adev-mybase-abc123def456")
     }),
 
     ("rebuildVolumeResultExposesGitUrlWorkspaceVolume", {
@@ -2003,6 +2011,15 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
 
 func withCapturedStderr(_ body: () throws -> Void, capture: inout String) throws {
     try withCapturedFD(fd: 2, body: body, capture: &capture)
+}
+
+func withEnabledStatusStderr(_ body: () throws -> Void) throws -> String {
+    let previousStatusEnabled = StatusPrinter.enabled
+    defer { StatusPrinter.enabled = previousStatusEnabled }
+    StatusPrinter.enabled = true
+    var stderr = ""
+    try withCapturedStderr(body, capture: &stderr)
+    return stderr
 }
 
 func withCapturedStdout(_ body: () throws -> Void, capture: inout String) throws {

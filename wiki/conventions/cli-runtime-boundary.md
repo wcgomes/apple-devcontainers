@@ -241,9 +241,10 @@ Apple `container` does **not** expand `${PATH}` / `$PATH` in env values. Product
 ## Progress / tee
 
 - Progress status lines on **stderr**: `==> …` (pull, create, start, stop, delete, volume create, Features Resolving/Fetching/Building/Reusing, build.rosetta config when changing, lifecycle `==> Running <property>`, and related long steps). StatusPrinter only — not hook script I/O.
+- After successful `up`, `clone`, `start`, or `rebuild`, StatusPrinter emits two connection hints on stderr when the originating command lacks `--vscode`: terminal `adevcontainer exec -it --name <managed-name>` and VS Code `adevcontainer start --name <managed-name> --vscode`. Originating `--vscode` suppresses both; neither contaminates stdout or `--json` output.
 - Tee Apple `container` stderr onto the same stream for those operations.
 - **Lifecycle hook live stream (distinct from status):** hook child **stdout and stderr** are teed **live** to **host stderr** while still captured for failure diagnostics. Prevents long hooks looking stuck (previously capture-until-exit). Non-lifecycle `exec` stays capture-then-print (stream off by default).
-- `--json` keeps **stdout** pure JSON — hook script stdout is teed to host **stderr**, never host stdout. `ADEVCONTAINER_QUIET=1` silences `==> …` status lines only (policy warn-skips and hook script output still emit).
+- `--json` keeps **stdout** pure JSON — hook script stdout is teed to host **stderr**, never host stdout. `ADEVCONTAINER_QUIET=1` silences `==> …` status lines, including both connection hints; policy warn-skips and hook script output still emit.
 - Under heavy dual-stream load, dual drain threads may interleave stdout/stderr bytes on host stderr.
 - **Test tip:** assert stream flags on the lifecycle `exec` call itself — delete-on-fail invoke also streams and can overwrite mock “last flag” fields.
 

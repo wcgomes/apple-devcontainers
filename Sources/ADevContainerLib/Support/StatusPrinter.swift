@@ -19,6 +19,11 @@ public enum StatusPrinter {
         FileHandle.standardError.write(Data("==> \(message)\n".utf8))
     }
 
+    public static func connectionHint(nameOrId: String) {
+        status("Connect with: adevcontainer exec -it --name \(nameOrId)")
+        status("Open in VS Code with: adevcontainer start --name \(nameOrId) --vscode")
+    }
+
     /// Policy warning on stderr (`warning: …`). Ignores QUIET/`enabled`; always emits unless tests suppress.
     public static func warning(_ message: String) {
         onWarning?(message)
@@ -26,4 +31,3 @@ public enum StatusPrinter {
         FileHandle.standardError.write(Data("warning: \(message)\n".utf8))
     }
 }
-

@@ -348,6 +348,9 @@ public enum CloneCommand {
             runtime: runtime
         )
         StatusPrinter.status("Ready")
+        if !options.openVSCode {
+            StatusPrinter.connectionHint(nameOrId: result.containerName ?? result.containerId)
+        }
         return result
     }
 

@@ -688,6 +688,9 @@ public enum RebuildCommand {
         }
         // Bind recovery resume is only needed while the managed container is missing.
         try? BindRecoveryResume.cleanup(name: selected.name, fileManager: fileManager)
+        if !options.openVSCode {
+            StatusPrinter.connectionHint(nameOrId: result.containerName ?? result.containerId)
+        }
         return result
     }
 
