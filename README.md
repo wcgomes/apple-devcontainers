@@ -1,7 +1,7 @@
 # Apple Dev Container CLI (adevcontainer)
 
 [![CI](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml/badge.svg)](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-528%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
+[![tests](https://img.shields.io/badge/tests-639%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Native Swift CLI that reads `devcontainer.json` and runs development environments on Apple [`container`](https://github.com/apple/container).
@@ -93,6 +93,14 @@ adevcontainer up --vscode
 The CLI opens the remote workspace and applies supported VS Code settings and extensions from `devcontainer.json`.
 
 Apple Remote Containers attach uses the container’s default user (it does not pass exec `-u`). On create, `adevcontainer` therefore applies a non-root connection user as create `-u` when `containerUser` is unset (for example metadata `remoteUser: vscode`), so the integrated terminal matches the intended remote user. Explicit `containerUser` still wins create `-u` when set; `remoteUser` remains the connection/exec/nameConfig user.
+
+## Terminal output
+
+Progress phases (`==> …`), quieter info lines, and connection hints write to **stderr**. Internal tool output (lifecycle hooks, Features build, clone populate) is live-teed to stderr with each line indented and prefixed `| `. Warnings (`warning: …`) and human errors (`error: …`) always appear. Machine JSON still includes structured `code`.
+
+- `ADEVCONTAINER_QUIET=1` silences progress/info only — warnings, errors, tool body lines, and interactive prompts still emit.
+- Color is enabled when stderr is a TTY and `NO_COLOR` is unset; `FORCE_COLOR=1` may force color; `NO_COLOR` always wins. There is no verbose flag or product log file for this presentation.
+- `--json` keeps host stdout pure machine JSON; progress/tool/warn stay on stderr.
 
 ## Contributing
 
