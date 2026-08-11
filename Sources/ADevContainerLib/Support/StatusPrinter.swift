@@ -19,6 +19,13 @@ public enum StatusPrinter {
         FileHandle.standardError.write(Data("==> \(message)\n".utf8))
     }
 
+    /// Nested progress under a phase line (`level` 1 → 4 spaces). Honors `enabled`/QUIET.
+    public static func detail(_ message: String, level: Int = 1) {
+        guard enabled else { return }
+        let pad = String(repeating: " ", count: 2 + max(level, 1) * 2)
+        FileHandle.standardError.write(Data("\(pad)\(message)\n".utf8))
+    }
+
     public static func connectionHint(nameOrId: String) {
         status("Connect with: adevcontainer exec -it --name \(nameOrId)")
         status("Open in VS Code with: adevcontainer start --name \(nameOrId) --vscode")
