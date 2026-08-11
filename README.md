@@ -94,6 +94,8 @@ adevcontainer up --vscode
 
 The CLI opens the remote workspace and applies supported VS Code settings and extensions from `devcontainer.json`.
 
+<img src="assets/vscode-integration.png" alt="VSCode integration">
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for prerequisites, source builds, tests, fixtures, and the repository development workflow.
