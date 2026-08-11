@@ -170,6 +170,8 @@ On `clone` create, the CLI MUST:
 | `devcontainer.local_folder` | MUST be adapted for volume mode: a `volume://…` form **or** empty/synthetic value — MUST NOT require a durable host path that outlives clone temps |
 | `devcontainer.config_file` | MUST identify the config file used (absolute-at-resolve and/or repo-relative form suitable for inspect) |
 | Config hash label (e.g. `devcontainer.config_hash`) | MUST be set per existing drift/identity policy |
+| `devcontainer.workspace_folder` | Container workspace folder |
+| `devcontainer.remote_user` | MUST be the **resolved remote connection user** (non-empty). MUST NOT be stamped empty on a successful create (same contract as bind-mode — see [core.md](core.md) **Remote connection user resolution** and **Deterministic identity and labels**) |
 | `devcontainer.config_volumes` | MUST be set on clone create when the resolved config has one or more `mounts` with `type=volume`: comma-separated list of those volume **source** names. MUST be omitted or empty when there are no config named volumes. `prune` MUST use this label (when present) to remove config named volumes for managed/volume-mode targets without re-resolving host config. |
 
 Additional existing labels MAY be set. Discovery of managed containers for `list` / `start` / extended `stop` MUST filter client-side on `devcontainer.managed=adevcontainer` after machine JSON list (Apple `container` has no label filter API).
@@ -212,7 +214,7 @@ After the container is created and started (and Features have ensured in-contain
 
 **Populate steps — MUST**
 
-1. Exec in-container `git clone` of the git URL into the workspace folder (workdir = `workspaceFolder`, as `remoteUser` when set). Implementation MAY clone to a temp path on the volume and move into place when the mount is non-empty (e.g. `lost+found` only).
+1. Exec in-container `git clone` of the git URL into the workspace folder (workdir = `workspaceFolder`, as the **resolved remote connection user** when stamped/non-empty). Implementation MAY clone to a temp path on the volume and move into place when the mount is non-empty (e.g. `lost+found` only).
 2. **Verify** populate with `test -e <workspaceFolder>/.git` (or equivalent path-exists). If verification fails, populate MUST fail structured (MUST NOT treat empty volume as success).
 3. MUST NOT perform host full clone + tar-pipe populate on the happy path. (Runtime tar-pipe MAY remain as an unused utility.)
 4. The product MUST NOT implement explicit Git Credential Manager detection, install, or configuration inside the guest.
@@ -327,7 +329,7 @@ On successful `clone`, stdout machine-readable JSON MUST include at least:
 |-------|---------|
 | `outcome` | Success indicator consistent with `up` (e.g. `"success"`) |
 | `containerId` | Runtime container id |
-| `remoteUser` | Effective remote/container user (may be empty/default if unset) |
+| `remoteUser` | MUST be the **resolved remote connection user** (non-empty after successful create). MUST NOT be empty solely because config omitted both user keys when resolution yielded OCI `USER` or `root` (same contract as `up` / `rebuild`) |
 | `remoteWorkspaceFolder` | Absolute workspace path inside the container |
 | `gitUrl` | Normalized git URL used for identity/labels (userinfo stripped for `scheme://`) |
 | `workspaceVolume` | Workspace named volume name |

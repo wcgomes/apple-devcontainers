@@ -98,7 +98,7 @@ Effective user for `exec`, lifecycle hooks, and VS Code attach defaults (not alw
 
 - **Create `-u`:** (1) explicit local `containerUser` if set; (2) else non-root connection user; (3) else omit when root. Apple attach ignores nameConfig `remoteUser` and uses container default user — product therefore applies non-root connection user at create so the VS Code terminal matches. When both keys set: create = `containerUser`, connection = `remoteUser`.
 - **Stamp:** successful create always stamps non-empty `devcontainer.remote_user` (resolved connection user, including `root`). Empty stamp is legacy only. `exec` / `--vscode` consume it. No hardcoded `vscode`/`node`; inspect failure ≠ assume root.
-- **nameConfig** written **before** `code` launch (attach defaults); terminal user still depends on create `-u`, not nameConfig alone. Detail: [cli-runtime-boundary — Connection user](conventions/cli-runtime-boundary.md#connection-user-remoteuser--containeruser). Active change: [`specs/changes/align-remote-user-resolution/`](../specs/changes/align-remote-user-resolution/).
+- **nameConfig** written **before** `code` launch (attach defaults); terminal user still depends on create `-u`, not nameConfig alone. Detail: [cli-runtime-boundary — Connection user](conventions/cli-runtime-boundary.md#connection-user-remoteuser--containeruser). Archive: [`specs/changes/archive/20260811-align-remote-user-resolution/`](../specs/changes/archive/20260811-align-remote-user-resolution/).
 
 ## Ports and lifecycle
 

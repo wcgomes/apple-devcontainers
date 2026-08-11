@@ -20,7 +20,7 @@ If the user passes `-w` / `--workspace` on any non-`up` command (including `rebu
 
 `rebuild` is the **forced rebuild** path. On config-hash mismatch, `up` MUST fail with `config_hash_mismatch` and a hint pointing to `adevcontainer rebuild` (managed selection `--name`/auto when applicable). `rebuild` MUST create a new selected managed container even when the resolved config hash equals the stamped `devcontainer.config_hash`, and MUST preserve the workspace volume and config named volumes (container-only delete then create).
 
-**`exec`:** MUST resolve managed only (no ConfigResolver / host workspace path branch). User and workdir MUST come from labels `devcontainer.remote_user` and `devcontainer.workspace_folder` stamped at `up`/`clone` create (empty label → omit). `adevcontainer exec` MUST run a command or shell inside the running managed container via AppleContainerRuntime. If the container is not running, exec MUST fail with a structured error.
+**`exec`:** MUST resolve managed only (no ConfigResolver / host workspace path branch). User and workdir MUST come from labels `devcontainer.remote_user` and `devcontainer.workspace_folder` stamped at `up`/`clone`/`rebuild` create. When `devcontainer.remote_user` is non-empty, `exec` MUST pass that user to runtime exec. Empty label → omit exec `-u` (legacy / pre-change containers only; new creates stamp non-empty — see [core.md](core.md) **Remote connection user resolution** and **Deterministic identity and labels**). `adevcontainer exec` MUST run a command or shell inside the running managed container via AppleContainerRuntime. If the container is not running, exec MUST fail with a structured error.
 
 **`inspect`:** MUST resolve managed only. MUST show resolved identity and state: name/id, running state, labels, and payload fields from runtime + labels:
 
@@ -41,6 +41,11 @@ If no container exists, inspect MUST fail structurally or report not-found consi
 - Given a running managed container (from `up` or `clone`) with workspace_folder/remote_user labels
 - When the user runs `adevcontainer exec --name <that-name> -- echo ok`
 - Then exec targets that container id with labeled user/workdir
+
+#### Scenario: Exec uses stamped resolved remote connection user
+- Given a running managed container stamped `devcontainer.remote_user=alice`
+- When the user runs `adevcontainer exec --name <that-name> -- id -un`
+- Then exec targets that container with user `alice`
 
 #### Scenario: -w on exec is usage error
 - Given any args including `-w <path>` on `exec`

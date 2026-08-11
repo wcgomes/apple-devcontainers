@@ -117,7 +117,11 @@ When `--vscode` is set and lifecycle has succeeded, the CLI MUST attempt to open
 
 **Optional nameConfig (MAY/SHOULD):**
 
-- The CLI MAY write a Remote - Containers nameConfig for the container (workspace folder + remote user) when low-risk and useful for attach defaults. Folder-uri open remains the **required** open path; nameConfig MUST NOT be the sole mechanism and MUST NOT cause lifecycle failure if the write fails.
+- The CLI MAY write a Remote - Containers nameConfig for the container (workspace folder + remote user) when low-risk and useful for attach defaults.
+- When the product writes nameConfig, it MUST include `workspaceFolder` and, when the resolved remote connection user is non-empty (always after successful resolution on create paths; on `start` from labels when non-empty), MUST include `remoteUser` set to that resolved connection user (from create result or stamped label — not a hardcoded name).
+- nameConfig MUST be written **before** the host `code` launch attempt on `--vscode` paths so attach defaults can observe it prior to open.
+- nameConfig write remains soft-fail: write failure MUST NOT fail lifecycle and MUST NOT block the subsequent open attempt.
+- Folder-uri open remains the **required** open path; nameConfig MUST NOT be the sole mechanism and MUST NOT cause lifecycle failure if the write fails.
 
 **Approximation (document):**
 
@@ -149,6 +153,17 @@ When `--vscode` is set and lifecycle has succeeded, the CLI MUST attempt to open
 - When `up` or `clone` succeeds with `--vscode`
 - Then the open targets `/custom/ws` (the resolved remote workspace folder), not the default `/workspaces/<basename>`
 
+#### Scenario: nameConfig written before code launch
+- Given `--vscode` on `up` / `start` / `clone` / `rebuild` with open inputs available and nameConfig enabled
+- When best-effort open runs
+- Then nameConfig is written (or soft-fail warned) **before** host `code` is invoked
+- And nameConfig `remoteUser` equals the resolved remote connection user (or stamped label on `start`)
+
+#### Scenario: nameConfig remoteUser matches stamp not hardcoded
+- Given a container stamped `devcontainer.remote_user=alice` and `start --vscode`
+- When nameConfig is written
+- Then `remoteUser` in nameConfig is `alice` and MUST NOT be a hardcoded product username
+
 ---
 
 ### Requirement: postAttachCommand policy (CLI-only)
@@ -171,7 +186,7 @@ When the run gate is satisfied, the CLI MUST run:
 - Config `postAttachCommand` when present, then
 - Feature-contributed postAttach commands (`featurePostAttachCommands` / equivalent merge), in the same merge/order patterns as other feature lifecycle hooks already in product (LifecycleRunner conventions: config hook then feature hooks for that stage).
 
-Each command MUST execute via existing container **exec** lifecycle machinery (same string/argv/object-map rules as `postCreateCommand` / `postStartCommand`; object-map entries sequential sorted-by-name), using effective `remoteUser` when set and the resolved workspace folder when set.
+Each command MUST execute via existing container **exec** lifecycle machinery (same string/argv/object-map rules as `postCreateCommand` / `postStartCommand`; object-map entries sequential sorted-by-name), using the **resolved remote connection user** (from config resolution on create-path, or stamped/label-aligned user on reuse/`start`) and the resolved workspace folder when set — not create-only `containerUser` when `remoteUser` differs. When `remoteUser` is `alice` and `containerUser` is `bob`, postAttach MUST use `alice`.
 
 **When postAttach is SKIPPED (status line, not executed)**
 
@@ -240,6 +255,11 @@ The gated policy MUST apply consistently on `up`, `start`, `clone`, and `rebuild
 - When the user runs `up` without or with `--vscode`
 - Then the CLI MUST NOT emit a postAttach skip status line solely for postAttach
 
+#### Scenario: postAttach runs as remote connection user not containerUser
+- Given `remoteUser` `alice`, `containerUser` `bob`, `--vscode`, and successful open
+- When postAttach runs
+- Then postAttach exec uses user `alice`
+
 ---
 
 ### Requirement: Parse and retain customizations.vscode extensions and settings
@@ -301,9 +321,9 @@ Presence of a `customizations.vscode` object continues to signal VS Code-oriente
 
 ### Requirement: Apply vscode settings on create-path (and repair on drift)
 
-When resolved config retains a non-empty well-formed `customizations.vscode.settings` object (or when marker drift requires re-apply of the normalized payload that includes settings), the CLI MUST attempt to merge those settings into the guest **remote Machine** settings file for the effective remote user:
+When resolved config retains a non-empty well-formed `customizations.vscode.settings` object (or when marker drift requires re-apply of the normalized payload that includes settings), the CLI MUST attempt to merge those settings into the guest **remote Machine** settings file for the **resolved remote connection user** (not create-only `containerUser` when `remoteUser` differs):
 
-- Target path concept: under the effective `remoteUser` home, `~/.vscode-server/data/Machine/settings.json` (create parent directories as needed).
+- Target path concept: under the resolved remote connection user home, `~/.vscode-server/data/Machine/settings.json` (create parent directories as needed).
 - Merge semantics: deep-merge or key-merge such that config-declared keys are written into the Machine settings object without wiping unrelated keys already present when feasible; on missing file, create a valid settings JSON object containing at least the declared keys.
 
 **When settings apply RUNS**
@@ -332,9 +352,14 @@ When resolved config retains a non-empty well-formed `customizations.vscode.sett
 #### Scenario: settings merge on fresh up create without --vscode
 - Given a valid config with well-formed non-empty `customizations.vscode.settings` and a fresh `up` create-path that completes create-path hooks successfully
 - When the user runs `up` **without** `--vscode`
-- Then the CLI attempts to merge settings into the guest Machine settings path under the effective remote user home
+- Then the CLI attempts to merge settings into the guest Machine settings path under the resolved remote connection user home
 - And `up` still reports lifecycle success when settings apply soft-fails or succeeds
 - And the managed container is not deleted solely due to settings apply failure
+
+#### Scenario: settings apply under remote connection user home
+- Given `remoteUser` `alice` and settings apply on create-path
+- When settings are merged
+- Then the guest Machine settings path is under `alice`’s home, not `bob`’s when `containerUser` is `bob`
 
 #### Scenario: settings merge on fresh clone create
 - Given a valid clone path with well-formed non-empty `customizations.vscode.settings` and successful create-path hooks
@@ -365,7 +390,7 @@ When resolved config retains a non-empty well-formed `customizations.vscode.sett
 
 ### Requirement: Apply vscode extensions after successful --vscode open
 
-When resolved config retains one or more well-formed extension IDs, the CLI MUST attempt to install any **missing** IDs into the guest remote VS Code Server extensions directory under the effective `remoteUser` home (conceptually under `~/.vscode-server/extensions` or the product-equivalent remote extensions location).
+When resolved config retains one or more well-formed extension IDs, the CLI MUST attempt to install any **missing** IDs into the guest remote VS Code Server extensions directory under the **resolved remote connection user** home (conceptually under `~/.vscode-server/extensions` or the product-equivalent remote extensions location) — not create-only `containerUser` when `remoteUser` differs.
 
 **When extensions apply RUNS**
 
@@ -427,7 +452,7 @@ That successful open is the same **CLI attach hook** approximation used for post
 #### Scenario: extensions install after successful --vscode open on up
 - Given a valid config with well-formed `customizations.vscode.extensions`, successful create-path, and no matching guest marker
 - When the user runs `up --vscode` and host `code` launch succeeds
-- Then after open success the CLI attempts to install missing extension IDs into the remote extensions directory under the effective remote user home
+- Then after open success the CLI attempts to install missing extension IDs into the remote extensions directory under the resolved remote connection user home
 - And each successfully installed ID is listed in the guest `extensions.json` registry (not folder-only)
 - And then postAttach runs per existing policy when present
 - And lifecycle success is preserved when extensions apply soft-fails (absent postAttach failure)
@@ -488,7 +513,7 @@ That successful open is the same **CLI attach hook** approximation used for post
 
 ### Requirement: Vscode customizations apply idempotency
 
-The CLI MUST record successful application of the **normalized** customizations payload (ordered **config-file** extension IDs + canonicalized settings JSON) using a guest marker file under the effective remote user home, e.g. `$HOME/.adevcontainer/vscode-customizations.applied`, whose content is a stable content hash of that normalized payload.
+The CLI MUST record successful application of the **normalized** customizations payload (ordered **config-file** extension IDs + canonicalized settings JSON) using a guest marker file under the resolved remote connection user home, e.g. `$HOME/.adevcontainer/vscode-customizations.applied`, whose content is a stable content hash of that normalized payload.
 
 **Rules**
 

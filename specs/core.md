@@ -103,7 +103,10 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 
 **Env & user**
 - `containerEnv` (map of string → string, post-substitution)
-- `remoteUser` and/or `containerUser` (non-root or named user when set)
+- `remoteUser` — remote connection / exec / attach user when set (feeds the **Remote connection user resolution** chain; also create `-u` when `containerUser` is unset and the value is non-root — see **Create process user**)
+- `containerUser` — explicit container create process user when set (wins create `-u` over connection user)
+- When both are set, create process user is `containerUser` and remote connection user is `remoteUser`
+- When only one is set, that value participates in the chain per **Remote connection user resolution** and **Create process user**
 - `workspaceFolder` (container cwd / remote workspace folder)
 
 **Mounts & ports**
@@ -132,10 +135,15 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - When the user runs a successful `up` then `exec`
 - Then a container runs from the specified image with the workspace bound and an interactive or command exec succeeds
 
-#### Scenario: Env user folder
-- Given fixture `Tests/Fixtures/env-user.json`
+#### Scenario: Env user folder (connection vs create)
+- Given fixture `Tests/Fixtures/env-user.json` (`remoteUser` and `containerUser` both `vscode`)
 - When `up` succeeds
-- Then container env includes configured `containerEnv`, process user matches `remoteUser`/`containerUser` policy, and default cwd is `workspaceFolder`
+- Then container env includes configured `containerEnv`, create uses `-u vscode`, default cwd is `workspaceFolder`, and stamped `devcontainer.remote_user` / success-JSON `remoteUser` are `vscode`
+
+#### Scenario: remoteUser without containerUser sets create -u
+- Given a config with only `remoteUser` `alice` (no `containerUser`)
+- When `up` succeeds
+- Then create includes `-u` `alice`, `devcontainer.remote_user` is `alice`, and `exec` runs as `alice`
 
 #### Scenario: Mounts and ports
 - Given fixture `Tests/Fixtures/mounts-ports.json`
@@ -167,7 +175,138 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - When config is resolved
 - Then resolve succeeds and those fields are available to apply paths
 
-See also: [lifecycle-hooks.md](lifecycle-hooks.md), [runargs-host.md](runargs-host.md), [features.md](features.md), [vscode.md](vscode.md) for detailed property behavior.
+See also: [lifecycle-hooks.md](lifecycle-hooks.md), [runargs-host.md](runargs-host.md), [features.md](features.md), [vscode.md](vscode.md) for detailed property behavior; **Remote connection user resolution** and **Create process user** below for user chain and create `-u`.
+
+---
+
+### Requirement: Remote connection user resolution
+
+The product MUST resolve a **remote connection user** for every managed create path (`up`, `clone`, `rebuild`) and MUST use that value for connection-oriented consumers (labels, `exec`, lifecycle hook exec, VS Code nameConfig / customizations / postAttach, and success-JSON `remoteUser`).
+
+**Precedence (MUST, first non-empty after trim wins):**
+
+1. Config `remoteUser` when non-empty after trim (local `devcontainer.json`)
+2. Else config `containerUser` when non-empty after trim (local)
+3. Else image label `devcontainer.metadata` `remoteUser` when non-empty after trim (see **Image metadata users** below)
+4. Else image label `devcontainer.metadata` `containerUser` when non-empty after trim
+5. Else the **final OCI image `USER`** of the image that will run the workspace container (config base image when Features are absent; **derived** image when Features produce one), obtained from runtime image inspect
+6. Else the literal `root`
+
+Local config wins when set: steps 1–2 always beat metadata. Create process user follows **Create process user** below (explicit `containerUser`, else non-root connection user — so metadata `remoteUser` such as `vscode` becomes create `-u` when local `containerUser` is unset).
+
+**Image metadata users (MUST):**
+
+- When present, the image label `devcontainer.metadata` (JSON object or array of fragment objects) MUST contribute `remoteUser` / `containerUser` into the connection-user chain above.
+- Across an array of fragments, **last non-empty after trim wins** per field.
+- Absence or unparseable metadata MUST be treated as no metadata users (never fails resolution alone).
+- On Features paths, metadata MUST be read from the **base** image (derived tags may not carry the base label).
+
+**Inspect failure (MUST NOT invent root at the OCI tier):**
+
+- When steps 1–4 do not yield a user, the product MUST obtain OCI `USER` via image inspect.
+- If image inspect **fails** (runtime error, unparseable payload, or missing inspect path) while steps 1–4 are empty, the product MUST fail the create path with a structured error naming image inspect / user resolution — it MUST **not** treat inspect failure as “OCI USER is `root`” and MUST **not** silently fall through to `root` solely because inspect failed.
+- When inspect **succeeds** and the image has no usable `USER` (absent, empty, or whitespace-only), the product MUST continue to step 6 (`root`).
+
+**No hardcoded product usernames (MUST):**
+
+- Resolution MUST NOT hardcode editor-oriented names (e.g. `vscode`) or any other fixed username outside the precedence chain above.
+- The terminal `root` fallback is only step 6 after a **successful** empty-USER inspect (or after an explicit non-empty config value of `root`).
+
+**Create vs connection (MUST):**
+
+- Create process user is governed by **Create process user** below. Connection user still drives labels/exec/nameConfig/VS Code; when both keys are set, create uses `containerUser` and connection uses `remoteUser`.
+
+#### Scenario: remoteUser wins over containerUser and OCI USER
+- Given a config with `remoteUser` `alice`, `containerUser` `bob`, and an image whose OCI `USER` is `carol`
+- When remote connection user is resolved on create
+- Then the resolved remote connection user is `alice`
+
+#### Scenario: containerUser used when remoteUser unset
+- Given a config with no `remoteUser` (or empty), `containerUser` `bob`, and any OCI `USER`
+- When remote connection user is resolved on create
+- Then the resolved remote connection user is `bob`
+
+#### Scenario: OCI USER used when both config keys unset
+- Given a config with neither `remoteUser` nor `containerUser` set (or both empty), and image inspect returns OCI `USER` `node`
+- When remote connection user is resolved on create
+- Then the resolved remote connection user is `node`
+
+#### Scenario: root only after successful empty OCI USER
+- Given a config with neither `remoteUser` nor `containerUser` set, and image inspect **succeeds** with no usable `USER`
+- When remote connection user is resolved on create
+- Then the resolved remote connection user is `root`
+
+#### Scenario: inspect failure does not become root
+- Given a config with neither `remoteUser` nor `containerUser` set, and image inspect **fails**
+- When create runs
+- Then the command fails with a structured user-resolution / image-inspect error
+- And the product MUST NOT stamp `devcontainer.remote_user=root` solely due to that failure
+- And no managed container is left created from that failed resolution
+
+#### Scenario: no hardcoded vscode default
+- Given a config with neither `remoteUser` nor `containerUser` set, and image inspect succeeds with OCI `USER` `app`
+- When remote connection user is resolved
+- Then the result is `app` and MUST NOT be replaced by `vscode` or any other hardcoded product username
+
+#### Scenario: metadata remoteUser when config users empty
+- Given a config with neither `remoteUser` nor `containerUser` set, image OCI `USER` `root`, and image `devcontainer.metadata` `{"remoteUser":"vscode"}`
+- When remote connection user is resolved on create
+- Then the resolved remote connection user is `vscode`
+- And create MUST include `-u` `vscode` (non-root connection user; Apple attach uses container default user)
+
+#### Scenario: local config wins over metadata remoteUser
+- Given a config with `remoteUser` `alice` and image metadata `remoteUser` `vscode`
+- When remote connection user is resolved
+- Then the result is `alice`
+
+#### Scenario: metadata array last non-empty wins
+- Given image `devcontainer.metadata` is an array of fragments with successive `remoteUser` values
+- When metadata users are parsed
+- Then the last non-empty `remoteUser` fragment wins
+
+---
+
+### Requirement: Create process user
+
+On managed create (`up`, `clone`, `rebuild`), the product MUST set create `-u` as follows (first match wins):
+
+1. When config `containerUser` is non-empty after trim → create MUST include `-u <containerUser>` (post-substitution value).
+2. Else when the **resolved remote connection user** is non-empty after trim and is **not** the literal `root` → create MUST include `-u <connectionUser>`.
+3. Else create MUST **omit** `-u` (connection user is `root` or empty; image default applies).
+
+Rationale (Apple-first): Apple Remote Containers attach does **not** pass exec `-u`; the integrated terminal uses the container’s default (create) user. nameConfig `remoteUser` alone does not change the terminal user. Applying the non-root connection user at create keeps VS Code terminal aligned with `remoteUser` / metadata `vscode` without requiring local `containerUser`.
+
+Connection/exec/nameConfig/VS Code consumers continue to use the connection-user chain unchanged. When `remoteUser` is `alice` and `containerUser` is `bob`, create is still `-u bob` and connection remains `alice`.
+
+#### Scenario: create -u from remoteUser when containerUser unset
+- Given a config with `remoteUser` `alice` and no `containerUser`
+- When create argv is built
+- Then create MUST include `-u` `alice`
+- And the stamped remote connection user for labels/exec remains `alice`
+
+#### Scenario: create -u when containerUser set
+- Given a config with `containerUser` `bob` (with or without `remoteUser`)
+- When create argv is built
+- Then create MUST include `-u` `bob`
+- And when `remoteUser` is also `alice`, connection/stamp/exec remain `alice`
+
+#### Scenario: non-root OCI connection user sets create -u
+- Given a config with neither `remoteUser` nor `containerUser` set and OCI `USER` `node`
+- When create argv is built
+- Then create MUST include `-u` `node`
+- And `devcontainer.remote_user` is stamped `node`
+
+#### Scenario: connection root omits create -u
+- Given neither config user set and successful empty OCI USER (connection resolves to `root`)
+- When create argv is built
+- Then create MUST omit `-u`
+- And `devcontainer.remote_user` is stamped `root`
+
+#### Scenario: metadata vscode sets create -u (Apple terminal)
+- Given neither local user key set, OCI `USER` `root`, metadata `remoteUser` `vscode`
+- When create argv is built
+- Then create MUST include `-u` `vscode`
+- And connection/stamp/nameConfig remain `vscode`
 
 ---
 
@@ -291,7 +430,7 @@ When `features` is present, config hash material MUST include the selected featu
 | `devcontainer.config_file` | Config path used |
 | `devcontainer.config_hash` | Per existing drift/identity policy |
 | `devcontainer.workspace_folder` | Container workspace folder |
-| `devcontainer.remote_user` | Effective user or empty string |
+| `devcontainer.remote_user` | MUST be the **resolved remote connection user** (non-empty). MUST NOT be stamped empty on a successful create. |
 | `devcontainer.config_volumes` | Comma-separated config `type=volume` sources when any; omit/empty otherwise |
 | `devcontainer.git_url` / `devcontainer.workspace_volume` | MUST NOT be set (or empty; prune ignores missing ws vol) |
 
@@ -306,7 +445,11 @@ When `features` is present, config hash material MUST include the selected featu
 - If the human base is empty after sanitize → `adev-{hash12}`.
 - The full name MUST be ≤ 63 characters.
 
-**Volume-mode (`clone`) identity** MUST use the volume-mode identity and labels requirements (git URL + config relative path; managed/volume labels; adapted `local_folder`). The two modes MUST NOT collide solely because a temp path string matches a host workspace path.
+**Volume-mode (`clone`) identity** MUST use the volume-mode identity and labels requirements (git URL + config relative path; managed/volume labels; adapted `local_folder`). The two modes MUST NOT collide solely because a temp path string matches a host workspace path. Volume-mode create MUST stamp `devcontainer.remote_user` to the same **resolved remote connection user** (non-empty) as bind-mode.
+
+On every successful managed create (`up` bind, `clone` volume, `rebuild` new container), the product MUST stamp `devcontainer.remote_user` to the resolved remote connection user from **Remote connection user resolution**.
+
+Greenfield: existing containers with empty labels are out of scope for automatic repair; `exec` continues to honor whatever is stamped (empty → omit `-u` on exec as today). New creates MUST always stamp non-empty.
 
 Discovery and reuse MUST prefer deterministic name + inspect, NOT Docker-style `ps --filter label=` as the primary mechanism. Discovery of managed containers for `list` / `start` / extended `stop` MUST filter client-side on `devcontainer.managed=adevcontainer` after machine JSON list (Apple `container` has no label filter API).
 
@@ -345,7 +488,22 @@ Discovery and reuse MUST prefer deterministic name + inspect, NOT Docker-style `
 - When labels are inspected
 - Then `devcontainer.managed=adevcontainer`, `workspace_mode=bind`, local_folder/config_file/config_hash/workspace_folder/remote_user are set, and git_url/workspace_volume are absent
 
-See also: [clone.md](clone.md) for volume-mode identity, workspace volume names, and volume-mode labels.
+#### Scenario: Up create stamps non-empty remote_user from resolution
+- Given a successful `up` create with neither config user set and OCI `USER` `node`
+- When labels are inspected
+- Then `devcontainer.remote_user` equals `node` (non-empty)
+
+#### Scenario: Clone create stamps remoteUser when set
+- Given a successful `clone` create with `remoteUser` `alice`
+- When labels are inspected
+- Then `devcontainer.remote_user` equals `alice`
+
+#### Scenario: Rebuild refreshes remote_user to newly resolved connection user
+- Given a managed container whose edited config changes `remoteUser` from `alice` to `bob`
+- When the user runs `adevcontainer rebuild --name <that-name>` successfully
+- Then the new container’s `devcontainer.remote_user` is `bob`
+
+See also: [clone.md](clone.md) for volume-mode identity, workspace volume names, and volume-mode labels; **Remote connection user resolution** for the stamp value.
 
 ---
 
@@ -356,7 +514,7 @@ See also: [clone.md](clone.md) for volume-mode identity, workspace volume names,
 **Success JSON fields (required)**
 - `outcome` — success indicator consistent with reference CLI style (e.g. `"success"`)
 - `containerId` — runtime container id
-- `remoteUser` — effective remote/container user (may be empty/default if unset)
+- `remoteUser` — MUST be the **resolved remote connection user** (non-empty after successful create). MUST NOT be empty solely because config omitted both user keys when resolution yielded OCI `USER` or `root`. The same non-empty resolved value MUST apply to `clone` and `rebuild` success JSON `remoteUser` fields.
 - `remoteWorkspaceFolder` — absolute path inside the container used as workspace folder
 
 Additional helpful fields (e.g. `containerName`) MAY be included.
@@ -418,6 +576,11 @@ Create-path cleanup: if any create-path hook fails before `up` returns success, 
 - When the machine-readable result is parsed
 - Then it includes `outcome`, `containerId`, `remoteUser`, and `remoteWorkspaceFolder`
 
+#### Scenario: success JSON remoteUser reflects OCI fallback
+- Given neither config user key set and OCI `USER` `node`
+- When `up` succeeds with `--json`
+- Then JSON `remoteUser` is `node`
+
 #### Scenario: Create then reuse still stable with hooks
 - Given a successful fresh `up` with postStart configured
 - When the user runs `up` again while the container is running
@@ -465,6 +628,33 @@ All interaction with Apple `container` MUST go through a single **AppleContainer
 - Given unit tests for commands
 - When tests run without a real Apple `container`
 - Then commands can be exercised via a mock/fake process runner behind AppleContainerRuntime
+
+---
+
+### Requirement: OCI image USER on image inspect
+
+Runtime image inspect MUST expose the image’s final OCI `USER` when the inspect payload provides it.
+
+- The inspect result MUST carry a user field (name or empty) derived from the machine-readable image inspect JSON.
+- Absence of a usable `USER` in a **successful** inspect MUST be represented as empty/absent user — not as a fabricated `root` inside the inspect result.
+- Consumers that need a default after empty USER MUST apply the remote connection user chain (step 6 `root`) themselves; inspect MUST NOT pretreat failure or emptiness as `root`.
+
+#### Scenario: inspect exposes OCI USER
+- Given a local image whose inspect JSON reports final `USER` `node`
+- When the product inspects that image
+- Then the inspect result exposes user `node`
+
+#### Scenario: successful inspect with no USER is empty not root
+- Given a local image whose inspect JSON has no usable `USER`
+- When the product inspects that image successfully
+- Then the inspect result’s user is empty/absent
+- And the inspect API itself MUST NOT coerce that to `root`
+
+#### Scenario: inspect failure is distinct from empty USER
+- Given image inspect fails for a reference
+- When the product attempts inspect
+- Then the call fails with a structured runtime/inspect error
+- And callers MUST NOT interpret that failure as user `root`
 
 ---
 

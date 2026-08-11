@@ -8,7 +8,7 @@ Lifecycle hook surface for `onCreateCommand` through `postStartCommand` (string 
 
 ### Requirement: Lifecycle hook surface
 
-The CLI MUST admit and honor these lifecycle properties in addition to existing `postCreateCommand`. Each property MUST accept a **string**, an **argv array of strings**, or an **object map** of name → string or argv array (Dev Containers named/parallel form; product runs named entries sequentially in sorted name order). Omitted properties and empty object maps MUST be treated as no-ops. Hooks that run MUST execute via AppleContainerRuntime **exec** into the running container (not baked into the image), using the effective remote/container user and workspace folder when set.
+The CLI MUST admit and honor these lifecycle properties in addition to existing `postCreateCommand`. Each property MUST accept a **string**, an **argv array of strings**, or an **object map** of name → string or argv array (Dev Containers named/parallel form; product runs named entries sequentially in sorted name order). Omitted properties and empty object maps MUST be treated as no-ops. Hooks that run MUST execute via AppleContainerRuntime **exec** into the running container (not baked into the image), using the **resolved remote connection user** (see [core.md](core.md) **Remote connection user resolution**) and workspace folder when set — not create-only `containerUser` when `remoteUser` differs.
 
 | Property | Role |
 |----------|------|

@@ -118,7 +118,7 @@ Precedence for the **effective connection user** (exec, lifecycle, VS Code attac
 
 **nameConfig:** write `…/nameConfigs/<containerName>.json` (`workspaceFolder` + `remoteUser`) **before** launching `code`. Still write it for attach defaults, but **do not rely on it for terminal user** — Apple attach ignores nameConfig `remoteUser` for the shell; create `-u` is the compensation.
 
-Active change (not archived): [`specs/changes/align-remote-user-resolution/`](../../specs/changes/align-remote-user-resolution/).
+Contract: union of `specs/<domain>.md` (core/features/vscode/managed-lifecycle); archive: [`specs/changes/archive/20260811-align-remote-user-resolution/`](../../specs/changes/archive/20260811-align-remote-user-resolution/).
 
 ## Deterministic names and labels
 

@@ -169,8 +169,8 @@ When `features` is non-empty after admission, on a fresh create path the product
 3. **Pull** the config base image with **`--platform`** set to the host-native Linux platform:
    - `linux/arm64` when the host is arm64 / aarch64 (product default on Apple Silicon)
    - `linux/amd64` only when the host is x86_64
-4. **Build** a derived image with Apple `container build` from a **generated Dockerfile** that `FROM`s the base image and, per feature, `COPY`s the package then `RUN`s recursive `chmod -R 0755` on the package directory **before** `./install.sh` **as root** (options / `_REMOTE_USER` / `_CONTAINER_USER` env) so scripts `install.sh` copies into bare-path lifecycle hooks remain executable (ref CLI parity; avoids exit 126). Build argv MUST include the same host-native **`--platform`**.
-5. **Tag** a deterministic local image as `adev-{base}:{hash12}`, where `base` is the same human base as container identity and `hash12` is a 12-character content hash of base image + features + a product **`recipeVersion`** constant (install Dockerfile semantics epoch). If `base` is empty → `adevcontainer:{hash12}`. MUST NOT use an `adevcontainer/features:` prefix or a `/features` path segment. **Reuse** when that tag already exists locally (skip rebuild). When generator install-layer semantics change (e.g. chmod recipe), the product MUST bump `recipeVersion` so existing tags miss and rebuild.
+  4. **Build** a derived image with Apple `container build` from a **generated Dockerfile** that `FROM`s the base image and, per feature, `COPY`s the package then `RUN`s recursive `chmod -R 0755` on the package directory **before** `./install.sh` **as root** (options / `_REMOTE_USER` / `_CONTAINER_USER` env) so scripts `install.sh` copies into bare-path lifecycle hooks remain executable (ref CLI parity; avoids exit 126). After **all** feature install layers, the generated Dockerfile MUST restore the **base image’s** final OCI `USER` per **Features install as root then restore base image USER**. Install remains as root with `_REMOTE_USER` / `_CONTAINER_USER` env; the Dockerfile MUST NOT leave the derived image’s final default user as root solely because install ran as root when the base image USER was non-root. `_REMOTE_USER` / `_CONTAINER_USER` install env MUST be derived from config `remoteUser` / `containerUser` without inventing editor usernames; when both unset, install env MUST use the inspected base image USER when non-empty, else `root` — MUST NOT hardcode `vscode`. Callers MUST fail closed on base inspect failure before fabricating install-env users. Build argv MUST include the same host-native **`--platform`**.
+  5. **Tag** a deterministic local image as `adev-{base}:{hash12}`, where `base` is the same human base as container identity and `hash12` is a 12-character content hash of base image + features + a product **`recipeVersion`** constant (install Dockerfile semantics epoch). If `base` is empty → `adevcontainer:{hash12}`. MUST NOT use an `adevcontainer/features:` prefix or a `/features` path segment. **Reuse** when that tag already exists locally (skip rebuild). When generator install-layer semantics change (e.g. chmod recipe, final-`USER` restore), the product MUST bump `recipeVersion` so existing tags miss and rebuild.
 6. **Create** the workspace container **from the derived image** (not the raw config `image`) with the same **`--platform`**. Contributions that affect create flags (`init`, `capAdd`, env, mounts) MUST be merged **before** create.
 7. **Start** the container, then run lifecycle hooks (onCreate → …) as today.
 
@@ -240,6 +240,42 @@ On `rebuild`, the same derived-tag identity material applies: when the rebuilt c
 - Given a managed container whose edited config changes a feature ref or option
 - When the user runs `adevcontainer rebuild --name <that-name>`
 - Then a new derived image is built (new tag material), the build completes **before** the old container is deleted, and the new container is created from the new derived image
+
+#### Scenario: derived image default user matches base after Features
+- Given base image USER `node` and a successful Features-derived create
+- When the derived image default user is observed
+- Then it matches `node` (not forced root)
+
+#### Scenario: Features install env uses base USER when config users empty
+- Given config omits both user keys and base image USER is `node`
+- When the Features Dockerfile install env is generated
+- Then `_REMOTE_USER` and `_CONTAINER_USER` are `node` (not unconditional `root`, not `vscode`)
+
+---
+
+### Requirement: Features install as root then restore base image USER
+
+When the Features runner generates a derived-image Dockerfile, it MUST:
+
+1. Run each feature install layer as **root** (`USER root` before install `RUN`), unchanged in intent from today.
+2. After **all** feature install layers, emit a final instruction that restores the **base image’s** final OCI `USER` as obtained from image inspect of the Features `FROM` base (the config base image before feature layers).
+3. When base inspect succeeds and base `USER` is non-empty, the final image default user MUST match that base `USER`.
+4. When base inspect succeeds and base `USER` is empty/absent, the Dockerfile MUST restore an equivalent default (no lingering forced `USER root` as the final image user solely because install ran as root) — final default MUST be `root` only when that matches empty-USER / default image semantics after successful inspect.
+5. When base image inspect **fails**, Features build MUST fail structured — MUST NOT hardcode a final `USER root` restore solely because inspect failed.
+6. Changing this final-`USER` restore semantics MUST bump Features `recipeVersion` so derived tags rebuild.
+
+#### Scenario: Features Dockerfile ends with base USER not root
+- Given a base image with OCI `USER` `node` and at least one admitted feature
+- When the Features Dockerfile is generated
+- Then install layers run as root
+- And the Dockerfile’s final user directive restores `node`
+- And the Dockerfile MUST NOT end on `USER root` when base `USER` is `node`
+
+#### Scenario: Features restore fails closed on base inspect failure
+- Given Features build needs base USER restore and base image inspect fails
+- When Features build runs
+- Then build fails with a structured error
+- And no derived image is produced that silently ends as root solely due to inspect failure
 
 ---
 
