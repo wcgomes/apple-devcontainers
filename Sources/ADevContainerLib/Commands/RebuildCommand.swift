@@ -206,6 +206,8 @@ public enum RebuildCommand {
 
         // Features path (rosetta consent, pull/skip-pull, fetch/build with derived-tag
         // reuse; any failure fails before delete).
+        var knownOCIUser: String?? = nil
+        var knownMetadataUsers: DevContainerMetadataLabel.ImageMetadataUsers? = nil
         if !effectiveConfig.features.isEmpty {
             if let ensureNativeArmBuildOverride {
                 try ensureNativeArmBuildOverride()
@@ -246,6 +248,10 @@ public enum RebuildCommand {
                 to: effectiveConfig
             )
             effectiveConfig.image = featuresResult.derivedImage
+            if featuresResult.didInspectBaseUser {
+                knownOCIUser = featuresResult.baseImageUser
+            }
+            knownMetadataUsers = featuresResult.metadataUsers
         } else if !options.skipPull {
             StatusPrinter.status("Pulling image \(effectiveConfig.image)")
             try? runtime.pullImage(effectiveConfig.image, platform: platform)
@@ -260,9 +266,19 @@ public enum RebuildCommand {
         // Identity. Bind: up parity → hash from the resolved (pre-feature) config. Volume:
         // clone parity → hash from the effective (post-feature) config. Either way labels
         // change only when the underlying material actually changed.
+        // Hash before stamping OCI-resolved connection user onto effectiveConfig.
         let configHash = isVolumeMode
             ? ContainerIdentity.configHash(from: effectiveConfig.hashMaterial())
             : ContainerIdentity.configHash(from: resolvedConfig.hashMaterial())
+
+        let connectionUser = try RemoteUserResolution.resolve(
+            config: effectiveConfig,
+            imageRef: effectiveConfig.image,
+            runtime: runtime,
+            knownOCIUser: knownOCIUser,
+            knownMetadataUsers: knownMetadataUsers
+        )
+        effectiveConfig = RemoteUserResolution.applyingConnectionUser(connectionUser, to: effectiveConfig)
 
         // Label dict = COPY of the selected container's labels with only drift-eligible
         // keys updated (config_hash, workspace_folder, remote_user, config_volumes).
@@ -274,7 +290,7 @@ public enum RebuildCommand {
         var newLabels = RecoveryHelper.normalContainerLabels(labels)
         newLabels[ContainerIdentity.labelConfigHash] = configHash
         newLabels[ContainerIdentity.labelWorkspaceFolder] = effectiveConfig.workspaceFolder
-        newLabels[ContainerIdentity.labelRemoteUser] = effectiveConfig.effectiveUser ?? ""
+        newLabels[ContainerIdentity.labelRemoteUser] = connectionUser
         if configVolumeNames.isEmpty {
             newLabels.removeValue(forKey: ContainerIdentity.labelConfigVolumes)
         } else {
@@ -533,11 +549,11 @@ public enum RebuildCommand {
                 try WorkspaceOwnership.ensureWorkspaceWritableByRemoteUser(
                     containerId: id,
                     workspaceFolder: effectiveConfig.workspaceFolder,
-                    remoteUser: effectiveConfig.effectiveUser,
+                    remoteUser: effectiveConfig.connectionUser,
                     runtime: runtime
                 )
             } catch {
-                StatusPrinter.warning("Failed to chown workspace to \(effectiveConfig.effectiveUser ?? "remoteUser"): \(error.localizedDescription)")
+                StatusPrinter.warning("Failed to chown workspace to \(effectiveConfig.connectionUser ?? "remoteUser"): \(error.localizedDescription)")
             }
         }
 
@@ -763,7 +779,7 @@ public enum RebuildCommand {
         let result = RebuildResult(
             outcome: "success",
             containerId: id,
-            remoteUser: config.effectiveUser ?? "",
+            remoteUser: config.connectionUser ?? "",
             remoteWorkspaceFolder: config.workspaceFolder,
             containerName: name,
             gitUrl: isVolumeMode ? imagesLabels[ContainerIdentity.labelGitURL] : nil,
@@ -839,7 +855,7 @@ public enum RebuildCommand {
     ) -> Bool {
         let stamped = labels[ContainerIdentity.labelRemoteUser]?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let effective = config.effectiveUser?
+        let effective = config.connectionUser?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return effective != stamped
     }

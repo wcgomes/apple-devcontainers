@@ -15,7 +15,7 @@ public enum ContainerIdentity {
     public static let labelConfigVolumes = "devcontainer.config_volumes"
     /// Container workspace folder for exec (volume-mode).
     public static let labelWorkspaceFolder = "devcontainer.workspace_folder"
-    /// remoteUser/containerUser effective user for exec (volume-mode; may be empty).
+    /// Resolved remote connection user for exec/attach. New creates stamp non-empty; empty is legacy only.
     public static let labelRemoteUser = "devcontainer.remote_user"
     public static let workspaceModeVolume = "volume"
     public static let workspaceModeBind = "bind"

@@ -16,6 +16,9 @@ public enum FeatureDockerfileGenerator {
     }
 
     /// Write context: `features/<index>/…` package files + `Dockerfile`.
+    ///
+    /// - Parameter baseUser: Base image OCI `USER` from a **successful** inspect (nil/empty → restore `root`).
+    ///   Callers MUST fail closed on inspect failure before invoking this — do not pass a fabricated user.
     public static func write(
         baseImage: String,
         ordered: [FeatureOrder.OrderedFeature],
@@ -23,6 +26,7 @@ public enum FeatureDockerfileGenerator {
         contextDirectory: String,
         remoteUser: String? = nil,
         containerUser: String? = nil,
+        baseUser: String? = nil,
         fileManager: FileManager = .default
     ) throws -> BuildContext {
         try fileManager.createDirectory(atPath: contextDirectory, withIntermediateDirectories: true)
@@ -35,7 +39,8 @@ public enum FeatureDockerfileGenerator {
 
         let userInstallEnv = FeatureOptions.userInstallEnvironment(
             remoteUser: remoteUser,
-            containerUser: containerUser
+            containerUser: containerUser,
+            baseUser: baseUser
         )
 
         var lines: [String] = []
@@ -80,6 +85,12 @@ public enum FeatureDockerfileGenerator {
             )
             lines.append("")
         }
+
+        // Restore base image default user after root install layers (empty OCI USER → root).
+        let restoreUser = RemoteUserResolution.nonEmptyTrimmed(baseUser) ?? "root"
+        lines.append("# Restore base image USER (install layers run as root)")
+        lines.append("USER \(restoreUser)")
+        lines.append("")
 
         let contents = lines.joined(separator: "\n")
         let dockerfilePath = (contextDirectory as NSString).appendingPathComponent("Dockerfile")

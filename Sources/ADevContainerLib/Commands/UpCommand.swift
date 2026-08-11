@@ -57,16 +57,17 @@ public enum UpCommand {
             } else if existing.isRunning {
                 // Reuse running: no feature fetch/build; settings repair on marker drift; postAttach gated after open.
                 StatusPrinter.status("Reusing running container \(existing.name)")
+                let reuseConfig = configForReuse(resolved.config, labels: existing.labels)
                 _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
                     containerId: existing.id,
-                    config: resolved.config,
+                    config: reuseConfig,
                     runtime: runtime
                 )
                 return try finish(
                     options: options,
                     id: existing.id,
                     name: existing.name,
-                    config: resolved.config,
+                    config: reuseConfig,
                     image: existing.image ?? resolved.config.image,
                     runtime: runtime
                 )
@@ -74,21 +75,22 @@ public enum UpCommand {
                 // Start stopped: no rebuild (features already baked on create).
                 StatusPrinter.status("Starting container")
                 try runtime.start(nameOrId: existing.id)
+                let reuseConfig = configForReuse(resolved.config, labels: existing.labels)
                 try LifecycleRunner.runRestartPostStart(
                     containerId: existing.id,
-                    config: resolved.config,
+                    config: reuseConfig,
                     runtime: runtime
                 )
                 _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
                     containerId: existing.id,
-                    config: resolved.config,
+                    config: reuseConfig,
                     runtime: runtime
                 )
                 return try finish(
                     options: options,
                     id: existing.id,
                     name: existing.name,
-                    config: resolved.config,
+                    config: reuseConfig,
                     image: existing.image ?? resolved.config.image,
                     runtime: runtime
                 )
@@ -103,6 +105,10 @@ public enum UpCommand {
 
         var effectiveConfig = resolved.config
         let platform = ContainerPlatform.defaultLinuxPlatform
+        /// When Features inspected the base image, reuse that USER for connection resolution
+        /// (derived final USER matches base after restore).
+        var knownOCIUser: String?? = nil
+        var knownMetadataUsers: DevContainerMetadataLabel.ImageMetadataUsers? = nil
 
         if !resolved.config.features.isEmpty {
             // One-time consent to disable BuildKit Rosetta for native arm64 feature image builds.
@@ -144,6 +150,10 @@ public enum UpCommand {
                 to: effectiveConfig
             )
             effectiveConfig.image = featuresResult.derivedImage
+            if featuresResult.didInspectBaseUser {
+                knownOCIUser = featuresResult.baseImageUser
+            }
+            knownMetadataUsers = featuresResult.metadataUsers
         } else if !options.skipPull {
             StatusPrinter.status("Pulling image \(effectiveConfig.image)")
             try? runtime.pullImage(effectiveConfig.image, platform: platform)
@@ -155,10 +165,24 @@ public enum UpCommand {
             id: resolved.containerName
         )
 
+        // Resolve connection user (config > metadata > OCI USER > root) before labels/create.
+        let connectionUser = try RemoteUserResolution.resolve(
+            config: effectiveConfig,
+            imageRef: effectiveConfig.image,
+            runtime: runtime,
+            knownOCIUser: knownOCIUser,
+            knownMetadataUsers: knownMetadataUsers
+        )
+        effectiveConfig = RemoteUserResolution.applyingConnectionUser(connectionUser, to: effectiveConfig)
+
+        var labels = resolved.labels
+        labels[ContainerIdentity.labelRemoteUser] = connectionUser
+        labels[ContainerIdentity.labelWorkspaceFolder] = effectiveConfig.workspaceFolder
+
         let request = CreateRequest.from(
             resolved: effectiveConfig,
             identityName: resolved.containerName,
-            labels: resolved.labels,
+            labels: labels,
             configHash: resolved.configHash,
             workspacePath: resolved.workspacePath,
             platform: platform
@@ -271,9 +295,20 @@ public enum UpCommand {
         UpResult(
             outcome: "success",
             containerId: id,
-            remoteUser: config.effectiveUser ?? "",
+            remoteUser: config.connectionUser ?? "",
             remoteWorkspaceFolder: config.workspaceFolder,
             containerName: name
         )
+    }
+
+    /// Prefer stamped `devcontainer.remote_user` on reuse/start so connection user matches create.
+    private static func configForReuse(
+        _ config: ResolvedDevContainerConfig,
+        labels: [String: String]
+    ) -> ResolvedDevContainerConfig {
+        if let stamped = RemoteUserResolution.nonEmptyTrimmed(labels[ContainerIdentity.labelRemoteUser]) {
+            return RemoteUserResolution.applyingConnectionUser(stamped, to: config)
+        }
+        return config
     }
 }

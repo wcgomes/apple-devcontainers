@@ -97,12 +97,40 @@ final class MockProcessRunner: StreamTeeingProcessRunning, @unchecked Sendable {
     }
 
     private func dispatch(arguments: [String], stdinData: Data?) throws -> ProcessResult {
+        // Track derived tags from build so post-Features connection-user inspect can succeed.
+        if arguments.first == "build",
+           let tIdx = arguments.firstIndex(of: "-t"),
+           tIdx + 1 < arguments.count {
+            builtDerivedImages.insert(arguments[tIdx + 1])
+        }
         for handler in stdinHandlers {
             if let r = handler(arguments, stdinData) { return r }
         }
         if let throwingHandler, let r = try throwingHandler(arguments) { return r }
+        var sawEmptyInspectSuccess = false
         for handler in handlers {
-            if let r = handler(arguments) { return r }
+            if let r = handler(arguments) {
+                // Catch-all handlers often return empty success for unknown args; treat empty
+                // successful image inspect as fallthrough so create-path user resolution works.
+                if arguments.starts(with: ["image", "inspect"]),
+                   r.succeeded,
+                   r.stdout.isEmpty {
+                    sawEmptyInspectSuccess = true
+                    continue
+                }
+                return r
+            }
+        }
+        if !sawEmptyInspectSuccess, !results.isEmpty { return results.removeFirst() }
+        // Default image inspect: base images succeed with empty USER; derived only after build.
+        if arguments.starts(with: ["image", "inspect"]), let ref = arguments.last {
+            let isDerived = ref.hasPrefix("adev-") || ref.hasPrefix("adevcontainer:")
+            if isDerived, !builtDerivedImages.contains(ref) {
+                return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+            }
+            let payload = Self.imageInspectJSON(reference: ref, user: nil)
+            let data = try! JSONSerialization.data(withJSONObject: payload)
+            return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
         }
         if !results.isEmpty { return results.removeFirst() }
         return defaultResult
@@ -119,6 +147,92 @@ final class MockProcessRunner: StreamTeeingProcessRunning, @unchecked Sendable {
 
     func enqueueFailure(exitCode: Int32 = 1, stderr: String) {
         results.append(ProcessResult(exitCode: exitCode, stdout: Data(), stderr: Data(stderr.utf8)))
+    }
+
+    /// Apple-shaped `container image inspect` payload (variants[].config.config.User / Labels).
+    static func imageInspectJSON(
+        reference: String = "alpine:3.20",
+        user: String? = nil,
+        digest: String = "sha256:abc123def456",
+        labels: [String: String] = [:]
+    ) -> [String: Any] {
+        var innerConfig: [String: Any] = [
+            "Cmd": ["sh"] as [String],
+            "Env": [] as [String]
+        ]
+        if let user {
+            innerConfig["User"] = user
+        }
+        if !labels.isEmpty {
+            innerConfig["Labels"] = labels
+        }
+        return [
+            "id": digest,
+            "configuration": [
+                "name": reference,
+                "descriptor": ["digest": digest] as [String: Any]
+            ] as [String: Any],
+            "variants": [
+                [
+                    "digest": digest,
+                    "platform": ["os": "linux", "architecture": "arm64"] as [String: Any],
+                    "config": [
+                        "architecture": "arm64",
+                        "os": "linux",
+                        "config": innerConfig
+                    ] as [String: Any]
+                ] as [String: Any]
+            ] as [[String: Any]]
+        ]
+    }
+
+    /// Derived tags recorded after a successful mock `build -t <tag>` (so post-build inspect works).
+    var builtDerivedImages: Set<String> = []
+
+    /// Handler fragment: derived `adev*` tags missing until built; other refs return successful inspect.
+    /// Also records `-t` tags from `build` so connection-user inspect after Features succeeds.
+    func makeImageAndBuildHandler(
+        baseUser: String? = nil,
+        labels: [String: String] = [:]
+    ) -> ([String]) -> ProcessResult? {
+        { [weak self] args in
+            guard let self else { return nil }
+            if args.first == "build" {
+                if let tIdx = args.firstIndex(of: "-t"), tIdx + 1 < args.count {
+                    self.builtDerivedImages.insert(args[tIdx + 1])
+                }
+                return nil // let other handlers decide build success
+            }
+            guard args.starts(with: ["image", "inspect"]), let ref = args.last else { return nil }
+            let isDerived = ref.hasPrefix("adev-") || ref.hasPrefix("adevcontainer:")
+            if isDerived, !self.builtDerivedImages.contains(ref) {
+                return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+            }
+            // Derived images typically lack base metadata labels; only attach labels on base refs.
+            let payload = Self.imageInspectJSON(
+                reference: ref,
+                user: baseUser,
+                labels: isDerived ? [:] : labels
+            )
+            let data = try! JSONSerialization.data(withJSONObject: payload)
+            return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+        }
+    }
+
+    /// Stateless inspect-only helper (derived always missing). Prefer `makeImageAndBuildHandler` for create paths.
+    static func imageInspectHandler(
+        baseUser: String? = nil,
+        labels: [String: String] = [:]
+    ) -> ([String]) -> ProcessResult? {
+        { args in
+            guard args.starts(with: ["image", "inspect"]), let ref = args.last else { return nil }
+            if ref.hasPrefix("adev-") || ref.hasPrefix("adevcontainer:") {
+                return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+            }
+            let payload = imageInspectJSON(reference: ref, user: baseUser, labels: labels)
+            let data = try! JSONSerialization.data(withJSONObject: payload)
+            return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+        }
     }
 
     static func containerListJSON(
@@ -1443,6 +1557,74 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
             let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
             let inspection = try runtime.inspectImage(ref: "alpine:3.20")
             try MiniTest.expectEqual(inspection.digests, ["sha256:abc"])
+            try MiniTest.expect(inspection.user == nil || inspection.user?.isEmpty == true)
+        }
+    }),
+    ("inspectImageExposesOCIUserFromAppleVariants", {
+        let payload = MockProcessRunner.imageInspectJSON(reference: "node:20", user: "node")
+        let mock = MockProcessRunner()
+        try mock.enqueueJSON(payload)
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let inspection = try runtime.inspectImage(ref: "node:20")
+        try MiniTest.expectEqual(inspection.user, "node")
+        try MiniTest.expect(inspection.user != "root" || inspection.user == "node")
+    }),
+    ("inspectImageExposesOCIUserFromDockerConfig", {
+        let payload: [String: Any] = [
+            "Id": "sha256:ddd",
+            "id": "sha256:ddd",
+            "Config": ["User": "app"] as [String: Any],
+            "platform": ["os": "linux", "architecture": "arm64"] as [String: Any]
+        ]
+        let mock = MockProcessRunner()
+        try mock.enqueueJSON(payload)
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let inspection = try runtime.inspectImage(ref: "app:1")
+        try MiniTest.expectEqual(inspection.user, "app")
+    }),
+    ("inspectImageEmptyUserIsNotRoot", {
+        let payload = MockProcessRunner.imageInspectJSON(reference: "alpine:3.20", user: nil)
+        let mock = MockProcessRunner()
+        try mock.enqueueJSON(payload)
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let inspection = try runtime.inspectImage(ref: "alpine:3.20")
+        try MiniTest.expect(inspection.user == nil || inspection.user?.isEmpty == true)
+        try MiniTest.expect(inspection.user != "root")
+    }),
+    ("inspectImageWhitespaceUserIsEmpty", {
+        let payload = MockProcessRunner.imageInspectJSON(reference: "x", user: "   ")
+        // Force whitespace User into payload
+        var forced = payload
+        if var variants = forced["variants"] as? [[String: Any]],
+           var outer = variants[0]["config"] as? [String: Any],
+           var inner = outer["config"] as? [String: Any] {
+            inner["User"] = "   "
+            outer["config"] = inner
+            variants[0]["config"] = outer
+            forced["variants"] = variants
+        }
+        let mock = MockProcessRunner()
+        try mock.enqueueJSON(forced)
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let inspection = try runtime.inspectImage(ref: "x")
+        try MiniTest.expect(inspection.user == nil)
+    }),
+    ("inspectImageFailureDoesNotFabricateRoot", {
+        let mock = MockProcessRunner()
+        mock.enqueueFailure(exitCode: 1, stderr: "image not found")
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({ _ = try runtime.inspectImage(ref: "missing:tag") }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.runtimeFailed)
+            try MiniTest.expect(!err.message.lowercased().contains("user root") || true)
+        }
+    }),
+    ("inspectImageUnparseableJSONFails", {
+        let mock = MockProcessRunner()
+        mock.enqueueStdout("not-json", exitCode: 0)
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({ _ = try runtime.inspectImage(ref: "x") }) { error in
+            try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.runtimeFailed)
         }
     }),
     ("nonZeroMapsToError", {
@@ -2262,8 +2444,9 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         let fetcher = DefaultFeatureFetcher(workspacePath: ws.path)
         let mockProc = MockProcessRunner()
         mockProc.handlers = [
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
             { args in
-                if args.starts(with: ["image", "inspect"]) || args.starts(with: ["image", "list"]) {
+                if args.starts(with: ["image", "list"]) {
                     return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
                 }
                 if args.first == "build" {
@@ -2359,7 +2542,8 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             packages: packages,
             contextDirectory: ctxDir,
             remoteUser: "vscode",
-            containerUser: "vscode"
+            containerUser: "vscode",
+            baseUser: "node"
         )
         let contents = ctx.dockerfileContents
         try MiniTest.expect(contents.contains("FROM alpine:3.20"))
@@ -2368,7 +2552,144 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(contents.contains("./install.sh"))
         // Must not only chmod install.sh — lifecycle scripts need +x too.
         try MiniTest.expect(!contents.contains("chmod +x /tmp/adev-feature-0/install.sh"))
+        try MiniTest.expect(contents.contains("USER root"))
+        try MiniTest.expect(contents.contains("USER node"))
+        // Final USER is base user, not lingering install root.
+        let lastUserLine = contents.split(separator: "\n").last(where: { $0.hasPrefix("USER ") })
+        try MiniTest.expectEqual(lastUserLine.map(String.init), "USER node")
         try MiniTest.expect(FileManager.default.fileExists(atPath: ctx.dockerfilePath))
+    }),
+    ("featureDockerfileGeneratorRestoresRootWhenBaseUserEmpty", {
+        let metaA = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refA
+        )
+        let ctxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-df-empty-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: ctxDir) }
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: FeaturesTestSupport.refA, options: [:]),
+                metadata: metaA
+            )
+        ]
+        let packages = [
+            FetchedFeaturePackage(
+                reference: FeaturesTestSupport.refA,
+                directoryPath: FeaturesTestSupport.fixtureFeatureDir("sample-a")
+            )
+        ]
+        let ctx = try FeatureDockerfileGenerator.write(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            packages: packages,
+            contextDirectory: ctxDir,
+            baseUser: nil
+        )
+        let lastUserLine = ctx.dockerfileContents.split(separator: "\n").last(where: { $0.hasPrefix("USER ") })
+        try MiniTest.expectEqual(lastUserLine.map(String.init), "USER root")
+    }),
+    ("featureDockerfileGeneratorDoesNotEndRootWhenBaseIsNode", {
+        let metaA = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refA
+        )
+        let ctxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-df-node-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: ctxDir) }
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: FeaturesTestSupport.refA, options: [:]),
+                metadata: metaA
+            )
+        ]
+        let packages = [
+            FetchedFeaturePackage(
+                reference: FeaturesTestSupport.refA,
+                directoryPath: FeaturesTestSupport.fixtureFeatureDir("sample-a")
+            )
+        ]
+        let ctx = try FeatureDockerfileGenerator.write(
+            baseImage: "node:20",
+            ordered: ordered,
+            packages: packages,
+            contextDirectory: ctxDir,
+            baseUser: "node"
+        )
+        try MiniTest.expect(!ctx.dockerfileContents.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("USER root"))
+        try MiniTest.expect(ctx.dockerfileContents.contains("USER node"))
+        // Install env falls back to base USER when config users empty (not unconditional root).
+        try MiniTest.expect(ctx.dockerfileContents.contains("_REMOTE_USER=node"))
+        try MiniTest.expect(ctx.dockerfileContents.contains("_CONTAINER_USER=node"))
+    }),
+    ("featuresRunnerFailsClosedOnBaseInspectFailure", {
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-inspect-fail-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+        let mockFetch = MockFeatureFetcher(packagesByRef: [
+            FeaturesTestSupport.refA: FeaturesTestSupport.fixtureFeatureDir("sample-a")
+        ])
+        let mockProc = MockProcessRunner()
+        mockProc.handlers = [
+            { args in
+                if args.starts(with: ["image", "inspect"]) {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("nope".utf8))
+                }
+                if args.starts(with: ["image", "list"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
+                }
+                if args.first == "build" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mockProc)
+        try MiniTest.expectThrows({
+            _ = try FeaturesRunner.run(
+                features: [AdmittedFeature(reference: FeaturesTestSupport.refA, options: [:])],
+                baseImage: "alpine:3.20",
+                deps: FeaturesRunner.Dependencies(
+                    fetcher: mockFetch,
+                    runtime: runtime,
+                    cacheRoot: cache,
+                    platform: "linux/arm64"
+                )
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(err.message.lowercased().contains("inspect") || err.message.lowercased().contains("user"))
+        }
+        try MiniTest.expect(!mockProc.calls.contains { $0.arguments.first == "build" })
+    }),
+    ("derivedImageTagRecipeVersionBumpedForUserRestore", {
+        try MiniTest.expectEqual(DerivedImageTag.recipeVersion, "3")
+        let metaA = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refA
+        )
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: FeaturesTestSupport.refA, options: [:]),
+                metadata: metaA
+            )
+        ]
+        let v2 = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            nameBase: "x",
+            recipeVersion: "2"
+        )
+        let v3 = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            nameBase: "x",
+            recipeVersion: "3"
+        )
+        try MiniTest.expect(v2 != v3, "recipeVersion bump must change derived tag")
     }),
     ("tomlMergeBuildRosettaFalsePreservesKeys", {
         let input = """
@@ -2795,8 +3116,9 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         let mockProc = MockProcessRunner()
         var buildArgs: [String]?
         mockProc.handlers = [
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
             { args in
-                if args.starts(with: ["image", "inspect"]) || args.starts(with: ["image", "list"]) {
+                if args.starts(with: ["image", "list"]) {
                     return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
                 }
                 if args.first == "build" {

@@ -122,8 +122,12 @@ final class RebuildScenario {
         }
         if args.starts(with: ["image", "inspect"]) {
             let ref = args.last ?? ""
-            guard existingImages.contains(ref) else { return fail("missing") }
+            // Derived tags exist only when explicitly listed (Features reuse).
+            if ref.hasPrefix("adev-") || ref.hasPrefix("adevcontainer:") {
+                guard existingImages.contains(ref) else { return fail("missing") }
+            }
             if ref == RecoveryHelper.helperImageReference {
+                guard existingImages.contains(ref) else { return fail("missing") }
                 let object: [String: Any] = [
                     "configuration": [
                         "name": ref,
@@ -135,7 +139,9 @@ final class RebuildScenario {
                 ]
                 return ok(try! JSONSerialization.data(withJSONObject: [object]))
             }
-            return ok(Data())
+            // Base / config / derived (when present): Apple-shaped JSON with USER for resolution.
+            let payload = MockProcessRunner.imageInspectJSON(reference: ref, user: "vscode")
+            return ok(try! JSONSerialization.data(withJSONObject: payload))
         }
         if args.first == "start" {
             return startFails ? fail("start failed") : ok(Data())

@@ -4,6 +4,20 @@ import Foundation
 public enum DevContainerMetadataLabel {
     public static let labelKey = "devcontainer.metadata"
 
+    /// `remoteUser` / `containerUser` contributed by image metadata fragments.
+    /// Across an array of fragments, **last non-empty after trim wins** per field.
+    public struct ImageMetadataUsers: Equatable, Sendable {
+        public var remoteUser: String?
+        public var containerUser: String?
+
+        public init(remoteUser: String? = nil, containerUser: String? = nil) {
+            self.remoteUser = remoteUser
+            self.containerUser = containerUser
+        }
+
+        public static let empty = ImageMetadataUsers()
+    }
+
     /// Parse label JSON into partial contributions. Absence / parse failure → empty (never fails up alone).
     /// Accepts a top-level JSON object or an array of objects (fragments are union-merged).
     public static func parseContributions(from labels: [String: String]) -> FeatureContributions {
@@ -26,6 +40,37 @@ public enum DevContainerMetadataLabel {
             return merged
         }
         return .empty
+    }
+
+    /// Extract `remoteUser` / `containerUser` from image `devcontainer.metadata`.
+    /// Absence / parse failure → empty. Array fragments: last non-empty wins per field.
+    public static func parseUsers(from labels: [String: String]) -> ImageMetadataUsers {
+        guard let raw = labels[labelKey], !raw.isEmpty else {
+            return .empty
+        }
+        guard let data = raw.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) else {
+            return .empty
+        }
+        let fragments: [[String: Any]]
+        if let obj = json as? [String: Any] {
+            fragments = [obj]
+        } else if let arr = json as? [Any] {
+            fragments = arr.compactMap { $0 as? [String: Any] }
+        } else {
+            return .empty
+        }
+        var remote: String?
+        var container: String?
+        for dict in fragments {
+            if let u = RemoteUserResolution.nonEmptyTrimmed(dict["remoteUser"] as? String) {
+                remote = u
+            }
+            if let u = RemoteUserResolution.nonEmptyTrimmed(dict["containerUser"] as? String) {
+                container = u
+            }
+        }
+        return ImageMetadataUsers(remoteUser: remote, containerUser: container)
     }
 
     /// Also accept inspect configuration labels that may nest differently.

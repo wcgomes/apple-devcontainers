@@ -22,6 +22,8 @@ Parse these paths from machine JSON (not human tables). Shape documented against
 | `status.state` | Lifecycle state |
 | `configuration.labels` | Labels map |
 
+**Image inspect (connection-user / Features base USER):** Apple image JSON nests config under `variants[].config.config` (not top-level `Config`). Read **OCI USER** from `variants[].config.config.User`. Labels may include `devcontainer.metadata` (JSON array/object) with `remoteUser` / `containerUser` — official Microsoft base images often ship **OCI USER root** + metadata `remoteUser: vscode`. **Inspect failure is not root** — do not default to root or hardcode `vscode`/`node` when inspect fails; fail or leave unresolved per resolver policy. Container list/inspect still uses the table above.
+
 - `container create --name <id>` — the name **is** the id used later for inspect/exec/stop/delete.
 - **No label filter on `list`** — filter client-side after JSON list (or resolve by deterministic name/inspect).
 - Long-lived devcontainers: keep-alive via `--entrypoint /bin/sleep` + `infinity` so the process does not exit immediately.
@@ -94,6 +96,24 @@ Do **not** reintroduce triple skip-warnings on resolve. Admission parsers gate u
 - **Fail** if `hostRequirements` is present but not an object, a supported key is unparseable, or an unknown key appears inside the object.
 - Config hash includes memory/cpus when set (limits affect create identity).
 
+## Connection user (remoteUser / containerUser)
+
+Precedence for the **effective connection user** (exec, lifecycle, VS Code attach defaults) — first non-empty wins, then fall through:
+
+1. Local config `remoteUser`
+2. Local config `containerUser`
+3. Image `devcontainer.metadata` — last non-empty `remoteUser` / `containerUser` across metadata entries
+4. Final image OCI `USER` (`variants[].config.config.User`)
+5. `root` only when all of the above are empty **and** inspect succeeded with empty USER
+
+**Create `-u`:** pass `container create -u` **only** for an explicit local config `containerUser`. Do **not** pass `-u` for resolved `remoteUser`, metadata-only users, or OCI USER — those affect connection/exec identity, not create process user override.
+
+**Stamp:** every successful create stamps non-empty `devcontainer.remote_user` to the resolved connection user (including literal `root`). Empty stamp is **legacy only** (pre-change containers); new creates never stamp empty. `exec` and `--vscode` (settings path, nameConfig `remoteUser`) read this stamp — non-empty → use it; empty legacy → omit exec `-u` / runtime default (no fabricated `vscode`/`node`).
+
+**nameConfig:** write `…/nameConfigs/<containerName>.json` (`workspaceFolder` + `remoteUser`) **before** launching `code` so attach picks up defaults on first open.
+
+Active change (not archived): [`specs/changes/align-remote-user-resolution/`](../../specs/changes/align-remote-user-resolution/).
+
 ## Deterministic names and labels
 
 Set on create and use for reuse/inspect/`list`:
@@ -110,7 +130,7 @@ Set on create and use for reuse/inspect/`list`:
 | Label `devcontainer.git_url` | Normalized remote (userinfo stripped; volume-mode) |
 | Label `devcontainer.config_volumes` | Config `type=volume` names for prune |
 | Label `devcontainer.workspace_folder` | Create-time container workdir for exec (both modes) |
-| Label `devcontainer.remote_user` | Create-time effective user for exec (both modes; may be empty) |
+| Label `devcontainer.remote_user` | Resolved connection user at create (both modes); **always non-empty on new creates** (incl. `root`); empty = legacy only; consumed by `exec` / `--vscode` |
 
 Bind-mode `up` stamps the full managed label set including `workspace_mode=bind` (not volume-only).
 
@@ -124,7 +144,7 @@ Bind-mode `up` stamps the full managed label set including `workspace_mode=bind`
   - Bind: `hash12` = workspace path + config path.
   - Volume: `hash12` = normalized git URL + config relpath (not temp checkout path).
 - **Workspace volume (volume-mode):** `adev-{base}-{hash12}-ws`.
-- **Features derived image tag:** `adev-{base}:{hash12}` where `hash12` is the content hash of base image + features + **`recipeVersion`** (epoch string in `DerivedImageTag`); empty base → `adevcontainer:{hash12}`. No `adevcontainer/features:` prefix and no `/features` path segment. Config `image` without a Features build is left as written. Tag validity depends on sanitize collapse (above). **Bump `recipeVersion` whenever install-Dockerfile semantics change** so cached local derived images are not reused forever; current epoch **`"2"`** pairs with `chmod -R 0755` package before `install.sh` (generic install-layer change, not feature-specific).
+- **Features derived image tag:** `adev-{base}:{hash12}` where `hash12` is the content hash of base image + features + **`recipeVersion`** (epoch string in `DerivedImageTag`); empty base → `adevcontainer:{hash12}`. No `adevcontainer/features:` prefix and no `/features` path segment. Config `image` without a Features build is left as written. Tag validity depends on sanitize collapse (above). **Bump `recipeVersion` whenever install-Dockerfile semantics change** so cached local derived images are not reused forever; current epoch **`"3"`** = chmod-before-install **and** install-as-root then restore base image `USER` (was `"2"` = chmod-only).
 
 Do not depend on Docker-style `ps --filter label=` as the primary discovery mechanism ([gaps](../domain/devcontainer-apple-gaps.md)).
 
@@ -163,7 +183,7 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 - `list [--json]`: client-side filter to `devcontainer.managed=adevcontainer` only.
 - `start` / `exec` / `stop` / `delete` / `prune` / `rebuild` / `inspect`: `--name` or picker among managed; no host workspace path required.
 - `start`: runtime start of a managed container; **volume-mode runs no hooks** (bind start-stopped `postStart` stays on `up` path).
-- `exec`: user/workdir from labels `devcontainer.remote_user` / `devcontainer.workspace_folder` when set (both bind and volume create stamp these).
+- `exec`: user/workdir from labels `devcontainer.remote_user` / `devcontainer.workspace_folder` when set (both modes stamp workdir; new creates always stamp non-empty `remote_user` incl. `root`; empty label = legacy omit `-u` — see [Connection user](#connection-user-remoteuser--containeruser)).
 
 ## `up` reuse vs `rebuild` (forced rebuild)
 
@@ -201,9 +221,9 @@ On `up`/`clone`/`rebuild` when `features` is non-empty after resolve (and after 
 | build.rosetta | Before fetch/build: ensure Apple BuildKit `build.rosetta=false`. Already false → silent. True/missing → one-time TTY consent (or fail); CI auto-accept via `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`. Never install Rosetta; never restore `true` after consent. Config pickup uses `restartBuilderForConfig` (stop+delete only) — **not** the restore-after-build path below |
 | Fetch / load | **Local path:** validate package (`devcontainer-feature.json` + `install.sh`) and copy into feature cache. **OCI:** embedded HTTPS client (`OCIFeatureClient`) — **not** `container image pull`, ORAS, or Node |
 | Order | `dependsOn` / `installsAfter` topo-sort (id last-segment match so `./x/sample-a` satisfies `…/sample-a:1`); cycle → structured error |
-| Build | Generate Dockerfile (`FeatureDockerfileGenerator`): per feature `COPY` package then **`RUN chmod -R 0755 /tmp/adev-feature-N && … ./install.sh`** as root — ref CLI parity (`@devcontainers/cli`); recursive +x so scripts `install.sh` copies to bare-path lifecycle hooks (e.g. shell-history `oncreate.sh`, often 0644 in OCI) stay executable and avoid exit **126** Permission denied; `container build --platform` host-native (`linux/arm64` on Apple Silicon) via `AppleContainerRuntime.build`; **no** `--rosetta` unless user opted in via `runArgs`; deterministic derived tag `adev-{base}:{hash12}` (empty base → `adevcontainer:{hash12}`; no `adevcontainer/features:` prefix); hash includes **`recipeVersion`** epoch — bump on install-Dockerfile semantic changes (current `"2"` = chmod-before-install); reuse when tag exists. See BuildKit builder lifecycle |
+| Build | Generate Dockerfile (`FeatureDockerfileGenerator`): per feature `COPY` package then **`RUN chmod -R 0755 /tmp/adev-feature-N && … ./install.sh` as root**; after all features, **restore base image OCI `USER`** so derived image default user matches base (ref CLI parity). Install-layer env: when local config has no `remoteUser`/`containerUser`, pass base-image USER into feature install env (not a hardcoded `vscode`/`node`). Recursive +x avoids exit **126** on bare-path lifecycle hooks copied 0644 from OCI. `container build --platform` host-native (`linux/arm64` on Apple Silicon) via `AppleContainerRuntime.build`; **no** `--rosetta` unless user opted in via `runArgs`; deterministic derived tag `adev-{base}:{hash12}` (empty base → `adevcontainer:{hash12}`; no `adevcontainer/features:` prefix); hash includes **`recipeVersion`** epoch — current **`"3"`** (chmod-before-install + root-install then restore USER); reuse when tag exists. See BuildKit builder lifecycle |
 | Merge | Feature contributions into effective config before create (`init`, `capAdd`, mounts, lifecycle hooks; `containerEnv` **config wins**). PATH refs in env expanded on create **and** exec — see PATH expansion |
-| Create | Workspace container from **derived image** with same `--platform` |
+| Create | Workspace container from **derived image** with same `--platform`. Create `-u` only for explicit local `containerUser` — see [Connection user](#connection-user-remoteuser--containeruser) |
 | Skip | Reuse-running path: no feature fetch/build |
 
 ### BuildKit builder lifecycle (Features image build)
@@ -286,7 +306,7 @@ Each hook property admits **string** | **argv `string[]`** | **object map** `nam
 
 ## `exec`: selection, interactive vs non-interactive
 
-- **Selection:** `--name` or interactive picker among managed only — **no `-w`/cwd** (that flag is `up`-only). Workdir/user from labels `devcontainer.workspace_folder` / `devcontainer.remote_user` when set at create (bind or volume).
+- **Selection:** `--name` or interactive picker among managed only — **no `-w`/cwd** (that flag is `up`-only). Workdir/user from labels `devcontainer.workspace_folder` / `devcontainer.remote_user` when stamped at create (bind or volume; new creates always stamp non-empty `remote_user`; empty = legacy).
 - **Interactive** (no command, or `-i` / `-t` / `-it`): **InteractiveProcessRunner** (inherit stdio **plus** child TTY foreground via `tcsetpgrp` + `SIGCONT` after launch — see Subprocess rules) + `container exec -i -t`; default command is `bash`.
 - **Non-interactive** (command exec without those flags): capture stdout/stderr pipes; do **not** pass `-i`/`-t`.
 - Feature/config `containerEnv` on exec expands `${PATH}` / `$PATH` the same as create.

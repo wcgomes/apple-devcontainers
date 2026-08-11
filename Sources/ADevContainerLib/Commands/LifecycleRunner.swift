@@ -59,7 +59,7 @@ public enum LifecycleRunner {
         let execResult = try runtime.exec(
             nameOrId: containerId,
             command: command.execArguments,
-            user: config.effectiveUser,
+            user: config.connectionUser,
             workdir: config.workspaceFolder,
             env: config.containerEnv,
             streamOutput: true

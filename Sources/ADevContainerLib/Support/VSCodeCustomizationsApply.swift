@@ -591,7 +591,7 @@ public enum VSCodeCustomizationsApply {
         guard !payload.isEmpty else { return .skippedEmpty }
 
         let guest = guestOverride ?? ExecVSCodeGuestOps(runtime: runtime)
-        let user = config.effectiveUser
+        let user = config.connectionUser
 
         do {
             let home = try guest.resolveHome(containerId: containerId, user: user)
@@ -645,7 +645,7 @@ public enum VSCodeCustomizationsApply {
 
         let guest = guestOverride ?? ExecVSCodeGuestOps(runtime: runtime)
         let downloader = downloaderOverride ?? MarketplaceVSCodeVSIXDownloader()
-        let user = config.effectiveUser
+        let user = config.connectionUser
 
         do {
             let home = try guest.resolveHome(containerId: containerId, user: user)

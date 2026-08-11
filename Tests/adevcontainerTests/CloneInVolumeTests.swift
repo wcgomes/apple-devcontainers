@@ -101,14 +101,22 @@ enum CloneRuntimeMock {
         cloneExecSucceeds: Bool = true,
         verifyGitExists: Bool = true,
         hookExecSucceeds: Bool = true,
-        onCreate: (([String]) -> Void)? = nil
+        onCreate: (([String]) -> Void)? = nil,
+        baseUser: String? = nil
     ) -> [([String]) -> ProcessResult?] {
         [
+            MockProcessRunner.imageInspectHandler(baseUser: baseUser),
             { args in
                 onCreate?(args)
                 if args.starts(with: ["list"]) || args.starts(with: ["volume", "list"]) {
                     let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
                     return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.starts(with: ["image", "list"]) {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+                }
+                if args.first == "build" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
                 if args.starts(with: ["volume", "create"]) || args.starts(with: ["volume", "delete"]) {
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
@@ -832,12 +840,19 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
                 createdName = args[nameIdx + 1]
             }
         })
-        // Override create to return named id
+        // Override create to return named id (keep inspect/build for Features + user resolution).
         mock.handlers = [
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
             { args in
                 if args.starts(with: ["list"]) || args.starts(with: ["volume", "list"]) {
                     let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
                     return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.starts(with: ["image", "list"]) {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+                }
+                if args.first == "build" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
                 if args.starts(with: ["volume", "create"]) {
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
@@ -907,10 +922,13 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(labelVals.contains { $0.hasPrefix("devcontainer.git_url=") })
         try MiniTest.expect(labelVals.contains { $0.hasPrefix("devcontainer.workspace_volume=") })
         try MiniTest.expect(labelVals.contains { $0 == "devcontainer.workspace_folder=/workspaces/clone-app" })
-        try MiniTest.expect(labelVals.contains { $0.hasPrefix("devcontainer.remote_user=") })
+        // Empty OCI USER after successful inspect → resolved connection user `root`
+        try MiniTest.expect(labelVals.contains { $0 == "devcontainer.remote_user=root" })
+        try MiniTest.expectEqual(result.remoteUser, "root")
         // No secrets in labels / success JSON
         try MiniTest.expect(!labelVals.contains { $0.contains("secret-token") })
         let obj = try JSONSerialization.jsonObject(with: try result.jsonData()) as! [String: Any]
+        try MiniTest.expectEqual(obj["remoteUser"] as? String, "root")
         let jsonText = String(data: try result.jsonData(), encoding: .utf8) ?? ""
         try MiniTest.expect(!jsonText.contains("secret-token"))
         // Populate: in-container git clone (sh -c), NOT host fullClone / tar-pipe
@@ -930,7 +948,7 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         })
         try MiniTest.expectEqual(obj["outcome"] as? String, "success")
         try MiniTest.expect(obj["containerId"] != nil)
-        try MiniTest.expect(obj["remoteUser"] != nil)
+        try MiniTest.expectEqual(obj["remoteUser"] as? String, "root")
         try MiniTest.expect(obj["remoteWorkspaceFolder"] != nil)
         try MiniTest.expect(obj["gitUrl"] != nil)
         try MiniTest.expect(obj["workspaceVolume"] != nil)
@@ -938,6 +956,36 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!FileManager.default.fileExists(atPath: git.fetchConfigCalls[0].directory))
         let fetcher = CloneCommand.featuresFetcherOverride as? MockFeatureFetcher
         try MiniTest.expect((fetcher?.fetchCalls.count ?? 0) >= 1)
+    }),
+    ("cloneStampsConfigRemoteUserAlice", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.configJSONToWrite = """
+        {
+          "name": "CloneAlice",
+          "image": "alpine:3.20",
+          "remoteUser": "alice"
+        }
+        """
+        let mock = MockProcessRunner()
+        mock.handlers = CloneRuntimeMock.handlers(baseUser: "node")
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try CloneCommand.run(
+            options: CloneOptions(gitURL: "https://github.com/org/clone-alice.git", skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(result.remoteUser, "alice")
+        let createCall = mock.calls.first { $0.arguments.first == "create" }!
+        let labelVals = createCall.arguments.enumerated().compactMap { i, a -> String? in
+            a == "-l" && i + 1 < createCall.arguments.count ? createCall.arguments[i + 1] : nil
+        }
+        try MiniTest.expect(labelVals.contains { $0 == "devcontainer.remote_user=alice" })
+        try MiniTest.expect(!createCall.arguments.contains("-u"), "remoteUser alone must not set create -u")
     }),
     ("cloneSSHInjectsCreateSSHFlag", {
         let restore = CloneGitFeatureTestSupport.installOverrides()

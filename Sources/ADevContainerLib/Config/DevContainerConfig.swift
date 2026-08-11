@@ -207,11 +207,26 @@ public struct ResolvedDevContainerConfig: Equatable {
         return !obj.isEmpty
     }
 
+    /// Config-only remote connection user (`remoteUser` > `containerUser`).
+    /// Does **not** include OCI USER or `root` fallback — use `RemoteUserResolution` on create.
+    public var connectionUserFromConfig: String? {
+        RemoteUserResolution.fromConfig(remoteUser: remoteUser, containerUser: containerUser)
+    }
+
+    /// Create process user: non-empty `containerUser` only (drives create `-u`).
+    public var createProcessUser: String? {
+        RemoteUserResolution.nonEmptyTrimmed(containerUser)
+    }
+
+    /// Connection-oriented user from config (`remoteUser` > `containerUser`).
+    /// Prefer this (or a fully resolved stamp) for exec/hooks/VS Code — never for create `-u`.
     public var effectiveUser: String? {
-        // Prefer remoteUser for exec/attach semantics; fall back to containerUser.
-        if let remoteUser, !remoteUser.isEmpty { return remoteUser }
-        if let containerUser, !containerUser.isEmpty { return containerUser }
-        return nil
+        connectionUserFromConfig
+    }
+
+    /// Alias used by lifecycle / customizations after create-path resolution stamps `remoteUser`.
+    public var connectionUser: String? {
+        connectionUserFromConfig
     }
 
     /// Fields used for config hash / drift detection.

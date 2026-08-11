@@ -113,6 +113,7 @@ Config: `.devcontainer/devcontainer.json`, else `.devcontainer.json`.
 - Config hash mismatch → `up` errors with `config_hash_mismatch`; run `adevcontainer rebuild` (managed selection: `--name` or auto).
 - **`delete`** = container only. **`prune`** = container + named volumes (including clone `*-ws`) + config image. Never deletes host bind paths. Ordinary `prune` skips marked recovery helpers.
 - Progress on **stderr** (`==> …`). `ADEVCONTAINER_QUIET=1` silences progress only — policy warn-skips still emit. `--json` keeps stdout clean.
+- **Users (connection vs create):** Connection user (labels, `exec`, lifecycle hooks, VS Code) resolves first non-empty: local `remoteUser` → local `containerUser` → image `devcontainer.metadata` `remoteUser`/`containerUser` (last non-empty across fragments) → image OCI `USER` → `root`. Create `-u` is set **only** for explicit local `containerUser` (never for resolved `remoteUser`, metadata, or OCI USER). Successful create always stamps non-empty `devcontainer.remote_user` (including `root`); empty stamp is legacy only. Official `mcr.microsoft.com/devcontainers/base:*` typically has OCI USER root + metadata `remoteUser: vscode`.
 
 ### Lifecycle hooks
 

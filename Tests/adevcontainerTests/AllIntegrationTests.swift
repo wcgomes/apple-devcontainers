@@ -178,7 +178,30 @@ enum IntegrationSupport {
 
 nonisolated(unsafe) let integrationTests: [(String, () throws -> Void)] = [
     ("fixtureE2E_smoke", {
-        try IntegrationSupport.runFixtureE2E(fixtureFile: "smoke.json")
+        // smoke.json = base:ubuntu, no local users → metadata remoteUser=vscode.
+        try IntegrationSupport.runFixtureE2E(fixtureFile: "smoke.json", extra: { ws, runtime, _ in
+            let listed = try ManagedContainers.list(runtime: runtime)
+            let wsPath = (ws.path as NSString).standardizingPath
+            let match = listed.first {
+                ($0.labels[ContainerIdentity.labelLocalFolder] as NSString?)?.standardizingPath == wsPath
+            }
+            try MiniTest.expect(match != nil, "expected managed container for smoke workspace")
+            let name = match!.name
+            let inspected = try InspectCommand.run(name: name, runtime: runtime)
+            try MiniTest.expectEqual(inspected.remoteUser, "vscode")
+            try MiniTest.expectEqual(
+                inspected.labels[ContainerIdentity.labelRemoteUser],
+                "vscode"
+            )
+            let code = try ExecCommand.run(
+                options: ExecOptions(
+                    command: ["sh", "-lc", "test \"$(id -un)\" = vscode"],
+                    name: name
+                ),
+                runtime: runtime
+            )
+            try MiniTest.expectEqual(code, 0)
+        })
     }),
     ("fixtureE2E_envUser", {
         try IntegrationSupport.runFixtureE2E(fixtureFile: "env-user.json", extra: { ws, runtime, _ in

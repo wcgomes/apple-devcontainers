@@ -206,6 +206,16 @@ public enum VSCodeOpen {
         let args = ["--new-window", "--folder-uri", uri]
         let launcher = launcherOverride ?? ProcessVSCodeCodeLauncher()
 
+        // nameConfig before launch so Remote - Containers can observe attach defaults on open.
+        // Soft-fail: write failure must not block the subsequent open attempt.
+        if writeNameConfigEnabled {
+            writeNameConfigSoft(
+                containerName: target.containerName ?? id,
+                workspaceFolder: folder,
+                remoteUser: target.remoteUser
+            )
+        }
+
         do {
             let result = try launcher.launch(executable: codePath, arguments: args)
             if !result.succeeded {
@@ -220,14 +230,6 @@ public enum VSCodeOpen {
             let msg = error.localizedDescription
             StatusPrinter.warning("VS Code open failed: \(msg)")
             return .launchFailed(message: msg)
-        }
-
-        if writeNameConfigEnabled {
-            writeNameConfigSoft(
-                containerName: target.containerName ?? id,
-                workspaceFolder: folder,
-                remoteUser: target.remoteUser
-            )
         }
 
         return .opened(uri: uri)

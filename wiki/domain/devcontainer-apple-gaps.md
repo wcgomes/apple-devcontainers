@@ -21,6 +21,7 @@ Facts that constrain the CLI. Not a full Apple container manual — only gaps th
 | Workspace I/O | Often bind or named volume | **Bind:** host APFS via virtiofs. **Named volume:** `volume.img` ext4 via virtio-blk — better metadata I/O; rationale for `clone` volume-mode |
 | Host→guest copy | `docker cp` into bind or volume | **`container cp` into a named-volume mount can exit 0 without writing files** (silent no-op). Rootfs paths may still accept `cp`. Product clone populate avoids host→guest copy entirely (in-container `git clone`); tar-pipe utility remains if ever needed — see below |
 | Env PATH | Shell/`${PATH}` often expanded | Apple `container` does **not** expand `${PATH}` — product expands on **create and exec** (`expandEnvPathRefs`); exec-only miss breaks lifecycle (`sh -lc` needs `/bin` on PATH) |
+| Image USER / remoteUser | Docker inspect `Config.User`; metadata often on image labels | Apple image inspect: **`variants[].config.config.User`** (not top-level `Config`). Labels may carry `devcontainer.metadata` with `remoteUser`/`containerUser`. Official `mcr.microsoft.com/devcontainers/base:*` typically **OCI USER root** + metadata **`remoteUser: vscode`**. Product connection-user precedence + stamp: [cli-runtime-boundary — Connection user](../conventions/cli-runtime-boundary.md#connection-user-remoteuser--containeruser). **Inspect failure ≠ root**; never hardcode `vscode`/`node` |
 
 ### Bind vs volume workspace
 
@@ -86,11 +87,13 @@ Contract + README/CLI help landed (archive `20260810-rebuild`). Remaining gaps o
 
 ### list/inspect JSON (tested shape: 1.2.x)
 
-Useful machine-JSON paths documented against Apple container **1.2.x**: `configuration.id`, `status.state`, `configuration.labels`. Full parse rules: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
+**Container** machine-JSON (list/inspect) against Apple container **1.2.x**: `configuration.id`, `status.state`, `configuration.labels`.
 
-### Features build (Rosetta / platform)
+**Image** inspect (USER / metadata for connection user + Features base USER): `variants[].config.config.User`; labels may include `devcontainer.metadata` JSON. Do not assume Docker’s top-level `Config.User`. Full parse rules: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
 
-Apple BuildKit with `build.rosetta=true` can require Rosetta even for native arm64 image builds. Product ensures `build.rosetta=false` (one-time consent) and passes `--platform linux/arm64` on Features pull/build/create. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
+### Features build (Rosetta / platform / USER)
+
+Apple BuildKit with `build.rosetta=true` can require Rosetta even for native arm64 image builds. Product ensures `build.rosetta=false` (one-time consent) and passes `--platform linux/arm64` on Features pull/build/create. Feature install runs **as root** then Dockerfile **restores base OCI USER** (`recipeVersion` **`"3"`**); install env uses base USER when config remote/container user empty. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
 
 ### VS Code attach (`--vscode` + manual)
 
@@ -113,7 +116,7 @@ After lifecycle success, `up` / `start` / `clone` / `rebuild` accept **`--vscode
 | Identity | `customizations` stay out of create identity / config hash |
 | postAttach | **Implemented:** **RUNS** config then feature postAttach only after successful `--vscode` open; **SKIP** if no flag or open soft-fails (status when any present); fail-keep; not IDE-confirmed ready |
 | postAttach sources | `start`: config from labels (bind host paths / volume in-container cat); reuse/`start`: feature hooks from image `devcontainer.metadata` |
-| nameConfigs (optional) | `…/globalStorage/ms-vscode-remote.remote-containers/nameConfigs/<containerName>.json` → `workspaceFolder` + `remoteUser` |
+| nameConfigs | Write `…/globalStorage/ms-vscode-remote.remote-containers/nameConfigs/<containerName>.json` (`workspaceFolder` + `remoteUser`) **before** `code` launch; `remoteUser` from non-empty connection-user resolution |
 | UI gap | `remote-containers.attachToAppleContainer` attaches authority **without** folder → empty window; folder-uri avoids it |
 | `open vscode://` | May reuse window; prefer `code --new-window --folder-uri` |
 | Parity | Not full Dev Containers up/rebuild / IDE-owned apply; manual attach without `--vscode` still valid |
@@ -126,7 +129,8 @@ After lifecycle success, `up` / `start` / `clone` / `rebuild` accept **`--vscode
 - **Lifecycle**: run via `container exec` (hook matrix: create-path full order on `up`/`clone`; bind start-stopped `postStart` only; bare `start` no create-path/postStart; reuse none for create-path; **postAttach implemented** — runs after successful `--vscode` open only, skip otherwise, fail-keep; `start` loads config from labels; feature postAttach from image metadata on reuse/`start`). Forms: string | argv | named object map (map runs sequentially sorted by name, not true parallel). Exec must expand `containerEnv` PATH refs (same as create) or login-shell hooks fail (`id`/`bash` not found). Not Docker entrypoint injection parity. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
 - **`runArgs`**: allowlist (`--init`, `--cap-add`/`--cap-drop`, …); privileged/tun/device/security family **warn-skip**; unknown and first-class smuggling flags fail closed.
 - **`hostRequirements`**: preflight — fail on memory/cpus shortfall; map requested limits to create `-m`/`-c` when host OK; warn unsupported `gpu`; fail on unparseable/unknown keys.
-- **Features**: OCI + local path fetch/load + derived image build on `up` (see [cli-runtime-boundary](../conventions/cli-runtime-boundary.md)); **warn-skip** `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker` and privileged/securityOpt metadata ([0003](../decisions/0003-warn-skip-apple-incompatibles.md)).
+- **Features**: OCI + local path fetch/load + derived image build on `up` (see [cli-runtime-boundary](../conventions/cli-runtime-boundary.md)); **warn-skip** `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker` and privileged/securityOpt metadata ([0003](../decisions/0003-warn-skip-apple-incompatibles.md)). Install as root, restore base USER; `recipeVersion` `"3"`.
+- **Connection user**: local `remoteUser` → local `containerUser` → image metadata last non-empty remote/container user → OCI USER → root; create `-u` only for explicit `containerUser`; successful create always stamps non-empty `devcontainer.remote_user` (incl. `root`; empty = legacy only). Active change: [`specs/changes/align-remote-user-resolution/`](../../specs/changes/align-remote-user-resolution/).
 
 ## Reference config hotspots
 
@@ -141,4 +145,4 @@ After lifecycle success, `up` / `start` / `clone` / `rebuild` accept **`--vscode
 
 ## Identity workaround
 
-Because list-by-label may be weak/missing, the CLI owns **deterministic container names** (`adev-{base}-{hash12}`, human base from config `name` or workspace basename) plus managed labels (`devcontainer.managed`, `local_folder`, `config_file`, config hash, `workspace_mode` = `bind`|`volume`, `workspace_folder`, `remote_user`; volume-mode also `git_url`, `workspace_volume`, `config_volumes`) and resolves via `--name`/picker + client-side managed filter (only `up` uses `-w`). Volume identity keys off git URL + config relpath so reclones stay stable. Naming detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
+Because list-by-label may be weak/missing, the CLI owns **deterministic container names** (`adev-{base}-{hash12}`, human base from config `name` or workspace basename) plus managed labels (`devcontainer.managed`, `local_folder`, `config_file`, config hash, `workspace_mode` = `bind`|`volume`, `workspace_folder`, `remote_user` always non-empty on new creates incl. `root`; volume-mode also `git_url`, `workspace_volume`, `config_volumes`) and resolves via `--name`/picker + client-side managed filter (only `up` uses `-w`). Volume identity keys off git URL + config relpath so reclones stay stable. Naming + connection-user detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).

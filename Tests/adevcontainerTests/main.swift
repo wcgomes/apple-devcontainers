@@ -13,6 +13,7 @@ let allTests: [(String, () throws -> Void)] = []
     + substitutionTests
     + admissionTests
     + errorModelTests
+    + remoteUserResolutionTests
     + runtimeTests
     + doctorTests
     + upTests
