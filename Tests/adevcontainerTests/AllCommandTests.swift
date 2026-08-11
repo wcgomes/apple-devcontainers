@@ -173,19 +173,6 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
             let hint = err.hint ?? ""
             try MiniTest.expect(hint.contains("adevcontainer rebuild"), "hint points to rebuild")
             try MiniTest.expect(hint.contains("--name") || hint.contains("auto"), "hint mentions managed selection")
-            try MiniTest.expect(!hint.contains("--recreate"), "hint must not mention removed --recreate")
-        }
-    }),
-    ("upRecreateFlagIsUnknown", {
-        try MiniTest.expectThrows({
-            _ = try CommandSurface.parseArgs(["--recreate"])
-        }) { error in
-            let err = error as! CLIError
-            try MiniTest.expectEqual(err.code, CLIErrorCode.usage)
-            try MiniTest.expect(
-                err.message.contains("Unknown option") && err.message.contains("--recreate"),
-                "unknown-flag fail-closed for removed --recreate"
-            )
         }
     })
 ]

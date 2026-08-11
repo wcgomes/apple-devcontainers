@@ -39,7 +39,7 @@ On Apple `container`, named volumes sit on ext4/virtio-blk rather than virtiofs 
    - Human base: sanitize(`name`) when non-empty after trim; else sanitize(repo basename from URL).
 8. **Container name:** existing scheme `adev-{base}-{hash12}` (empty base → `adev-{hash12}`; ≤ 63 chars).
 9. **Workspace volume name:** `adev-{base}-{hash12}-ws` — MUST include the same container identity; if length must be clipped, keep `hash12` and the `-ws` suffix.
-10. **Workspace volume:** if `adev-*-ws` already exists → **delete + recreate empty** (fresh tree on re-clone). If managed container name already exists → **fail closed** (no silent reuse).
+10. **Workspace volume:** if `adev-*-ws` already exists → **delete + create empty** (fresh tree on re-clone). If managed container name already exists → **fail closed** (no silent reuse).
 11. **Create** container with workspace mount = **named volume** (NOT host bind). Labels MUST include (at minimum):
     - `devcontainer.managed=adevcontainer`
     - `devcontainer.git_url=<normalized url>` (scheme userinfo stripped)
@@ -139,7 +139,7 @@ All Apple `container` subprocesses remain behind **AppleContainerRuntime**. Host
 | workspaceFolder default | Git URL repo basename (not temp dir); explicit wins |
 | Human base (volume) | `name` else git URL repo basename |
 | Volume name | `adev-{base}-{hash12}-ws` (identity + `-ws`) |
-| Re-clone ws volume | Delete + recreate empty if exists |
+| Re-clone ws volume | Delete + create empty if exists |
 | Existing container name | Fail closed (no silent reuse) |
 | Failure cleanup | Delete container + workspace volume |
 | Managed label | `devcontainer.managed=adevcontainer` on **both** bind (`up`) and volume (`clone`) |

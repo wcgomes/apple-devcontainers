@@ -151,9 +151,9 @@ Apple `container create --name` MUST equal the container id used for later inspe
 
 On `clone` create, the CLI MUST:
 
-1. **Workspace volume freshness (re-clone):** If the workspace named volume already exists, the CLI MUST **delete it and recreate it empty** before mount. MUST NOT reuse a dirty existing workspace volume tree. (Config `type=volume` mounts remain list-then-create/reuse per Named volume reuse policy — only the clone workspace `*-ws` volume is delete-and-recreate.)
+1. **Workspace volume freshness (re-clone):** If the workspace named volume already exists, the CLI MUST **delete it and create it empty** before mount. MUST NOT reuse a dirty existing workspace volume tree. (Config `type=volume` mounts remain list-then-create/reuse per Named volume reuse policy — only the clone workspace `*-ws` volume is delete-and-create.)
 2. Mount that volume as the **container workspace folder** (the implicit workspace mount). MUST NOT bind-mount a durable host project directory as the workspace for clone-created containers.
-3. **Existing managed container name:** If a container with the computed managed name already exists, `clone` MUST fail with a structured error and MUST NOT silently reuse, replace, or attach to that container. (No automatic delete/recreate of an existing managed container on `clone`.)
+3. **Existing managed container name:** If a container with the computed managed name already exists, `clone` MUST fail with a structured error and MUST NOT silently reuse, replace, or attach to that container. (No automatic delete/replacement of an existing managed container on `clone`.)
 4. Set labels on create:
 
 | Label | Requirement |
@@ -179,10 +179,10 @@ Additional existing labels MAY be set. Discovery of managed containers for `list
 - When labels are inspected
 - Then `devcontainer.managed` is `adevcontainer`, `devcontainer.workspace_mode` is `volume`, `devcontainer.workspace_volume` matches the volume name, and `devcontainer.git_url` is present (normalized)
 
-#### Scenario: Re-clone deletes and recreates existing workspace volume
+#### Scenario: Re-clone deletes and creates a fresh workspace volume
 - Given a workspace volume name `adev-{base}-{hash12}-ws` that already exists (e.g. after a prior container-only delete) with residual files
 - When the user runs `adevcontainer clone` for the same URL/config identity
-- Then the CLI deletes that volume, recreates it empty, and mounts the fresh volume (MUST NOT mount the dirty pre-existing tree)
+- Then the CLI deletes that volume, creates it empty, and mounts the fresh volume (MUST NOT mount the dirty pre-existing tree)
 
 #### Scenario: Existing managed container name fails closed
 - Given a container already exists with the computed clone container name
@@ -393,7 +393,7 @@ Rationale: clone config may have lived only in a temp directory that is gone aft
 #### Scenario: Start already running is no-op success
 - Given a managed container that is already running
 - When the user runs `adevcontainer start --name <that-name>`
-- Then the command succeeds and does not recreate the container
+- Then the command succeeds and does not replace the container
 
 #### Scenario: Start interactive picker when multiple
 - Given two stopped managed containers and an interactive TTY stdin

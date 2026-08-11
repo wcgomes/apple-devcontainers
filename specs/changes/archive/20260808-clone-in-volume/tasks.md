@@ -55,7 +55,7 @@ Assume Swift 6.x / SPM, Apple `container`, and host `git` already available wher
 - [x] 3.5 Write failing tests: `--branch` / unknown flags rejected (path: `Tests/adevcontainerTests/`)
 - [x] 3.6 Implement config discovery on temp root (reuse Config discovery order); workspaceFolder default / `${localWorkspaceFolderBasename}` = git URL repo basename (path: `Sources/ADevContainerLib/Commands/` + Config)
 - [x] 3.7 Implement tar-pipe copy-into-container workspace after start + post-copy verify (via AppleContainerRuntime) (path: `Sources/ADevContainerLib/Runtime/`, Commands) <!-- superseded by §9: happy path is in-container git clone; tar-pipe may remain unused utility -->
-- [x] 3.8 Implement `CloneCommand` flow end-to-end with defer temp cleanup + StatusPrinter progress; existing name fail-closed; ws volume delete+recreate; failure cleanup deletes container + ws volume (path: `Sources/ADevContainerLib/Commands/CloneCommand.swift`) <!-- flow later extended by §8–10 -->
+- [x] 3.8 Implement `CloneCommand` flow end-to-end with defer temp cleanup + StatusPrinter progress; existing name fail-closed; ws volume delete-and-create; failure cleanup deletes container + ws volume (path: `Sources/ADevContainerLib/Commands/CloneCommand.swift`) <!-- flow later extended by §8–10 -->
 - [x] 3.9 Wire create-path LifecycleRunner matrix (same as up fresh create) (path: `Sources/ADevContainerLib/Commands/LifecycleRunner.swift`, CloneCommand)
 
 ## Checkpoint — clone

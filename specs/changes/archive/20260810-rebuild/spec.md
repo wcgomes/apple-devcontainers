@@ -6,7 +6,7 @@ Delta against realized contract (union of `specs/<domain>.md`). RFC 2119 keyword
 
 ### Requirement: Rebuild command surface
 
-The CLI MUST provide a subcommand `adevcontainer rebuild [--name <container>] [--skip-pull] [--vscode] [--json]` that re-creates an existing **managed** container from its current `devcontainer.json`.
+The CLI MUST provide a subcommand `adevcontainer rebuild [--name <container>] [--skip-pull] [--vscode] [--json]` that creates a new **managed** container from its current `devcontainer.json`.
 
 **Selection (MUST be identical to `start`)**
 
@@ -21,10 +21,10 @@ The CLI MUST provide a subcommand `adevcontainer rebuild [--name <container>] [-
 **Help surface**
 
 - The main usage text MUST list `rebuild` with its flags.
-- `adevcontainer rebuild --help` / `help rebuild` MUST print command-specific help via `printCommandHelp("rebuild")` describing selection, forced-recreate semantics, volume preservation, and the `--vscode` gate.
-- The README MUST document `rebuild` (command row, quick-start note, and the volume-preservation/forced-recreate behavior).
+- `adevcontainer rebuild --help` / `help rebuild` MUST print command-specific help via `printCommandHelp("rebuild")` describing selection, forced-rebuild semantics, volume preservation, and the `--vscode` gate.
+- The README MUST document `rebuild` (command row, quick-start note, and the volume-preservation/forced-rebuild behavior).
 
-#### Scenario: rebuild by name recreates the selected managed container
+#### Scenario: rebuild by name creates the selected managed container
 - Given exactly one managed bind-mode container selected with `--name <that-name>` and an edited `devcontainer.json` at its stamped config path
 - When the user runs `adevcontainer rebuild --name <that-name>`
 - Then the old container is deleted, a new container with the same name is created from the current config, and the command reports success
@@ -94,7 +94,7 @@ Before any destructive step, `rebuild` MUST read the **current** `devcontainer.j
 #### Scenario: volume rebuild auto-starts stopped container bare before reading
 - Given a stopped volume-mode managed container with a readable config inside the volume
 - When the user runs `adevcontainer rebuild --name <that-name>`
-- Then the CLI starts the container with a bare runtime start (no lifecycle hooks executed) before `cat`-reading the config, and then proceeds to delete it and recreate
+- Then the CLI starts the container with a bare runtime start (no lifecycle hooks executed) before `cat`-reading the config, and then proceeds to delete it and create a new one
 
 #### Scenario: volume rebuild parse failure is config_parse
 - Given a volume-mode managed container whose in-volume config exists but fails JSONC/JSON parsing (or resolve admission)
@@ -110,13 +110,13 @@ Before any destructive step, `rebuild` MUST read the **current** `devcontainer.j
 
 ### Requirement: Rebuild identity preservation
 
-The re-created container MUST keep the identity of the selected container:
+The new container MUST keep the identity of the selected container:
 
 - **Seeded identity:** bind mode seeds from `devcontainer.local_folder` + `devcontainer.config_file` (re-resolved on host); volume mode seeds from `devcontainer.git_url` + `devcontainer.config_file` (+ `devcontainer.workspace_volume`, `devcontainer.workspace_folder`).
-- The re-created container MUST use the **same container name** as the selected container, and (volume mode) MUST mount the **same workspace volume** (`*-ws`).
+- The new container MUST use the **same container name** as the selected container, and (volume mode) MUST mount the **same workspace volume** (`*-ws`).
 - Stamps that define identity — `devcontainer.managed`, `devcontainer.workspace_mode`, `devcontainer.local_folder`, `devcontainer.config_file`, `devcontainer.git_url`, `devcontainer.workspace_volume` — MUST remain identical to the selected container's values.
 - Only `devcontainer.config_hash` and labels derived from the newly resolved config (`devcontainer.workspace_folder`, `devcontainer.remote_user`, `devcontainer.config_volumes`) MAY change to the freshly resolved values.
-- Rebuild MUST proceed even when the resolved config hash **equals** the stamped `devcontainer.config_hash` (it is a user-forced recreate, not drift detection; derived Features tag reuse makes the unchanged case cheap). There MUST be no skip/abort solely for hash equality.
+- Rebuild MUST proceed even when the resolved config hash **equals** the stamped `devcontainer.config_hash` (it is a user-forced rebuild, not drift detection; derived Features tag reuse makes the unchanged case cheap). There MUST be no skip/abort solely for hash equality.
 
 #### Scenario: bind rebuild keeps name and updates hash labels
 - Given a bind-mode managed container with name `adev-{base}-{hash12}` created from a workspace+config path
@@ -131,7 +131,7 @@ The re-created container MUST keep the identity of the selected container:
 #### Scenario: equal config hash still rebuilds
 - Given a managed container whose current resolved config hash equals the stamped `devcontainer.config_hash`
 - When the user runs `adevcontainer rebuild --name <that-name>`
-- Then the CLI still deletes and re-creates the container (forced recreate) and reports success
+- Then the CLI still deletes and creates the container (forced rebuild) and reports success
 
 #### Scenario: derived labels refresh to new resolved values
 - Given a managed container whose edited config changes `workspaceFolder`, `remoteUser`, or adds a `type=volume` mount
@@ -144,17 +144,17 @@ The re-created container MUST keep the identity of the selected container:
 
 The volume-preservation invariant is the core contract of `rebuild`:
 
-- Rebuild MUST **not** delete, recreate, or re-populate the workspace `*-ws` volume (volume mode).
+- Rebuild MUST **not** delete, replace, or re-populate the workspace `*-ws` volume (volume mode).
 - Rebuild MUST **not** delete any config `type=volume` named volume (both modes).
 - On a successful rebuild, the only pre-create deletion MUST be the **old container itself**, following the existing container-only `delete` contract (stop first if required). On a post-delete failure, recovery MAY additionally delete the failed **new container** and (volume path only) the marked recovery helper as container-only cleanup. No workspace volume, config volume, or image deletion is part of rebuild or recovery. Bind recovery MUST NOT create or delete a recovery helper.
-- Create MUST reuse existing named volumes: the runtime `ensureVolume` list-then-reuse behavior applies to the workspace `*-ws` volume and to every config `type=volume` source — existing volumes are reused (status indicating reuse), missing ones are created, and existing ones MUST NOT be recreated.
+- Create MUST reuse existing named volumes: the runtime `ensureVolume` list-then-reuse behavior applies to the workspace `*-ws` volume and to every config `type=volume` source — existing volumes are reused (status indicating reuse), missing ones are created, and existing ones MUST NOT be replaced.
 - Newly declared config volumes (added to the edited config) MUST be created and mounted; volumes removed from the edited config MUST NOT be deleted by rebuild (they are simply no longer mounted; `prune` remains the removal path).
 - Rebuild MUST NOT run git re-clone or `git pull` inside the workspace volume (no populate step).
 
 #### Scenario: rebuild preserves workspace volume data
 - Given a volume-mode managed container whose `*-ws` volume contains a file `data/keep.txt` written after create
 - When the user runs `adevcontainer rebuild --name <that-name>`
-- Then the rebuild succeeds and `data/keep.txt` is still present in the same `*-ws` volume (no delete/recreate/re-populate)
+- Then the rebuild succeeds and `data/keep.txt` is still present in the same `*-ws` volume (no delete/replace/re-populate)
 
 #### Scenario: rebuild preserves config named volumes
 - Given a managed container (bind or volume) with a config `type=volume` mount whose source volume contains data
@@ -230,7 +230,7 @@ For an eligible volume target, `rebuild` MUST prepare the recovery capability be
 
 Recovery MUST be offered only for these hard post-delete provisioning failures: failure to create the new container, failure to start the new container, or a non-zero `onCreateCommand`, `updateContentCommand`, `postCreateCommand`, or `postStartCommand`. Volume ensure/writable-step failures and every other post-delete failure not listed here MUST retain the existing structured failure/warning behavior and MUST NOT create a recovery helper. Before a helper is mounted, any failed new container MUST be cleaned up and the runtime MUST verify that it is no longer attached to the workspace volume. A failed hook MAY have modified workspace data; recovery restores edit access and retry capability, not filesystem transaction rollback or image rollback.
 
-The recovery helper MUST run from the pinned helper image, mount the exact existing `devcontainer.workspace_volume` (`*-ws`) read-write at the effective workspace path, and MUST NOT delete, recreate, or repopulate that workspace volume or any config named volume. It MUST retain the selected container's name and managed identity labels, add a visible recovery marker such as `devcontainer.recovery=adevcontainer`, and remain addressable by `exec --name` and `rebuild --name`. Ordinary `list` MUST visibly mark the helper as recovery. Ordinary `prune` MUST protect a marked recovery helper and its referenced volumes. These list/prune helper rules apply **only** to volume recovery helpers; bind recovery MUST NOT create a marked helper and therefore MUST NOT depend on list/prune helper protection.
+The recovery helper MUST run from the pinned helper image, mount the exact existing `devcontainer.workspace_volume` (`*-ws`) read-write at the effective workspace path, and MUST NOT delete, replace, or repopulate that workspace volume or any config named volume. It MUST retain the selected container's name and managed identity labels, add a visible recovery marker such as `devcontainer.recovery=adevcontainer`, and remain addressable by `exec --name` and `rebuild --name`. Ordinary `list` MUST visibly mark the helper as recovery. Ordinary `prune` MUST protect a marked recovery helper and its referenced volumes. These list/prune helper rules apply **only** to volume recovery helpers; bind recovery MUST NOT create a marked helper and therefore MUST NOT depend on list/prune helper protection.
 
 **TTY recovery (prompt-then-editor):** When stdin is a TTY and `--json` is absent, the CLI MUST **not** auto-open an editor. It MUST:
 
@@ -248,7 +248,7 @@ After a retry completes the full lifecycle successfully, the CLI MUST read the s
 #### Scenario: volume-only recovery session is offered for a hard create failure
 - Given a clone-origin volume-mode managed container with an existing `*-ws` volume and an edited config that causes new-container creation to fail after the old container is deleted
 - When `adevcontainer rebuild --name <that-name>` reaches the post-delete failure
-- Then the failed new-container attachment is cleaned and verified, a marked helper with the same identity/name mounts the existing `*-ws` volume read-write, and the command enters TTY recovery (structured failure then open-editor prompt) or returns non-TTY/JSON recovery details without deleting or recreating any volume
+- Then the failed new-container attachment is cleaned and verified, a marked helper with the same identity/name mounts the existing `*-ws` volume read-write, and the command enters TTY recovery (structured failure then open-editor prompt) or returns non-TTY/JSON recovery details without deleting or replacing any volume
 
 #### Scenario: volume TTY recovery prints failure then prompts before editor
 - Given an eligible volume hard post-delete failure on a TTY without `--json`
@@ -298,7 +298,7 @@ After a retry completes the full lifecycle successfully, the CLI MUST read the s
 #### Scenario: recovery preserves volumes and does not roll back workspace data
 - Given a failed create-path hook that changed a workspace file before exiting non-zero
 - When recovery is offered and a later retry succeeds
-- Then the exact existing workspace `*-ws` volume and all config named volumes remain present with their data, no clone/repopulate or volume delete/recreate occurs, and the hook's filesystem changes are not claimed to be rolled back
+- Then the exact existing workspace `*-ws` volume and all config named volumes remain present with their data, no clone/repopulate or volume delete/replace occurs, and the hook's filesystem changes are not claimed to be rolled back
 
 #### Scenario: helper or attachment cleanup failure is recovery-unavailable
 - Given an eligible hard failure where the failed new container cannot be detached/verified, or helper creation/start/write-back/cleanup fails
@@ -505,7 +505,7 @@ Lifecycle commands share **one** selection model. Only `up` accepts `-w` / `--wo
 
 If the user passes `-w` / `--workspace` on any non-`up` command (including `rebuild`), the CLI MUST fail with a structured **usage** error whose message includes that `-w is only valid for up` (clearer than silently ignoring).
 
-`rebuild` is the **sole forced recreate** path: `up` has no `--recreate` flag. On config-hash mismatch, `up` MUST fail with `config_hash_mismatch` and a hint pointing to `adevcontainer rebuild` (managed selection `--name`/auto when applicable). `rebuild` MUST recreate the selected managed container even when the resolved config hash equals the stamped `devcontainer.config_hash`, and MUST preserve the workspace volume and config named volumes (container-only delete then create).
+`rebuild` is the **forced rebuild** path. On config-hash mismatch, `up` MUST fail with `config_hash_mismatch` and a hint pointing to `adevcontainer rebuild` (managed selection `--name`/auto when applicable). `rebuild` MUST create a new selected managed container even when the resolved config hash equals the stamped `devcontainer.config_hash`, and MUST preserve the workspace volume and config named volumes (container-only delete then create).
 
 #### Scenario: rebuild is selectable like other lifecycle commands
 - Given a running managed container (bind or volume) with `devcontainer.managed=adevcontainer`
@@ -526,17 +526,17 @@ If the user passes `-w` / `--workspace` on any non-`up` command (including `rebu
 
 ### Requirement: Up lifecycle (create, start, reuse)
 
-*(Delta only — replace the drift/recreate policy sentence and add the matrix row; other rows unchanged.)*
+*(Delta only — replace the drift policy sentence and add the matrix row; other rows unchanged.)*
 
-**Recreate/drift policy**
+**Drift policy**
 
-`up` reuses a running or stopped container with matching identity. When the config/features hash drifts (stamped `devcontainer.config_hash` ≠ resolved hash), `up` MUST fail closed with structured `config_hash_mismatch` and MUST NOT delete or recreate; the error hint MUST point to `adevcontainer rebuild` (managed selection: `--name` or auto when applicable). There is no `up --recreate` flag; unknown `--recreate` MUST fail as an unknown option (usage). Equal-hash force recreate and volume-preserving forced recreate are **only** via `rebuild`: an **explicit user-forced recreate** that MUST NOT require hash drift and MUST preserve volumes — it reads the current config, completes resolution/preflight/Features work first, deletes the old container **only** (container-only delete), and creates the new container reusing the existing workspace volume and config named volumes (see Rebuild requirements).
+`up` reuses a running or stopped container with matching identity. When the config/features hash drifts (stamped `devcontainer.config_hash` ≠ resolved hash), `up` MUST fail closed with structured `config_hash_mismatch` and MUST NOT delete or replace; the error hint MUST point to `adevcontainer rebuild` (managed selection: `--name` or auto when applicable). Equal-hash forced rebuild and volume-preserving forced rebuild are **only** via `rebuild`: it MUST NOT require hash drift and MUST preserve volumes — it reads the current config, completes resolution/preflight/Features work first, deletes the old container **only** (container-only delete), and creates the new container reusing the existing workspace volume and config named volumes (see Rebuild requirements).
 
 **Lifecycle hook matrix by path** (new row; existing rows unchanged)
 
 | Path | Lifecycle |
 |------|-----------|
-| `rebuild <name>` (forced recreate after container-only delete of the old container) | full fresh create-path onCreate → updateContent → postCreate → postStart on the **new** container; delete-on-fail applies to the **new** container; the old container was already removed (status warning on post-delete failure); a clone-origin volume failure in create/start/create-path hooks additionally offers the volume recovery session; a bind-mode failure in the same set offers the bind host-editor recovery session; non-clone volume targets retain warning-only behavior |
+| `rebuild <name>` (forced rebuild after container-only delete of the old container) | full fresh create-path onCreate → updateContent → postCreate → postStart on the **new** container; delete-on-fail applies to the **new** container; the old container was already removed (status warning on post-delete failure); a clone-origin volume failure in create/start/create-path hooks additionally offers the volume recovery session; a bind-mode failure in the same set offers the bind host-editor recovery session; non-clone volume targets retain warning-only behavior |
 
 postAttach gating applies on `rebuild` exactly as on `up`/`clone` (after successful `--vscode` open; skip with status otherwise; failure keeps the new container). Settings/open soft-fail and postAttach failure MUST NOT enter either recovery session.
 
@@ -548,38 +548,31 @@ postAttach gating applies on `rebuild` exactly as on `up`/`clone` (after success
 #### Scenario: rebuild does not require hash drift
 - Given a managed container whose current config hash equals the stamped hash
 - When the user runs `adevcontainer rebuild --name <that-name>`
-- Then rebuild recreates the container (no hash-mismatch precondition), unlike `up` reuse which would have kept the running container
+- Then rebuild creates a new container (no hash-mismatch precondition), unlike `up` reuse which would have kept the running container
 
 #### Scenario: up hash mismatch hints rebuild
 - Given a managed bind-mode container whose stamped `devcontainer.config_hash` does not match the resolved config hash
 - When the user runs `adevcontainer up` for that workspace
 - Then the CLI fails with `config_hash_mismatch` and does not delete the container
 - And the error hint mentions `adevcontainer rebuild` and managed selection (`--name` or auto)
-- And the hint does not mention `--recreate`
-
-#### Scenario: up --recreate is unknown flag
-- Given any `up` (or other) invocation that includes `--recreate`
-- When the CLI parses global options
-- Then the CLI fails with a structured **usage** error for unknown option `--recreate` (fail closed; no recreate path)
-
 ---
 
 ### Requirement: Volume-mode workspace mount and labels
 
 *(Delta only — amend the workspace volume freshness rule; other bullets unchanged.)*
 
-1. **Workspace volume freshness (re-clone) — `clone` only:** If the workspace named volume already exists, `clone` MUST delete it and recreate it empty before mount; MUST NOT reuse a dirty existing workspace volume tree. (Config `type=volume` mounts remain list-then-create/reuse per Named volume reuse policy — only the clone workspace `*-ws` volume is delete-and-recreate.)
-2. **`rebuild` carve-out:** `rebuild` of a volume-mode managed container MUST **reuse** the existing `*-ws` volume tree with its data and MUST NOT delete, recreate, or re-populate it; MUST NOT run git re-clone or `git pull` inside it. The freshness rule applies to `clone` only.
+1. **Workspace volume freshness (re-clone) — `clone` only:** If the workspace named volume already exists, `clone` MUST delete it and create it empty before mount; MUST NOT reuse a dirty existing workspace volume tree. (Config `type=volume` mounts remain list-then-create/reuse per Named volume reuse policy — only the clone workspace `*-ws` volume is delete-and-create.)
+2. **`rebuild` carve-out:** `rebuild` of a volume-mode managed container MUST **reuse** the existing `*-ws` volume tree with its data and MUST NOT delete, replace, or re-populate it; MUST NOT run git re-clone or `git pull` inside it. The freshness rule applies to `clone` only.
 
-#### Scenario: clone still recreates stale workspace volume
+#### Scenario: clone still creates a fresh stale workspace volume
 - Given a workspace volume `adev-{base}-{hash12}-ws` that already exists with residual files (e.g. after a prior container-only delete)
 - When the user runs `adevcontainer clone` for the same URL/config identity
-- Then the CLI deletes that volume, recreates it empty, and mounts the fresh volume (unchanged behavior)
+- Then the CLI deletes that volume, creates it empty, and mounts the fresh volume (unchanged behavior)
 
-#### Scenario: rebuild reuses the workspace volume instead of recreating
+#### Scenario: rebuild reuses the workspace volume instead of replacing it
 - Given a volume-mode managed container whose `*-ws` volume exists with data
 - When the user runs `adevcontainer rebuild --name <that-name>`
-- Then the CLI does not delete or recreate the volume, mounts the same volume on the new container, and the data remains present (no re-clone)
+- Then the CLI does not delete or replace the volume, mounts the same volume on the new container, and the data remains present (no re-clone)
 
 ---
 
@@ -596,7 +589,7 @@ The CLI MUST accept an optional boolean flag `--vscode` on:
 
 On `rebuild`, `--vscode` behavior MUST be identical to the `up`/`clone` create path: after rebuild lifecycle success on the new container, attempt a best-effort open of a new VS Code window on the resolved remote workspace folder; on open **success**, run extensions apply then the postAttach gate; on open **soft-fail**, skip both with status when present — never failing rebuild solely due to open.
 
-#### Scenario: rebuild with --vscode opens after recreate
+#### Scenario: rebuild with --vscode opens after rebuild
 - Given a successful `adevcontainer rebuild` that yields a running managed container and a resolved `remoteWorkspaceFolder`
 - When the user runs `adevcontainer rebuild … --vscode` (host `code` available and launch succeeding, or mocks equivalent)
 - Then after lifecycle success the CLI attempts to open a new VS Code window on the resolved remote workspace folder
@@ -645,7 +638,7 @@ The gated policy MUST apply consistently on `up`, `start`, `clone`, and `rebuild
 
 *(Delta only — extend the reuse sentence at the end of the requirement with the rebuild clause; other content unchanged.)*
 
-Reuse running / start stopped: MUST NOT re-fetch/rebuild features (already baked into the image on create). Config hash (including features) still drives recreate when features change.
+Reuse running / start stopped: MUST NOT re-fetch/rebuild features (already baked into the image on create). Config hash (including features) still drives a new create path when features change.
 
 **Rebuild reuse clause**
 

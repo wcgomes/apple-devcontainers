@@ -188,7 +188,7 @@ public enum CommandSurface {
           stop [--name]       Stop a managed container (name or picker)
           delete [--name]     Remove container only (not workspace volume)
           prune [--name]      Remove container, volumes (incl. *-ws), and config image
-          rebuild [--name]    Force-recreate a managed container from its current config
+          rebuild [--name]    Force-rebuild a managed container from its current config
                               (same name/workspace; volumes preserved)
           inspect [--name]    Show identity, state, labels (from runtime + labels)
 
@@ -228,14 +228,14 @@ public enum CommandSurface {
           - No --branch / PAT CLI / GCM-in-guest
 
         Rebuild notes:
-          - Force-recreates a managed container from its CURRENT devcontainer.json,
+          - Force-rebuilds a managed container from its CURRENT devcontainer.json,
             keeping the same container name and --name selection (bind) or same
             workspace volume (volume mode) — data is preserved, not re-cloned.
           - Config is read strictly before anything is deleted: unreadable/missing
             config fails with config_not_found and the old container is untouched.
           - Container-only delete of the old container; workspace and config named
-            volumes are reused via ensureVolume (never deleted/recreated).
-          - Config hash mismatch on up → config_hash_mismatch → rebuild (sole force-recreate).
+            volumes are reused via ensureVolume (never deleted or replaced).
+          - Config hash mismatch on up → config_hash_mismatch → rebuild (sole force-rebuild).
           - Hard post-delete failure recovery (create/start/onCreate…postStart):
             bind = host stamped config; clone-origin volume = Alpine helper + temp.
             TTY: error then "Open the recovery editor now? [Y/n]" (default Y);
@@ -345,16 +345,16 @@ public enum CommandSurface {
             return """
             adevcontainer rebuild [--name <container>] [--skip-pull] [--vscode] [--json]
 
-            Force-recreate a managed container (bind from up, volume from clone): a forced
-            recreate from the container's CURRENT devcontainer.json. Selection via
+            Force-rebuild a managed container (bind from up, volume from clone): a forced
+            rebuild from the container's CURRENT devcontainer.json. Selection via
             --name / auto-single / interactive picker (same as start/delete). -w is
-            usage error (up only). Sole force-recreate path (up never force-recreates).
+            usage error (up only). The rebuild command runs the forced create path.
 
             The old container is deleted only after the config read, host requirements
             preflight, and Features work all succeed; any failure before that leaves the
             old container untouched. The new container keeps the same name (bind) or the
             same workspace volume (volume mode) — volume data is preserved, never
-            re-cloned or re-created. Container-only delete: workspace *-ws and config
+            re-cloned or replaced. Container-only delete: workspace *-ws and config
             named volumes are reused via ensureVolume.
 
             Recovery (hard post-delete failures only: create/start/onCreate…postStart;

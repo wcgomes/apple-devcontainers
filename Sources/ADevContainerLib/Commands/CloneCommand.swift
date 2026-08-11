@@ -227,7 +227,7 @@ public enum CloneCommand {
 
         // Fresh workspace tree: volume may remain after container-only delete.
         if try runtime.volumeExists(identity.workspaceVolumeName) {
-            StatusPrinter.status("Recreating workspace volume \(identity.workspaceVolumeName)")
+            StatusPrinter.status("Replacing workspace volume \(identity.workspaceVolumeName)")
             try runtime.deleteVolume(name: identity.workspaceVolumeName)
         }
 

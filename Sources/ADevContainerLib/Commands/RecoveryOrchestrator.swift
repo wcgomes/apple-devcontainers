@@ -133,7 +133,7 @@ public enum RecoveryOrchestrator {
                 code: CLIErrorCode.configNotFound,
                 property: ContainerIdentity.labelLocalFolder,
                 message: "Bind recovery is missing \(ContainerIdentity.labelLocalFolder)",
-                hint: "Recreate the container with 'adevcontainer up'"
+                hint: "Run 'adevcontainer up' to restore the container"
             )
         }
         guard fileManager.fileExists(atPath: hostConfigPath) else {
@@ -237,7 +237,7 @@ public enum RecoveryOrchestrator {
 
     /// Apply the retained session onto a live recovery helper before a named `rebuild` reads
     /// config. TTY (without `--json`) MUST open the editor first so the operator can fix a
-    /// retained broken config (e.g. after non-TTY retention) before the destructive recreate.
+    /// retained broken config (e.g. after non-TTY retention) before the destructive rebuild.
     /// Non-TTY / `--json` apply the current temp bytes directly — the operator is expected to
     /// have edited the reported temp path already.
     public static func applyNamedRetryEdit(
@@ -421,7 +421,7 @@ public enum RecoveryOrchestrator {
             throw CLIError(
                 code: CLIErrorCode.recoveryUnavailable,
                 message: "Bind recovery requires stamped local_folder and config_file",
-                hint: "Recreate the container with 'adevcontainer up'"
+                hint: "Run 'adevcontainer up' to restore the container"
             )
         }
 

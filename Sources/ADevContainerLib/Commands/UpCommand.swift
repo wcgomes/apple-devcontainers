@@ -52,7 +52,7 @@ public enum UpCommand {
                     code: CLIErrorCode.configHashMismatch,
                     property: ContainerIdentity.labelConfigHash,
                     message: "Existing container config hash does not match current config",
-                    hint: "Run 'adevcontainer rebuild' (managed selection: --name or auto) to force-recreate from current config"
+                    hint: "Run 'adevcontainer rebuild' (managed selection: --name or auto) to force-rebuild from current config"
                 )
             } else if existing.isRunning {
                 // Reuse running: no feature fetch/build; settings repair on marker drift; postAttach gated after open.

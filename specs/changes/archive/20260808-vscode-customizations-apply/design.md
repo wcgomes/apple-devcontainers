@@ -32,7 +32,7 @@ Extend resolve to retain normalized vscode **extensions** (string IDs) and **set
 | Extensions when | After successful `--vscode` open; pending via marker | Same attach approximation as postAttach; manual attach without flag unsupported |
 | Order | open success → extensions apply → postAttach | Spec: separate step; postAttach fail-keep unchanged |
 | Marker path | `$HOME/.adevcontainer/vscode-customizations.applied` | Stable, namespaced, easy to inspect/debug |
-| Marker content | Hex/digest of canonical **config** payload (sorted config extension IDs + canonical JSON settings) — **not** transitive deps | Drift detection without recreate; deps are side effects |
+| Marker content | Hex/digest of canonical **config** payload (sorted config extension IDs + canonical JSON settings) — **not** transitive deps | Drift detection without a new container; deps are side effects |
 | Marker write | Only after full normalized payload successfully applied (registry upsert included for listed IDs); if extensions pending (no open yet), do not finalize full-hash marker — allow settings re-merge idempotently until extensions complete, then write full hash | Ensures first successful open still installs extensions |
 | Soft-fail | All apply I/O/network/exec; per-ID continue on dep failure | Lifecycle reliability > perfect editor setup; ≠ postAttach fail-keep |
 | Identity | customizations omitted from `hashMaterial()` (status quo) | Config edit applies in-place via marker drift |

@@ -1981,7 +1981,7 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "delete", "cfg-vol-b"] })
         try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "delete", wsVol] })
     }),
-    ("cloneRecreatesExistingWorkspaceVolume", {
+    ("cloneReplacesExistingWorkspaceVolume", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
         let git = MockGitClient()

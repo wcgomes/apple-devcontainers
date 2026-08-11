@@ -43,7 +43,7 @@ Assume Swift 6.x / SPM and Apple `container` already on the host. Do **not** ins
 
 - [x] 3.1 Write failing tests: CreateRequest/create argv includes `--init` and cap-add/cap-drop forms from resolved runArgs (path: `Tests/adevcontainerTests/AllUnitTests.swift`)
 - [x] 3.2 Map allowlisted runArgs onto `container create` argv in CreateRequest (path: `Sources/ADevContainerLib/Runtime/CreateRequest.swift`)
-- [x] 3.3 Include runArgs in config hash material when present so drift/recreate detects changes (path: `Sources/ADevContainerLib/Config/DevContainerConfig.swift`)
+- [x] 3.3 Include runArgs in config hash material when present so drift detection catches changes (path: `Sources/ADevContainerLib/Config/DevContainerConfig.swift`)
 - [x] 3.4 [P] Runtime tests still sole shell-out boundary (path: `Sources/ADevContainerLib/Runtime/AppleContainerRuntime.swift`)
 
 ## Checkpoint — create mapping

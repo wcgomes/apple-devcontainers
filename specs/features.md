@@ -180,7 +180,7 @@ When `features` is absent or empty, create MUST continue to use the config `imag
 
 **MUST NOT** depend on Rosetta being installed: Features builds rely on `build.rosetta=false` (native arm64 BuildKit).
 
-Reuse running / start stopped: MUST NOT re-fetch/rebuild features (already baked into the image on create). Config hash (including features) still drives `config_hash_mismatch` on `up` when features change; force recreate is `rebuild` only.
+Reuse running / start stopped: MUST NOT re-fetch/rebuild features (already baked into the image on create). Config hash (including features) still drives `config_hash_mismatch` on `up` when features change; forced rebuild is available via `rebuild` only.
 
 **Rebuild reuse clause**
 
@@ -245,7 +245,7 @@ On `rebuild`, the same derived-tag identity material applies: when the rebuilt c
 
 ### Requirement: build.rosetta consent (one-time, native arm64 BuildKit)
 
-Before Features fetch/build on a create/recreate path, the product MUST ensure Apple container BuildKit is configured with **`build.rosetta=false`** so arm64 image builds do not require Rosetta ([apple/container#1825](https://github.com/apple/container/issues/1825)).
+Before Features fetch/build on a create or rebuild path, the product MUST ensure Apple container BuildKit is configured with **`build.rosetta=false`** so arm64 image builds do not require Rosetta ([apple/container#1825](https://github.com/apple/container/issues/1825)).
 
 1. Read the **effective** value via `container system property list` (parse `[build]` / `rosetta`).
 2. If already **`false`** → proceed **silently** (no prompt, no warning, no config write).
@@ -400,4 +400,3 @@ Fixtures MUST NOT include Compose keys. `features-docker-ood` and `sample-privil
 - Given Apple `container` available and local sample features copied into the workspace
 - When `fixtureE2E_featuresLocal` runs
 - Then `up` builds with sample-a then sample-b and smoke finds both in `/usr/local/etc/adev-features/installed.txt`
-

@@ -277,7 +277,7 @@ On create, the CLI MUST assign a deterministic container name and MUST set label
 
 Sanitize MUST be DNS-safe: lowercase; replace each run of characters outside `[a-z0-9-]` with `-`; trim leading/trailing hyphens; clip the base to about 20 characters (same policy as the implementation).
 
-When `features` is present, config hash material MUST include the selected feature refs, options, and ordered identity inputs. Changing features MUST change config hash so reuse and drift detection remain correct (recreate when features change).
+When `features` is present, config hash material MUST include the selected feature refs, options, and ordered identity inputs. Changing features MUST change config hash so reuse and drift detection remain correct (a new create path runs when features change).
 
 `name` is not metadata-only: when set (non-empty after trim), it MUST drive the human base used for the container name and for Features derived image tags.
 
@@ -361,9 +361,9 @@ See also: [clone.md](clone.md) for volume-mode identity, workspace volume names,
 
 Additional helpful fields (e.g. `containerName`) MAY be included.
 
-**Recreate/drift policy**
+**Drift policy**
 
-`up` reuses a running or stopped container with matching identity. When the config/features hash drifts (stamped `devcontainer.config_hash` ≠ resolved hash), `up` MUST fail closed with structured `config_hash_mismatch` and MUST NOT delete or recreate; the error hint MUST point to `adevcontainer rebuild` (managed selection: `--name` or auto when applicable). There is no `up --recreate` flag; unknown `--recreate` MUST fail as an unknown option (usage). Equal-hash force recreate and volume-preserving forced recreate are **only** via `rebuild`: an **explicit user-forced recreate** that MUST NOT require hash drift and MUST preserve volumes — it reads the current config, completes resolution/preflight/Features work first, deletes the old container **only** (container-only delete), and creates the new container reusing the existing workspace volume and config named volumes. Hard post-delete create/start/create-path failures offer mode-split recovery (bind host-editor; clone-origin volume helper); see change archive and product docs for recovery detail.
+`up` reuses a running or stopped container with matching identity. When the config/features hash drifts (stamped `devcontainer.config_hash` ≠ resolved hash), `up` MUST fail closed with structured `config_hash_mismatch` and MUST NOT delete or replace; the error hint MUST point to `adevcontainer rebuild` (managed selection: `--name` or auto when applicable). Equal-hash forced rebuild and volume-preserving forced rebuild are **only** via `rebuild`: it MUST NOT require hash drift and MUST preserve volumes — it reads the current config, completes resolution/preflight/Features work first, deletes the old container **only** (container-only delete), and creates the new container reusing the existing workspace volume and config named volumes. Hard post-delete create/start/create-path failures offer mode-split recovery (bind host-editor; clone-origin volume helper); see change archive and product docs for recovery detail.
 
 **Create image selection (Features-aware)**
 
@@ -372,14 +372,14 @@ On paths that create a new container (fresh create or `rebuild`):
 - **Before create**, if resolved `features` is non-empty: ensure **build.rosetta=false** (consent), then **resolve → fetch → order → contribution merge → Dockerfile generate → `container build`** (or reuse derived tag). Create uses the **derived image** with contributions merged and **`--platform`** host-native.
 - Then start and lifecycle hooks (onCreate → updateContent → postCreate → postStart, etc.); feature-contributed hooks merge per the merge-feature-metadata requirement (installs are already in the derived image).
 - If `features` is absent or empty: create uses config `image` as today (still with default platform); Features build path is not required.
-- Reuse running / start stopped paths MUST NOT re-fetch/rebuild features. Config hash (including features) still drives `config_hash_mismatch` on `up` when features change; force recreate is `rebuild` only.
+- Reuse running / start stopped paths MUST NOT re-fetch/rebuild features. Config hash (including features) still drives `config_hash_mismatch` on `up` when features change; forced rebuild is available via `rebuild` only.
 
 **Lifecycle hook matrix by path**
 
 | Path | Lifecycle |
 |------|-----------|
 | Fresh create (missing) | onCreate → updateContent → postCreate → postStart; delete container if any of these fail |
-| `rebuild <name>` (forced recreate after container-only delete of the old container) | full fresh create-path onCreate → updateContent → postCreate → postStart on the **new** container; delete-on-fail applies to the **new** container; the old container was already removed (status warning on post-delete failure); a clone-origin volume failure in create/start/create-path hooks additionally offers the volume recovery session; a bind-mode failure in the same set offers the bind host-editor recovery session; non-clone volume targets retain warning-only behavior |
+| `rebuild <name>` (forced rebuild after container-only delete of the old container) | full fresh create-path onCreate → updateContent → postCreate → postStart on the **new** container; delete-on-fail applies to the **new** container; the old container was already removed (status warning on post-delete failure); a clone-origin volume failure in create/start/create-path hooks additionally offers the volume recovery session; a bind-mode failure in the same set offers the bind host-editor recovery session; non-clone volume targets retain warning-only behavior |
 | Reuse running (matching identity) | no hooks |
 | Start stopped | postStart only; on failure fail `up`, do not delete container |
 | Any path with postAttach present and `--vscode` absent | skip execute; one status line (no attach hook) |
@@ -443,13 +443,6 @@ Create-path cleanup: if any create-path hook fails before `up` returns success, 
 - When the user runs `adevcontainer up` for that workspace
 - Then the CLI fails with `config_hash_mismatch` and does not delete the container
 - And the error hint mentions `adevcontainer rebuild` and managed selection (`--name` or auto)
-- And the hint does not mention `--recreate`
-
-#### Scenario: up --recreate is unknown flag
-- Given any `up` (or other) invocation that includes `--recreate`
-- When the CLI parses global options
-- Then the CLI fails with a structured **usage** error for unknown option `--recreate` (fail closed; no recreate path)
-
 #### Scenario: rebuild hook matrix row applies
 - Given a managed container being rebuilt with a config carrying all four create-path hooks
 - When `rebuild` runs the fresh create-path on the new container
@@ -458,7 +451,7 @@ Create-path cleanup: if any create-path hook fails before `up` returns success, 
 #### Scenario: rebuild does not require hash drift
 - Given a managed container whose current config hash equals the stamped hash
 - When the user runs `adevcontainer rebuild --name <that-name>`
-- Then rebuild recreates the container (no hash-mismatch precondition), unlike `up` reuse which would have kept the running container
+- Then rebuild creates a new container (no hash-mismatch precondition), unlike `up` reuse which would have kept the running container
 
 See also: [lifecycle-hooks.md](lifecycle-hooks.md) for hook surface details; [vscode.md](vscode.md) for postAttach and vscode customizations apply gating; [features.md](features.md) for Features create-path build; [managed-lifecycle.md](managed-lifecycle.md) for rebuild selection.
 

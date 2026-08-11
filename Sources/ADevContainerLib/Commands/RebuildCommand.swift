@@ -1,6 +1,6 @@
 import Foundation
 
-/// `adevcontainer rebuild`: force-recreate a managed container from its current
+/// `adevcontainer rebuild`: force-rebuild a managed container from its current
 /// devcontainer.json, preserving the container identity (same name / same workspace
 /// volume). Two phases split at the delete of the old container:
 ///
@@ -112,7 +112,7 @@ public enum RebuildCommand {
 
         // A later named retry uses the retained helper and session. Validate both identities and
         // write/edit through the helper before the normal strict config read or helper delete gate.
-        // TTY (no --json): open the editor first so a retained broken config is fixed before recreate.
+        // TTY (no --json): open the editor first so a retained broken config is fixed before rebuilding.
         // Non-TTY / --json: apply the current temp bytes (operator already edited offline).
         // openRetry/apply also bounce Apple zombie helpers (list=running, exec rejected).
         if recoveryContext == nil, RecoveryHelper.isRecoveryHelper(selected) {
@@ -163,7 +163,7 @@ public enum RebuildCommand {
                     code: CLIErrorCode.configNotFound,
                     property: ContainerIdentity.labelConfigFile,
                     message: "Managed container has no readable devcontainer config",
-                    hint: "Recreate the container with 'adevcontainer up' or 'adevcontainer clone'"
+                    hint: "Run 'adevcontainer up' or 'adevcontainer clone' to restore the container"
                 )
             }
             resolvedConfig = config
@@ -410,7 +410,7 @@ public enum RebuildCommand {
                 code: CLIErrorCode.runtimeFailed,
                 property: "volumes",
                 message: "Failed to ensure rebuild volumes: \(error.localizedDescription)",
-                hint: "Existing volumes were not deleted or recreated"
+                hint: "Existing volumes were preserved"
             )
         }
         StatusPrinter.status("Creating container \(selected.name)")

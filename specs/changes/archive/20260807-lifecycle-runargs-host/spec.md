@@ -23,7 +23,7 @@ The CLI MUST admit and honor these lifecycle properties in addition to existing 
 
 #### Scenario: Reuse running skips lifecycle
 - Given a matching container already running
-- When the user runs `up` without recreate
+- When the user runs `up` without rebuilding
 - Then no lifecycle hook is executed and `up` succeeds
 
 #### Scenario: Start stopped runs postStart only
@@ -307,8 +307,8 @@ Extends **Up lifecycle (create, start, reuse)** so path selection includes the l
 
 | Path | Lifecycle |
 |------|-----------|
-| Fresh create (missing or after recreate delete) | onCreate → updateContent → postCreate → postStart; delete container if any of these fail |
-| Reuse running (matching identity, not recreate) | no hooks |
+| Fresh create (missing or after a prior delete) | onCreate → updateContent → postCreate → postStart; delete container if any of these fail |
+| Reuse running (matching identity, not rebuilding) | no hooks |
 | Start stopped | postStart only; on failure fail `up`, do not delete container |
 | Any path with `postAttachCommand` set | skip execute; one status line |
 

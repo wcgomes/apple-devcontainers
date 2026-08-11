@@ -817,7 +817,7 @@ enum RecoveryE2ESupport {
             json: origin.failConfigJSON
         )
 
-        // Snapshot volume mutations after setup; recovery phase must not delete/recreate.
+        // Snapshot volume mutations after setup; recovery phase must not alter them.
         let setupMutationCount = recorder.volumeMutations().count
         recorder.reset()
 
@@ -891,7 +891,7 @@ enum RecoveryE2ESupport {
         )
         try MiniTest.expect(
             !recoveryMutations.contains { $0.dropFirst().first == "create" && $0.contains(wsVol) },
-            "recovery must not recreate workspace volume"
+            "recovery must not alter workspace volume"
         )
         try MiniTest.expect(!recorder.usedContainerCp(), "recovery path must not use container cp")
         _ = setupMutationCount
@@ -982,7 +982,7 @@ enum RecoveryE2ESupport {
         )
         try MiniTest.expect(
             !retryMutations.contains { $0.dropFirst().first == "create" && $0.contains(wsVol) },
-            "retry must not recreate workspace volume"
+            "retry must not alter workspace volume"
         )
         try MiniTest.expect(!recorder.usedContainerCp(), "retry must not use container cp")
 

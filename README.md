@@ -56,7 +56,7 @@ adevcontainer doctor
 | `adevcontainer doctor` | Check Apple `container` readiness |
 | `adevcontainer up [-w path] [--vscode]` | Create/start a dev container from a **host** folder (only command that uses `-w`; default cwd) |
 | `adevcontainer clone <git-url> [--vscode]` | Clone a git repo into a **named volume** and start the dev container (HTTPS or SSH) |
-| `adevcontainer rebuild [--name <container>] [--vscode]` | Force-recreate a managed container from its current `devcontainer.json` — bind keeps the name, volume mode keeps the same workspace volume (data preserved) |
+| `adevcontainer rebuild [--name <container>] [--vscode]` | Force-rebuild a managed container from its current `devcontainer.json` — bind keeps the name, volume mode keeps the same workspace volume (data preserved) |
 | `adevcontainer list [--json]` | List managed dev containers |
 | `adevcontainer start [--vscode] \| stop \| delete \| prune \| inspect [--name]` | Lifecycle by dev container name (or interactive picker) |
 | `adevcontainer exec [-it] [--name] [--] [cmd…]` | Shell or command in a running managed dev container |
@@ -84,7 +84,7 @@ adevcontainer prune --name <name>
 
 Uses your Mac git credentials (HTTPS helpers / SSH agent), confirms author identity on a TTY, and ensures `git` in the image when needed. Work, commit, and push inside the container.
 
-**Rebuild an existing container** — force-recreate from the container's current `devcontainer.json` (no re-clone). Old container is deleted only after config read, host requirements, and Features succeed; bind keeps the same container name, volume mode keeps the same workspace volume:
+**Rebuild an existing container** — force-rebuild from the container's current `devcontainer.json` (no re-clone). Old container is deleted only after config read, host requirements, and Features succeed; bind keeps the same container name, volume mode keeps the same workspace volume:
 
 ```bash
 adevcontainer rebuild --name <name>   # or auto-single / interactive picker
@@ -92,7 +92,7 @@ adevcontainer rebuild --name <name> --vscode
 adevcontainer rebuild --name <name> --json
 ```
 
-There is **no** `up --recreate` (unknown flag). Config hash mismatch on `up` → `config_hash_mismatch`; remediate with `rebuild`.
+Config hash mismatch on `up` → `config_hash_mismatch`; remediate with `rebuild`.
 
 **Rebuild recovery** (hard post-delete failures only — create/start/`onCreate`…`postStart`; not pre-delete, not settings/open/`postAttach` soft-fail):
 
@@ -109,8 +109,8 @@ There is **no** `up --recreate` (unknown flag). Config hash mismatch on `up` →
 Config: `.devcontainer/devcontainer.json`, else `.devcontainer.json`.
 
 - **`up`** bind-mounts the host folder. **`clone`** uses volume `adev-*-ws` (no host checkout to edit).
-- **`rebuild`** force-recreates from the current config: bind keeps the container name, volume mode reuses the same `adev-*-ws` workspace volume — data preserved, never re-cloned.
-- Config hash mismatch → `up` errors with `config_hash_mismatch`; run `adevcontainer rebuild` (managed selection: `--name` or auto). No `--recreate`.
+- **`rebuild`** force-rebuilds from the current config: bind keeps the container name, volume mode reuses the same `adev-*-ws` workspace volume — data preserved, never re-cloned.
+- Config hash mismatch → `up` errors with `config_hash_mismatch`; run `adevcontainer rebuild` (managed selection: `--name` or auto).
 - **`delete`** = container only. **`prune`** = container + named volumes (including clone `*-ws`) + config image. Never deletes host bind paths. Ordinary `prune` skips marked recovery helpers.
 - Progress on **stderr** (`==> …`). `ADEVCONTAINER_QUIET=1` silences progress only — policy warn-skips still emit. `--json` keeps stdout clean.
 

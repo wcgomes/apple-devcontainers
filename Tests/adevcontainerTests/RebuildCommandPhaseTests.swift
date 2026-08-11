@@ -347,7 +347,7 @@ enum RebuildOpenSupport {
 nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
     // ═══════════════════════ Section 3: Phase A (non-destructive gate) ═══════════════════════
 
-    ("rebuildSelectsSingleManagedContainerAndRecreates", {
+    ("rebuildSelectsSingleManagedContainerAndRebuilds", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20","remoteUser":"vscode"}"#)
         defer { try? FileManager.default.removeItem(at: ws) }
         let s = RebuildScenario()
@@ -754,7 +754,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(hash != "devcontainer.config_hash=oldhash", "config_hash drift-updated")
     }),
 
-    ("rebuildEqualHashStillRecreates", {
+    ("rebuildEqualHashStillRuns", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20"}"#)
         defer { try? FileManager.default.removeItem(at: ws) }
         let s = RebuildScenario()
@@ -768,8 +768,8 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         s.containers = [info]
         s.install()
         _ = try RebuildCommand.run(options: RebuildOptions(), runtime: s.runtime)
-        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "delete" }, "recreate even with equal hash")
-        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "create" }, "recreate even with equal hash")
+        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "delete" }, "rebuild deletes with equal hash")
+        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "create" }, "rebuild creates with equal hash")
     }),
 
     ("rebuildVolumePreservesWorkspaceVolumeAndGitUrl", {
@@ -785,7 +785,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         let result = rebuildResult!
         try MiniTest.expectEqual(result.workspaceVolume, "adev-repo-ws")
         try MiniTest.expectEqual(result.gitUrl, "https://github.com/example/repo.git")
-        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.starts(with: ["volume", "create"]) }, "workspace volume not recreated")
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.starts(with: ["volume", "create"]) }, "workspace volume was not created")
         try MiniTest.expect(!s.mock.calls.contains { $0.arguments.starts(with: ["volume", "delete"]) }, "workspace volume never deleted")
         let createArgs = s.mock.calls.first { $0.arguments.first == "create" }!.arguments
         try MiniTest.expect(createArgs.contains { $0.contains("adev-repo-ws") }, "create mounts existing workspace volume")

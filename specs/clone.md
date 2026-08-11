@@ -155,10 +155,10 @@ See also: [core.md](core.md) **Deterministic identity and labels** for shared sa
 
 On `clone` create, the CLI MUST:
 
-1. **Workspace volume freshness (re-clone) — `clone` only:** If the workspace named volume already exists, `clone` MUST **delete it and recreate it empty** before mount. MUST NOT reuse a dirty existing workspace volume tree. (Config `type=volume` mounts remain list-then-create/reuse per Named volume reuse policy — only the clone workspace `*-ws` volume is delete-and-recreate.)
-2. **`rebuild` carve-out:** `rebuild` of a volume-mode managed container MUST **reuse** the existing `*-ws` volume tree with its data and MUST NOT delete, recreate, or re-populate it; MUST NOT run git re-clone or `git pull` inside it. The freshness rule applies to `clone` only.
+1. **Workspace volume freshness (re-clone) — `clone` only:** If the workspace named volume already exists, `clone` MUST **delete it and create it empty** before mount. MUST NOT reuse a dirty existing workspace volume tree. (Config `type=volume` mounts remain list-then-create/reuse per Named volume reuse policy — only the clone workspace `*-ws` volume is delete-and-create.)
+2. **`rebuild` carve-out:** `rebuild` of a volume-mode managed container MUST **reuse** the existing `*-ws` volume tree with its data and MUST NOT delete, replace, or re-populate it; MUST NOT run git re-clone or `git pull` inside it. The freshness rule applies to `clone` only.
 3. Mount that volume as the **container workspace folder** (the implicit workspace mount). MUST NOT bind-mount a durable host project directory as the workspace for clone-created containers.
-4. **Existing managed container name:** If a container with the computed managed name already exists, `clone` MUST fail with a structured error and MUST NOT silently reuse, replace, or attach to that container. (No automatic delete/recreate of an existing managed container on `clone`; use `rebuild` to force-recreate while preserving the volume.)
+4. **Existing managed container name:** If a container with the computed managed name already exists, `clone` MUST fail with a structured error and MUST NOT silently reuse, replace, or attach to that container. (No automatic delete/replacement of an existing managed container on `clone`; use `rebuild` to force-rebuild while preserving the volume.)
 5. Set labels on create:
 
 | Label | Requirement |
@@ -184,15 +184,15 @@ Additional existing labels MAY be set. Discovery of managed containers for `list
 - When labels are inspected
 - Then `devcontainer.managed` is `adevcontainer`, `devcontainer.workspace_mode` is `volume`, `devcontainer.workspace_volume` matches the volume name, and `devcontainer.git_url` is present (normalized)
 
-#### Scenario: Re-clone deletes and recreates existing workspace volume
+#### Scenario: Re-clone deletes and creates a fresh workspace volume
 - Given a workspace volume name `adev-{base}-{hash12}-ws` that already exists (e.g. after a prior container-only delete) with residual files
 - When the user runs `adevcontainer clone` for the same URL/config identity
-- Then the CLI deletes that volume, recreates it empty, and mounts the fresh volume (MUST NOT mount the dirty pre-existing tree)
+- Then the CLI deletes that volume, creates it empty, and mounts the fresh volume (MUST NOT mount the dirty pre-existing tree)
 
-#### Scenario: rebuild reuses the workspace volume instead of recreating
+#### Scenario: rebuild reuses the workspace volume instead of replacing it
 - Given a volume-mode managed container whose `*-ws` volume exists with data
 - When the user runs `adevcontainer rebuild --name <that-name>`
-- Then the CLI does not delete or recreate the volume, mounts the same volume on the new container, and the data remains present (no re-clone)
+- Then the CLI does not delete or replace the volume, mounts the same volume on the new container, and the data remains present (no re-clone)
 
 #### Scenario: Existing managed container name fails closed
 - Given a container already exists with the computed clone container name
