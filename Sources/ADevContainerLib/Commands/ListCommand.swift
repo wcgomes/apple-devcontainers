@@ -55,18 +55,21 @@ public enum ListCommand {
             return "No managed containers"
         }
         var lines: [String] = []
-        let nameWidth = max(4, managed.map(\.name.count).max() ?? 4)
+        let displayNames = managed.map { info in
+            RecoveryHelper.isRecoveryHelper(info) ? "\(info.name) [RECOVERY]" : info.name
+        }
+        let nameWidth = max(4, displayNames.map(\.count).max() ?? 4)
         let stateWidth = max(5, managed.map(\.state.count).max() ?? 5)
         let header =
             pad("NAME", nameWidth)
             + "  " + pad("STATE", stateWidth)
             + "  MODE    GIT_URL"
         lines.append(header)
-        for info in managed {
+        for (info, displayName) in zip(managed, displayNames) {
             let mode = info.labels[ContainerIdentity.labelWorkspaceMode] ?? "-"
             let git = info.labels[ContainerIdentity.labelGitURL] ?? ""
             lines.append(
-                pad(info.name, nameWidth)
+                pad(displayName, nameWidth)
                 + "  " + pad(info.state, stateWidth)
                 + "  " + pad(mode, 6)
                 + "  " + git

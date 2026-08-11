@@ -12,7 +12,7 @@ MVP acceptance for editor integration is:
 
 1. **Manual attach (unchanged core):** After `up` (and equivalently after `clone` / when a managed container is running), the container is running and listable/inspectable so the user can manually use experimental **Attach to Running Apple Container**. The CLI MUST NOT claim full Dev Containers extension parity and MUST NOT fail `up` (or `clone` / `start`) solely because VS Code did not auto-attach or because an optional open was not requested.
 
-2. **Optional best-effort open (additive):** When the user passes `--vscode` on `up`, `start`, or `clone`, the CLI MUST attempt a best-effort open of a new VS Code window on the resolved remote workspace folder per **VS Code best-effort open**. Open failure MUST be soft (warn; lifecycle success preserved **by itself**). Without `--vscode`, no automatic open is required.
+2. **Optional best-effort open (additive):** When the user passes `--vscode` on `up`, `start`, `clone`, or `rebuild`, the CLI MUST attempt a best-effort open of a new VS Code window on the resolved remote workspace folder per **VS Code best-effort open**. Open failure MUST be soft (warn; lifecycle success preserved **by itself**). Without `--vscode`, no automatic open is required.
 
 3. **CLI attach hook for postAttach:** A successful best-effort open under `--vscode` is the product’s CLI attach hook for gating `postAttachCommand` (see **postAttachCommand policy (CLI-only)**). This is an approximation of IDE attach, not confirmation that the remote session is fully ready.
 
@@ -37,15 +37,18 @@ MVP acceptance for editor integration is:
 
 ---
 
-### Requirement: Optional `--vscode` flag on up, start, and clone
+### Requirement: Optional `--vscode` flag on up, start, clone, and rebuild
 
 The CLI MUST accept an optional boolean flag `--vscode` on:
 
 - `adevcontainer up`
 - `adevcontainer start`
 - `adevcontainer clone`
+- `adevcontainer rebuild`
 
 When `--vscode` is **absent**, those commands MUST behave as today for editor open (no automatic editor open). When `--vscode` is **present**, after the command’s container lifecycle succeeds and the managed container is running (or already running for a start no-op), the CLI MUST attempt a **best-effort** open of a **new** VS Code window attached to that container at the **resolved remote workspace folder** (see VS Code best-effort open). postAttach gating after that open is specified under **postAttachCommand policy (CLI-only)**.
+
+On `rebuild`, `--vscode` behavior MUST be identical to the `up`/`clone` create path: after rebuild lifecycle success on the new container, attempt a best-effort open; on open **success**, run extensions apply then the postAttach gate; on open **soft-fail**, skip both with status when present — never failing rebuild solely due to open.
 
 Unknown or misspelled variants that are not the product flag MUST continue to fail closed per existing usage rules. `--vscode` MUST be combinable with other valid flags for those commands (including `--json` where applicable).
 
@@ -67,14 +70,20 @@ Unknown or misspelled variants that are not the product flag MUST continue to fa
 - Then after clone lifecycle success the CLI attempts to open a new VS Code window attached to that container at the resolved `remoteWorkspaceFolder`
 - And clone lifecycle success is unchanged by a successful open when postAttach is absent or exits 0
 
+#### Scenario: rebuild with --vscode opens after recreate
+- Given a successful `adevcontainer rebuild` that yields a running managed container and a resolved `remoteWorkspaceFolder`
+- When the user runs `adevcontainer rebuild … --vscode` (host `code` available and launch succeeding, or mocks equivalent)
+- Then after lifecycle success the CLI attempts to open a new VS Code window on the resolved remote workspace folder
+- And rebuild still reports success when open succeeds and postAttach is absent or exits 0
+
 #### Scenario: without --vscode behavior unchanged
-- Given any valid `up`, `start`, or `clone` invocation
+- Given any valid `up`, `start`, `clone`, or `rebuild` invocation
 - When the user omits `--vscode`
 - Then the CLI MUST NOT invoke a host VS Code open as part of that command
 - And manual attach (list/inspect + experimental Attach to Running Apple Container) remains valid
 
 #### Scenario: --json works with --vscode
-- Given a successful `up` or `clone` with both `--json` and `--vscode`
+- Given a successful `up`, `clone`, or `rebuild` with both `--json` and `--vscode`
 - When lifecycle completes successfully and open succeeds and postAttach is absent or exits 0
 - Then stdout machine-readable success JSON (shape and fields for that command) remains unchanged by the open side effect
 - And open progress or soft-fail warnings MUST NOT corrupt that JSON (warnings/progress on stderr per existing StatusPrinter norms)
@@ -88,9 +97,9 @@ When `--vscode` is set and lifecycle has succeeded, the CLI MUST attempt to open
 1. A **new** window is requested (not solely attaching into an arbitrary existing window without folder context).
 2. The attachment targets the **managed container** that the command just created, started, or confirmed running.
 3. The opened folder is the **resolved remote workspace folder** for that container:
-   - Prefer the command’s success result `remoteWorkspaceFolder` when available (`up` / `clone`).
-   - For `start`, use inspect/labels: `devcontainer.workspace_folder` (and related inspect fields) already stamped at create.
-   - The open path MUST NOT re-parse raw `devcontainer.json` alone to invent a folder. Omit/empty `workspaceFolder` in config is already resolved by the product to the default `/workspaces/<basename>` (bind: host workspace basename; clone: git URL repo basename) and that resolved value MUST be what open uses.
+- Prefer the command’s success result `remoteWorkspaceFolder` when available (`up` / `clone` / `rebuild`).
+- For `start`, use inspect/labels: `devcontainer.workspace_folder` (and related inspect fields) already stamped at create.
+- The open path MUST NOT re-parse raw `devcontainer.json` alone to invent a folder. Omit/empty `workspaceFolder` in config is already resolved by the product to the default `/workspaces/<basename>` (bind: host workspace basename; clone: git URL repo basename) and that resolved value MUST be what open uses.
 4. Image ref and container id needed for the remote attachment MUST come from create/inspect (or equivalent runtime) results appropriate to the command path — not from user-typed freeform strings beyond normal selection (`--name` / picker / create identity).
 
 **Soft-fail (MUST):**
@@ -100,7 +109,7 @@ When `--vscode` is set and lifecycle has succeeded, the CLI MUST attempt to open
   - **MUST NOT** change the lifecycle command’s success exit solely because open failed, and
   - **MUST NOT** tear down or alter the container as a consequence of open failure, and
   - **MUST NOT** execute postAttach solely because of that soft-failed open (see postAttachCommand policy).
-- The product MAY warn when `code` is missing; it MUST NOT hard-require VS Code for `up` / `start` / `clone` success.
+- The product MAY warn when `code` is missing; it MUST NOT hard-require VS Code for `up` / `start` / `clone` / `rebuild` success.
 
 **Host prerequisites (document; soft):**
 
@@ -148,7 +157,7 @@ The CLI MUST parse and admit `postAttachCommand` when present (string or argv ar
 
 **When postAttach RUNS**
 
-The CLI MUST execute postAttach only when **all** of the following hold on `up`, `start`, or `clone`:
+The CLI MUST execute postAttach only when **all** of the following hold on `up`, `start`, `clone`, or `rebuild`:
 
 1. `--vscode` is set, and
 2. The best-effort VS Code open outcome is **success** (host `code` launch succeeded per **VS Code best-effort open**).
@@ -172,8 +181,8 @@ Each command MUST execute via existing container **exec** lifecycle machinery (s
 
 **Failure policy**
 
-- If postAttach **runs** and any postAttach command exits non-zero, the lifecycle command (`up` / `start` / `clone`) MUST fail (non-zero) with a clear structured error naming postAttach (property label consistent with other lifecycle hooks, including feature-labeled forms when applicable).
-- The CLI MUST NOT delete or stop the container solely due to postAttach failure (container already successfully brought up; VS Code may already be opening). This contrasts with create-path onCreate / updateContent / postCreate / first-create postStart delete-on-fail.
+- If postAttach **runs** and any postAttach command exits non-zero, the lifecycle command (`up` / `start` / `clone` / `rebuild`) MUST fail (non-zero) with a clear structured error naming postAttach (property label consistent with other lifecycle hooks, including feature-labeled forms when applicable).
+- The CLI MUST NOT delete or stop the container solely due to postAttach failure (container already successfully brought up; VS Code may already be opening). This contrasts with create-path onCreate / updateContent / postCreate / first-create postStart delete-on-fail. On `rebuild`, a non-zero postAttach MUST keep the **new** container and MUST NOT start a volume or bind recovery session.
 - Open soft-fail still MUST NOT fail the lifecycle command **by itself**. postAttach failure after successful open **does** fail the lifecycle exit.
 - On postAttach failure, the command MUST follow the existing error path (no success JSON on stdout for `--json` paths).
 
@@ -183,10 +192,10 @@ Running postAttach after successful host `code` launch is a **CLI-initiated atta
 
 **Consistency**
 
-The gated policy MUST apply consistently on `up`, `start`, and `clone`. Presence of `postAttachCommand` alone MUST NOT fail those commands when postAttach is skipped.
+The gated policy MUST apply consistently on `up`, `start`, `clone`, and `rebuild`. Presence of `postAttachCommand` alone MUST NOT fail those commands when postAttach is skipped.
 
 #### Scenario: postAttach runs after successful --vscode open
-- Given a valid config with `postAttachCommand` that exits 0, and a successful container lifecycle on `up` (or equivalently `start` / `clone`)
+- Given a valid config with `postAttachCommand` that exits 0, and a successful container lifecycle on `up` (or equivalently `start` / `clone` / `rebuild`)
 - When the user runs the command with `--vscode` and host `code` launch succeeds (or mocks equivalent)
 - Then after the successful open the CLI executes `postAttachCommand` via container exec
 - And the command reports lifecycle success
@@ -200,17 +209,19 @@ The gated policy MUST apply consistently on `up`, `start`, and `clone`. Presence
 
 #### Scenario: postAttach skipped when open soft-fails
 - Given a config with `postAttachCommand` present and lifecycle that would otherwise succeed
-- When the user runs `up` (or `start` / `clone`) with `--vscode` and open soft-fails (missing `code`, launch failure, or missing open inputs)
+- When the user runs `up` (or `start` / `clone` / `rebuild`) with `--vscode` and open soft-fails (missing `code`, launch failure, or missing open inputs)
 - Then the CLI MUST NOT execute `postAttachCommand`
 - And the lifecycle command still exits successfully
 - And stderr includes open soft-fail warning and SHOULD include a postAttach skip status explaining attach open did not succeed
 - And the managed container is not deleted or stopped solely due to open soft-fail
+- And on rebuild, no recovery helper or editor session is created
 
 #### Scenario: postAttach failure fails command but keeps container
 - Given lifecycle success, `--vscode` set, successful open, and `postAttachCommand` that exits non-zero
-- When the user runs `up` (or `start` / `clone`)
+- When the user runs `up` (or `start` / `clone` / `rebuild`)
 - Then the command fails with a structured error naming postAttach
 - And the managed container still exists and is not deleted or stopped solely due to that postAttach failure
+- And on rebuild, no recovery helper or editor session is created
 - And no success JSON is emitted on the error path
 
 #### Scenario: feature postAttach runs after successful open
@@ -297,7 +308,7 @@ When resolved config retains a non-empty well-formed `customizations.vscode.sett
 
 **When settings apply RUNS**
 
-1. **Fresh create-path** on `up` and `clone`: after create-path lifecycle hooks for that path have completed successfully (onCreate → updateContent → postCreate → postStart as applicable to the path), and **before** optional `--vscode` open / postAttach.
+1. **Fresh create-path** on `up`, `clone`, and `rebuild`: after create-path lifecycle hooks for that path have completed successfully (onCreate → updateContent → postCreate → postStart as applicable to the path), and **before** optional `--vscode` open / postAttach.
 2. **start / reuse** paths: when config can be loaded and the guest marker indicates the normalized customizations hash does **not** match (drift or never applied), the CLI SHOULD attempt settings repair (and marker update on full successful apply of the normalized payload) without requiring `--vscode`.
 
 **Gates that MUST NOT apply**

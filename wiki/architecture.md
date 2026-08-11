@@ -53,8 +53,9 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
 | Command | Role |
 |---------|------|
 | `doctor` | Host/runtime readiness checks |
-| `up` | **Bind-mode** only: resolve config from host workspace, create/start/reuse; ensure named volumes; workspace bind; Features; lifecycle hooks in scope. Optional `--vscode` after success (see [VS Code flow](#vs-code-flow)) |
+| `up` | **Bind-mode** only: resolve config from host workspace, create/start/reuse; ensure named volumes; workspace bind; Features; lifecycle hooks in scope. Optional `--vscode` after success (see [VS Code flow](#vs-code-flow)). **No** `--recreate` — reuse only when stamped config hash matches; mismatch → fail `config_hash_mismatch` (remediate with `rebuild`) |
 | `clone <git-url>` | **Volume-mode** workspace (VS Code clone-in-volume analogue): host sparse/shallow **config-only** fetch → resolve (workspaceFolder default + `${localWorkspaceFolderBasename}` = **git URL repo basename**, not temp dir name) → **author identity before Features/create:** host `git -C <sparse-temp> config --get user.name/email` (includeIf-aware; env `ADEVCONTAINER_GIT_AUTHOR_*`); both env → skip prompt; TTY confirm/override or collect; non-TTY silent + warn if incomplete → **ensure Features `ghcr.io/devcontainers/features/git:1` when no `git`/`common-utils`** (Features path, not apt; `up` unchanged) → ensure workspace volume → create + start (**SSH:** inject `create --ssh` when `SSH_AUTH_SOCK` set) → **in-container full `git clone`** + verify `.git` (**HTTPS:** host `git credential fill` one-shot → guest `credential.helper store`; no GCM-in-guest; no host full+tar happy path) → author both → guest `--local`; else warn, no partial → create-path hooks; always clean config temps. Optional `--vscode` after success |
+| `rebuild [--name]` | **Only** force-recreate path (realized in domain specs; archive [`20260810-rebuild`](../specs/changes/archive/20260810-rebuild/)): managed selection (`--name` / auto-single / picker); read **current** stamped `devcontainer.json` before any delete; after config/host/Features succeed → container-only delete old → create same name (bind) or same `*-ws` workspace volume (volume; data preserved, never re-clone). Optional `--skip-pull` / `--vscode` / `--json`. Recovery mode-split (TTY prompt Y/n, retain): [gaps](domain/devcontainer-apple-gaps.md#failed-rebuild-recovery-mode-split) |
 | `list [--json]` | Managed containers only (`devcontainer.managed=adevcontainer`) |
 | `start [--name]` | Start a managed stopped container via `--name` or interactive picker; **no create-path / postStart hooks** (bind start-stopped `postStart` only via `up`). Optional `--vscode` after success; for postAttach, loads config from labels (bind: host `local_folder`+`config_file`; volume: in-container config path) and merges feature postAttach from image `devcontainer.metadata` (load errors → treat absent, do not fail start) |
 | `exec [--name]` | Run command/shell in running managed container (`-it` / empty cmd → interactive TTY, default `bash`). Selection: `--name` or picker (no `-w`). User/workdir from labels `devcontainer.remote_user` / `devcontainer.workspace_folder` when set |
@@ -63,7 +64,9 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
 | `prune [--name]` | Remove container **and** config named volumes (label) **and** workspace `*-ws` volume **and** config image (`--name` or picker; not binds; not global prune) |
 | `inspect [--name]` | Show resolved identity/state (`--name` or picker; no `-w`) |
 
-**Selection:** only `up` takes `-w`/cwd (bind workspace). Lifecycle commands (`start`/`exec`/`stop`/`delete`/`prune`/`inspect`) resolve managed containers by `--name` or interactive picker — never `-w`.
+**Selection:** only `up` takes `-w`/cwd (bind workspace). Lifecycle commands (`start`/`exec`/`stop`/`delete`/`prune`/`rebuild`/`inspect`) resolve managed containers by `--name` or interactive picker — never `-w`.
+
+**Config drift / force-recreate:** `up` never force-recreates. Existing managed container with a stamped config hash that differs from the current resolve → structured fail `config_hash_mismatch` (hint: `adevcontainer rebuild` with managed selection). Forced recreate is **`rebuild` only** (no `up --recreate`).
 
 **delete vs prune:** `delete` drops the workspace container only. `prune` also removes config `type=volume` mounts (by label), the clone workspace volume (`adev-*-ws`), and the config `image` reference. Neither deletes bind-mount host paths or runs global `volume`/`image` prune. Derived Features tags (`adev-{base}:{hash12}` / `adevcontainer:{hash12}`) are not removed by `prune` unless they equal the config `image` field.
 
@@ -78,6 +81,7 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
 - **Workspace volume (volume-mode):** `adev-{base}-{hash12}-ws`.
 - **Features derived tag** (when Features build runs): `adev-{base}:{hash12}` (content hash of base image + features); empty base → `adevcontainer:{hash12}`. No `adevcontainer/features:` prefix. Plain config `image` (no Features) is unchanged.
 - **Labels (managed set):** stamped on create for both modes — `devcontainer.managed=adevcontainer`, `devcontainer.local_folder` (bind: host path; volume: `volume://…`), `devcontainer.config_file`, app config hash, `devcontainer.workspace_mode` (`bind` on `up`, `volume` on `clone`), `devcontainer.workspace_folder`, `devcontainer.remote_user` (may be empty), `devcontainer.config_volumes` when applicable. Volume-mode also `devcontainer.git_url` (userinfo stripped), `devcontainer.workspace_volume`.
+- **Config hash on `up`:** reuse/start-stopped only when stamped hash matches current resolve; mismatch → `config_hash_mismatch` (force-recreate = `rebuild` only; no `up --recreate`). See [cli-runtime-boundary](conventions/cli-runtime-boundary.md#up-reuse-vs-rebuild-force-recreate).
 - Enables find/reuse without Docker-style label filter APIs (list has no label filter — client-side filter; `list` keeps only managed). See [gaps](domain/devcontainer-apple-gaps.md).
 
 ## Ports and lifecycle
@@ -88,19 +92,20 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
 
   | Path | Hooks |
   |------|--------|
-  | Fresh create (`up` bind or `clone` volume) | `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand`; delete container if any create-path hook fails |
-  | Reuse running | no create-path hooks; settings repair on marker drift; feature postAttach mergeable from image metadata when `--vscode` open succeeds |
-  | Bind start-stopped (`up`) | `postStartCommand` only; failure fails `up` but does **not** delete |
+  | Fresh create (`up` bind, `clone` volume, or `rebuild` replacement) | `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand`; delete container if any create-path hook fails (`rebuild` hard post-delete may enter recovery) |
+  | Reuse running (`up` only when config hash matches) | no create-path hooks; settings repair on marker drift; feature postAttach mergeable from image metadata when `--vscode` open succeeds |
+  | Config hash mismatch (`up`) | fail `config_hash_mismatch` — no delete/recreate; use `rebuild` |
+  | Bind start-stopped (`up`, hash match) | `postStartCommand` only; failure fails `up` but does **not** delete |
   | Bare `start` | no create-path / postStart; settings repair on marker drift when config loadable; extensions + postAttach only if gated open succeeds (config from labels; feature hooks from image metadata) |
   | `customizations.vscode` | **CLI apply** (config-file v1): settings after create-path hooks / drift repair (**not** gated on `--vscode`); extensions after successful open only; soft-fail; marker idempotency — see [VS Code flow](#vs-code-flow) |
-  | `postAttachCommand` | **implemented** gate on `up`/`start`/`clone`: **RUNS** config then feature postAttach only after successful `--vscode` open **and after** extensions apply; **SKIP** (+ status when any present) if flag absent or open soft-fails; non-zero → fail command, **keep** container. Soft-fail apply ≠ postAttach fail-keep. Contract: [`specs/vscode.md`](../specs/vscode.md); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../specs/changes/archive/20260808-vscode-customizations-apply/) |
+  | `postAttachCommand` | **implemented** gate on `up`/`start`/`clone`/`rebuild`: **RUNS** config then feature postAttach only after successful `--vscode` open **and after** extensions apply; **SKIP** (+ status when any present) if flag absent or open soft-fails; non-zero → fail command, **keep** container. Soft-fail apply ≠ postAttach fail-keep. Contract: [`specs/vscode.md`](../specs/vscode.md); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../specs/changes/archive/20260808-vscode-customizations-apply/) |
 
 - **runArgs allowlist** and **hostRequirements** enforce+apply: [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md). Contract: [`specs/runargs-host.md`](../specs/runargs-host.md).
 - Long-lived devcontainers use keep-alive entrypoint **`/bin/sleep` infinity** so the container stays up for `exec`/attach.
 
 ## Features
 
-Shipped under `Sources/ADevContainerLib/Features/`. On `up`/`clone` when `features` is non-empty (after clone git-ensure):
+Shipped under `Sources/ADevContainerLib/Features/`. On `up`/`clone`/`rebuild` when `features` is non-empty (after clone git-ensure; volume-mode rebuild: OCI only):
 
 1. Admit **OCI** and **local path** refs; forever-reject docker-* markers and metadata `privileged` / `securityOpt`.
 2. One-time consent for `build.rosetta=false` when needed (CI: `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`).
@@ -114,7 +119,7 @@ Full runner steps, reject list, and progress lines: [cli-runtime-boundary.md](co
 
 ## VS Code flow
 
-**Product (implemented):** after successful lifecycle on `up`, `start`, or `clone`, optional **`--vscode`** best-effort opens VS Code on the host. Without the flag, manual attach (same URI recipe) remains valid and does **not** run postAttach or CLI extension install. **Apple `apple-container+` attach does not auto-install** config `customizations.vscode` — the CLI applies them (below).
+**Product (implemented):** after successful lifecycle on `up`, `start`, `clone`, or `rebuild`, optional **`--vscode`** best-effort opens VS Code on the host. Without the flag, manual attach (same URI recipe) remains valid and does **not** run postAttach or CLI extension install. **Apple `apple-container+` attach does not auto-install** config `customizations.vscode` — the CLI applies them (below).
 
 **Behavior (`--vscode`):**
 - Runs only after lifecycle success (create/start/reuse path completed).

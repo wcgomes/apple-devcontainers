@@ -342,32 +342,37 @@ See also: [clone.md](clone.md) for volume-mode identity, workspace volume names,
 
 Additional helpful fields (e.g. `containerName`) MAY be included.
 
+**Recreate/drift policy**
+
+`up` reuses a running or stopped container with matching identity. When the config/features hash drifts (stamped `devcontainer.config_hash` ≠ resolved hash), `up` MUST fail closed with structured `config_hash_mismatch` and MUST NOT delete or recreate; the error hint MUST point to `adevcontainer rebuild` (managed selection: `--name` or auto when applicable). There is no `up --recreate` flag; unknown `--recreate` MUST fail as an unknown option (usage). Equal-hash force recreate and volume-preserving forced recreate are **only** via `rebuild`: an **explicit user-forced recreate** that MUST NOT require hash drift and MUST preserve volumes — it reads the current config, completes resolution/preflight/Features work first, deletes the old container **only** (container-only delete), and creates the new container reusing the existing workspace volume and config named volumes. Hard post-delete create/start/create-path failures offer mode-split recovery (bind host-editor; clone-origin volume helper); see change archive and product docs for recovery detail.
+
 **Create image selection (Features-aware)**
 
-On paths that create a new container (fresh create or recreate):
+On paths that create a new container (fresh create or `rebuild`):
 
 - **Before create**, if resolved `features` is non-empty: ensure **build.rosetta=false** (consent), then **resolve → fetch → order → contribution merge → Dockerfile generate → `container build`** (or reuse derived tag). Create uses the **derived image** with contributions merged and **`--platform`** host-native.
 - Then start and lifecycle hooks (onCreate → updateContent → postCreate → postStart, etc.); feature-contributed hooks merge per the merge-feature-metadata requirement (installs are already in the derived image).
 - If `features` is absent or empty: create uses config `image` as today (still with default platform); Features build path is not required.
-- Reuse running / start stopped paths MUST NOT re-fetch/rebuild features unless product identity says config/features hash drift requires recreate (existing drift/recreate policy applies; features hash is part of config identity material when features present).
+- Reuse running / start stopped paths MUST NOT re-fetch/rebuild features. Config hash (including features) still drives `config_hash_mismatch` on `up` when features change; force recreate is `rebuild` only.
 
 **Lifecycle hook matrix by path**
 
 | Path | Lifecycle |
 |------|-----------|
-| Fresh create (missing or after recreate delete) | onCreate → updateContent → postCreate → postStart; delete container if any of these fail |
-| Reuse running (matching identity, not recreate) | no hooks |
+| Fresh create (missing) | onCreate → updateContent → postCreate → postStart; delete container if any of these fail |
+| `rebuild <name>` (forced recreate after container-only delete of the old container) | full fresh create-path onCreate → updateContent → postCreate → postStart on the **new** container; delete-on-fail applies to the **new** container; the old container was already removed (status warning on post-delete failure); a clone-origin volume failure in create/start/create-path hooks additionally offers the volume recovery session; a bind-mode failure in the same set offers the bind host-editor recovery session; non-clone volume targets retain warning-only behavior |
+| Reuse running (matching identity) | no hooks |
 | Start stopped | postStart only; on failure fail `up`, do not delete container |
 | Any path with postAttach present and `--vscode` absent | skip execute; one status line (no attach hook) |
 | Any path with postAttach present, `--vscode` set, open soft-failed/skipped | skip execute; SHOULD status that attach open did not succeed |
 | Any path with postAttach present, `--vscode` set, open success | after open: run config then feature postAttach via exec; on failure fail command, keep container |
 | Any path with postAttach absent | no postAttach skip line; no postAttach exec |
 
-postAttach gating applies on `up`, `start`, and `clone` after the command’s own prior lifecycle steps succeed and (when `--vscode`) after the open attempt outcome is known. postAttach is **not** part of create-path delete-on-fail.
+postAttach gating applies on `up`, `start`, `clone`, and `rebuild` after the command’s own prior lifecycle steps succeed and (when `--vscode`) after the open attempt outcome is known. postAttach is **not** part of create-path delete-on-fail. Settings/open soft-fail and postAttach failure MUST NOT enter either recovery session.
 
 | Path | Vscode customizations apply |
 |------|-----------------------------|
-| Fresh create-path `up`/`clone` with well-formed settings | after create-path hooks: settings merge (soft-fail); marker/idempotency rules |
+| Fresh create-path `up`/`clone`/`rebuild` with well-formed settings | after create-path hooks: settings merge (soft-fail); marker/idempotency rules |
 | Fresh create-path without settings (and no pending payload) | no settings apply required |
 | Any path with well-formed extensions, `--vscode` absent | extensions not installed by CLI on that invocation |
 | Any path with well-formed extensions, `--vscode` set, open soft-failed/skipped | extensions not installed on that invocation |
@@ -377,7 +382,7 @@ postAttach gating applies on `up`, `start`, and `clone` after the command’s ow
 
 postAttach matrix rows and gating text above remain in force. Customizations apply is **not** part of create-path delete-on-fail and **not** folded into postAttach execution.
 
-Create-path cleanup: if any create-path hook fails before `up` returns success, the CLI MUST delete the container before failing (extend core postCreate delete-on-fail to onCreate, updateContent, postCreate, and first-create postStart).
+Create-path cleanup: if any create-path hook fails before `up` returns success, the CLI MUST delete the container before failing (extend core postCreate delete-on-fail to onCreate, updateContent, postCreate, and first-create postStart). On `rebuild`, delete-on-fail applies to the **new** container only (workspace/config volumes preserved); eligible hard post-delete failures then offer mode-split recovery.
 
 #### Scenario: Create then reuse
 - Given no existing container for the workspace
@@ -411,10 +416,32 @@ Create-path cleanup: if any create-path hook fails before `up` returns success, 
 
 #### Scenario: Reuse running does not re-fetch features
 - Given a matching container already running with features identity satisfied
-- When the user runs `up` without recreate
+- When the user runs `up` (matching hash, no rebuild)
 - Then no feature fetch/build is required and lifecycle hooks are not re-run
 
-See also: [lifecycle-hooks.md](lifecycle-hooks.md) for hook surface details; [vscode.md](vscode.md) for postAttach and vscode customizations apply gating; [features.md](features.md) for Features create-path build.
+#### Scenario: up hash mismatch hints rebuild
+- Given a managed bind-mode container whose stamped `devcontainer.config_hash` does not match the resolved config hash
+- When the user runs `adevcontainer up` for that workspace
+- Then the CLI fails with `config_hash_mismatch` and does not delete the container
+- And the error hint mentions `adevcontainer rebuild` and managed selection (`--name` or auto)
+- And the hint does not mention `--recreate`
+
+#### Scenario: up --recreate is unknown flag
+- Given any `up` (or other) invocation that includes `--recreate`
+- When the CLI parses global options
+- Then the CLI fails with a structured **usage** error for unknown option `--recreate` (fail closed; no recreate path)
+
+#### Scenario: rebuild hook matrix row applies
+- Given a managed container being rebuilt with a config carrying all four create-path hooks
+- When `rebuild` runs the fresh create-path on the new container
+- Then onCreate → updateContent → postCreate → postStart execute in order on the new container, and a first-hook failure deletes only the new container
+
+#### Scenario: rebuild does not require hash drift
+- Given a managed container whose current config hash equals the stamped hash
+- When the user runs `adevcontainer rebuild --name <that-name>`
+- Then rebuild recreates the container (no hash-mismatch precondition), unlike `up` reuse which would have kept the running container
+
+See also: [lifecycle-hooks.md](lifecycle-hooks.md) for hook surface details; [vscode.md](vscode.md) for postAttach and vscode customizations apply gating; [features.md](features.md) for Features create-path build; [managed-lifecycle.md](managed-lifecycle.md) for rebuild selection.
 
 ---
 

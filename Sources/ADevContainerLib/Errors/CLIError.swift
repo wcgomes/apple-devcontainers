@@ -1,17 +1,138 @@
 import Foundation
 
+public struct RecoveryErrorDetails: Equatable, Sendable {
+    public let status: String
+    public let helperContainerID: String
+    public let helperContainerName: String
+    public let helperAvailable: Bool
+    public let marker: String
+    public let sessionID: String
+    public let workspaceVolume: String
+    public let configPath: String
+    public let tempFile: String
+    public let conflictFile: String?
+    public let conflictHash: String?
+    public let expectedHash: String
+    public let failureKind: String
+    public let editCommand: String
+    public let retryCommand: String
+    public let cleanupCommand: String
+    /// Recovery mode: `"volume"` (helper session) or `"bind"` (host-path editor).
+    public let mode: String
+
+    public init(
+        status: String = "retained",
+        helperContainerID: String,
+        helperContainerName: String,
+        helperAvailable: Bool = true,
+        marker: String = "devcontainer.recovery=adevcontainer",
+        sessionID: String,
+        workspaceVolume: String,
+        configPath: String,
+        tempFile: String,
+        conflictFile: String? = nil,
+        conflictHash: String? = nil,
+        expectedHash: String,
+        failureKind: String,
+        editCommand: String,
+        retryCommand: String,
+        cleanupCommand: String,
+        mode: String = "volume"
+    ) {
+        self.status = status
+        self.helperContainerID = helperContainerID
+        self.helperContainerName = helperContainerName
+        self.helperAvailable = helperAvailable
+        self.marker = marker
+        self.sessionID = sessionID
+        self.workspaceVolume = workspaceVolume
+        self.configPath = configPath
+        self.tempFile = tempFile
+        self.conflictFile = conflictFile
+        self.conflictHash = conflictHash
+        self.expectedHash = expectedHash
+        self.failureKind = failureKind
+        self.editCommand = editCommand
+        self.retryCommand = retryCommand
+        self.cleanupCommand = cleanupCommand
+        self.mode = mode
+    }
+
+    /// Bind host-path recovery details (no helper, no session temp, no cleanup helper delete).
+    public static func bindHostPath(
+        containerName: String,
+        containerID: String = "",
+        configPath: String,
+        failureKind: String,
+        editCommand: String,
+        retryCommand: String,
+        status: String = "retained"
+    ) -> RecoveryErrorDetails {
+        RecoveryErrorDetails(
+            status: status,
+            helperContainerID: containerID,
+            helperContainerName: containerName,
+            helperAvailable: false,
+            marker: "",
+            sessionID: "",
+            workspaceVolume: "",
+            configPath: configPath,
+            tempFile: "",
+            expectedHash: "",
+            failureKind: failureKind,
+            editCommand: editCommand,
+            retryCommand: retryCommand,
+            cleanupCommand: "",
+            mode: "bind"
+        )
+    }
+
+    public func jsonObject() -> [String: Any] {
+        var value: [String: Any] = [
+            "status": status,
+            "helperContainerName": helperContainerName,
+            "helperAvailable": helperAvailable,
+            "configPath": configPath,
+            "failureKind": failureKind,
+            "editCommand": editCommand,
+            "retryCommand": retryCommand,
+            "mode": mode
+        ]
+        if !marker.isEmpty { value["marker"] = marker }
+        if !sessionID.isEmpty { value["sessionId"] = sessionID }
+        if !workspaceVolume.isEmpty { value["workspaceVolume"] = workspaceVolume }
+        if !tempFile.isEmpty { value["tempFile"] = tempFile }
+        if !expectedHash.isEmpty { value["expectedHash"] = expectedHash }
+        if !cleanupCommand.isEmpty { value["cleanupCommand"] = cleanupCommand }
+        if !["not-created", "not-available"].contains(helperContainerID), !helperContainerID.isEmpty {
+            value["helperContainerId"] = helperContainerID
+        }
+        if let conflictFile { value["conflictFile"] = conflictFile }
+        if let conflictHash { value["conflictHash"] = conflictHash }
+        return value
+    }
+}
+
 /// Structured CLI error with actionable fields for humans and machines.
 public struct CLIError: Error, Equatable, Sendable {
     public var code: String
     public var property: String?
     public var message: String
     public var hint: String?
+    public var recovery: RecoveryErrorDetails?
 
-    public init(code: String, property: String? = nil, message: String, hint: String? = nil) {
+    public init(
+        code: String,
+        property: String? = nil,
+        message: String,
+        hint: String? = nil,
+        recovery: RecoveryErrorDetails? = nil
+    ) {
         self.code = code
         self.property = property
         self.message = message
         self.hint = hint
+        self.recovery = recovery
     }
 
     public var exitCode: Int32 { 1 }
@@ -35,7 +156,35 @@ public struct CLIError: Error, Equatable, Sendable {
         ]
         if let property { obj["property"] = property }
         if let hint { obj["hint"] = hint }
+        if let recovery { obj["recovery"] = recovery.jsonObject() }
         return obj
+    }
+
+    public func jsonData(pretty: Bool = true) throws -> Data {
+        let options: JSONSerialization.WritingOptions = pretty
+            ? [.prettyPrinted, .sortedKeys]
+            : [.sortedKeys]
+        return try JSONSerialization.data(withJSONObject: jsonObject(), options: options)
+    }
+
+    public func jsonString(pretty: Bool = true) throws -> String {
+        guard let value = String(data: try jsonData(pretty: pretty), encoding: .utf8) else {
+            throw CLIError(code: CLIErrorCode.internalError, message: "Failed to encode CLI error JSON")
+        }
+        return value
+    }
+}
+
+/// Error rendering shared by the executable entry point and machine-output tests. JSON errors
+/// are written to the error stream by the caller; successful command JSON remains stdout-only.
+public enum CLIErrorOutput {
+    public static func data(for error: CLIError, json: Bool) -> Data {
+        if json, let encoded = try? error.jsonData() {
+            var output = encoded
+            output.append(0x0A)
+            return output
+        }
+        return Data((error.formatted() + "\n").utf8)
     }
 }
 
@@ -77,5 +226,12 @@ public enum CLIErrorCode {
     public static let populateFailed = "populate_failed"
     /// Multiple managed containers and no `--name` in non-interactive mode.
     public static let selectionRequired = "selection_required"
+    /// Recovery prerequisites are unavailable or a recovery operation could not be established.
+    public static let recoveryUnavailable = "recovery_unavailable"
+    /// The recovery target changed after the session baseline was captured.
+    public static let recoveryConflict = "recovery_conflict"
+    /// The operator cancelled an interactive recovery attempt.
+    public static let recoveryCancelled = "recovery_cancelled"
+    /// Recovery readback or final visibility verification did not match the expected bytes.
+    public static let recoveryVerificationFailed = "recovery_verification_failed"
 }
-
