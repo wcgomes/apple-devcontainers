@@ -104,7 +104,7 @@ Set on create and use for reuse/inspect/`list`:
 | Label `devcontainer.managed=adevcontainer` | Managed filter for `list` / picker / lifecycle commands |
 | Label `devcontainer.local_folder` | Bind: host path; volume-mode: `volume://…` |
 | Label `devcontainer.config_file` | Config file identity |
-| App config hash label | Stamped at create; `up` reuse requires match — mismatch → `config_hash_mismatch` (force-recreate via `rebuild` only; no `up --recreate`) |
+| App config hash label | Stamped at create; `up` reuse requires match — mismatch → `config_hash_mismatch`; use `rebuild` for a forced rebuild |
 | Label `devcontainer.workspace_mode` | `bind` on `up` create; `volume` on `clone` create |
 | Label `devcontainer.workspace_volume` | Workspace volume name (`adev-*-ws`; volume-mode) |
 | Label `devcontainer.git_url` | Normalized remote (userinfo stripped; volume-mode) |
@@ -133,7 +133,7 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 - Before create, **ensureVolume** for each config named volume: **list first**. Sources must already have `${devcontainerId}` expanded (see above) — e.g. `adev-proj-abc123def456-shellhistory`, not a literal `${…}` token.
 - If the volume already exists → status “already exists — reusing” and mount it; **never fail `up`/`clone` only because a config volume exists**.
 - If missing → create, then mount.
-- **Clone workspace volume:** if `adev-*-ws` already exists → **delete + recreate** (fresh tree), then mount as the workspace root (not a host bind).
+- **Clone workspace volume:** if `adev-*-ws` already exists → **delete + create** (fresh tree), then mount as the workspace root (not a host bind).
 
 ## `clone` flow (volume-mode)
 
@@ -142,7 +142,7 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 3. Resolve `devcontainer.json` from that temp tree. **workspaceFolder** default and `${localWorkspaceFolderBasename}` use the **git URL repo basename**, not the host temp checkout directory name.
 4. **Author identity (before Features/create):** host `git -C <sparse-temp> config --get user.name` / `user.email` (includeIf-aware). Env overrides: `ADEVCONTAINER_GIT_AUTHOR_NAME` / `ADEVCONTAINER_GIT_AUTHOR_EMAIL`. **Both env set** → use env, skip prompt (even on TTY). **TTY** and env incomplete: if both resolved → confirm `Use this identity? [Y/n]` (decline → collect name+email); if either missing → prompt for both (empty → fail structured, no Features/create). **Non-TTY:** no prompt; resolved/env silently when complete; incomplete → continue (warn at apply, no hang). Chosen values applied after populate (step 8).
 5. **Ensure in-container git (Features path, not apt):** after resolve + identity, before the Features gate, if no admitted feature id is `git` or `common-utils` (any registry/tag or local path), append `ghcr.io/devcontainers/features/git:1` (empty options). Status: `==> Ensuring git feature for volume workspace`. Empty features → inject then enter FeaturesRunner. Already covered → no double-add. Config hash / effective features include the inject when added. **`up` does not inject.**
-6. Ensure workspace volume (`adev-{base}-{hash12}-ws`); delete+recreate if present. Existing managed container name → fail closed (no silent reuse).
+6. Ensure workspace volume (`adev-{base}-{hash12}-ws`); delete+create if present. Existing managed container name → fail closed (no silent reuse).
 7. Create volume-mode container (workspace = named volume; labels as above) and start. Features runner runs when features non-empty after step 5.
    - **SSH URL:** require host `SSH_AUTH_SOCK` non-empty; inject `AllowlistedRunArg.ssh` (`container create --ssh`) if not already in runArgs. Missing agent → fail structured (hint ssh-agent / HTTPS). Later push uses the same forward.
    - **HTTPS:** no create-time auth flag; credentials applied at populate (step 8).
@@ -165,15 +165,14 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 - `start`: runtime start of a managed container; **volume-mode runs no hooks** (bind start-stopped `postStart` stays on `up` path).
 - `exec`: user/workdir from labels `devcontainer.remote_user` / `devcontainer.workspace_folder` when set (both bind and volume create stamp these).
 
-## `up` reuse vs `rebuild` (force-recreate)
+## `up` reuse vs `rebuild` (forced rebuild)
 
 | Path | Behavior |
 |------|----------|
 | `up` create | Fresh bind-mode create when no managed container for identity |
 | `up` reuse / start-stopped | Only when existing container's stamped config hash **equals** current resolve. Running → reuse (no Features re-run); stopped → start + bind `postStart` only |
-| `up` config hash mismatch | Fail closed: `config_hash_mismatch`; **does not** delete or recreate. Hint: `adevcontainer rebuild` (managed selection: `--name` or auto) |
-| `up --recreate` | **Removed** — not a flag |
-| `rebuild` | **Sole** force-recreate (landed; archive [`20260810-rebuild`](../../specs/changes/archive/20260810-rebuild/)): read current stamped config **before** any delete; hostRequirements + Features; then container-only delete old → create same name (bind) or reuse same `adev-*-ws` (volume; ensureVolume, never delete/recreate workspace volume; no re-clone). Pre-delete failure leaves old container untouched. Optional `--skip-pull` / `--vscode` / `--json`. Volume-mode rebuild: OCI features only (local-path / host DefaultFeatureFetcher unsupported — fail clean pre-delete). Hard post-delete recovery mode-split (TTY `Open the recovery editor now? [Y/n]` default Y; decline/EOF retain; named retry skips prompt; README + CLI help document UX): [gaps — Failed rebuild recovery](../domain/devcontainer-apple-gaps.md#failed-rebuild-recovery-mode-split) |
+| `up` config hash mismatch | Fail closed: `config_hash_mismatch`; **does not** delete or replace. Hint: `adevcontainer rebuild` (managed selection: `--name` or auto) |
+| `rebuild` | **Forced rebuild** (landed; archive [`20260810-rebuild`](../../specs/changes/archive/20260810-rebuild/)): read current stamped config **before** any delete; hostRequirements + Features; then container-only delete old → create same name (bind) or reuse same `adev-*-ws` (volume; ensureVolume, never delete/replace workspace volume; no re-clone). Pre-delete failure leaves old container untouched. Optional `--skip-pull` / `--vscode` / `--json`. Volume-mode rebuild: OCI features only (local-path / host DefaultFeatureFetcher unsupported — fail clean pre-delete). Hard post-delete recovery mode-split (TTY `Open the recovery editor now? [Y/n]` default Y; decline/EOF retain; named retry skips prompt; README + CLI help document UX): [gaps — Failed rebuild recovery](../domain/devcontainer-apple-gaps.md#failed-rebuild-recovery-mode-split) |
 
 ## `prune` resource set
 

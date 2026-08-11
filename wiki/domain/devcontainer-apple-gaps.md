@@ -14,7 +14,7 @@ Facts that constrain the CLI. Not a full Apple container manual — only gaps th
 | Events / rich watch APIs | Engine events often used by tools | Do not assume Docker-equivalent event stream |
 | List + label filter | `docker ps --filter label=…` | **No label filter on list** — client-side filter after JSON; prefer deterministic name + inspect; product `list` keeps `devcontainer.managed=adevcontainer` only |
 | VS Code | Dev Containers full up/rebuild + clone-in-volume + IDE-owned customizations apply | **Attach** after CLI bring-up (Apple Container support in Remote - Containers). Product `--vscode` on `up`/`start`/`clone`/`rebuild` best-effort opens via `code --folder-uri` (soft-fail). **Apple attach does not auto-install** `customizations.vscode` — CLI applies config-file settings/extensions (see below). Manual attach without flag still valid. Not full Dev Containers parity. Volume-mode via product `clone` (not extension clone-in-volume) |
-| Force-recreate | Often `up --recreate` / Dev Containers rebuild UX | **No `up --recreate`.** `up` fails on config hash mismatch (`config_hash_mismatch`); sole force-recreate is `rebuild` (managed `--name`/picker). Detail: [cli-runtime-boundary](../conventions/cli-runtime-boundary.md#up-reuse-vs-rebuild-force-recreate) |
+| Forced rebuild | Managed-container rebuild workflow | `up` fails on config hash mismatch (`config_hash_mismatch`); use `rebuild` (managed `--name`/picker). Detail: [cli-runtime-boundary](../conventions/cli-runtime-boundary.md#up-reuse-vs-rebuild-forced-rebuild) |
 | Default process | Often long-running or sleep entry | Keep-alive `--entrypoint /bin/sleep` + `infinity` for long-lived devcontainers |
 | Create identity | Name vs id often distinct | `create --name` **is** the id (`configuration.id`) |
 | Bind mounts | File or directory host source OK | **Directory sources only** — file binds rejected by runtime |
@@ -66,7 +66,7 @@ Rebuild recovery is **mode-split**. Shared rules: same hard post-delete trigger 
 
 Eligible only for a managed clone-origin container with complete volume-mode stamps: non-empty normalized git URL, existing workspace volume, config path contained by stamped workspace folder, managed identity. Incomplete/malformed/unknown identity fail closed.
 
-- Helper: immutable digest-pinned Alpine `linux/arm64`; digest/platform inspection + exact existing workspace-volume presence preflighted before the old-container delete gate. Never deletes/recreates/repopulates/rolls back an image.
+- Helper: immutable digest-pinned Alpine `linux/arm64`; digest/platform inspection + exact existing workspace-volume presence preflighted before the old-container delete gate. Never deletes/replaces/repopulates/rolls back an image.
 - Apple mount identity is nested: `configuration.mounts[].type.volume.name` (logical name); do not use `source` (may be `volume.img`). Require stamped volume at stamped folder, read-write. Malformed/unknown/read-only/wrong-target/bind/virtiofs fail closed.
 - After failed replacement: detach failed container and verify absence from all attachments before helper create; failed detach blocks recovery.
 - Host session: raw config private (`0700`/`0600`); edits via helper stdin → atomic same-directory write guarded by baseline hash → readback byte/hash verify. Conflicts/failed verify retain state. Raw config never in labels, JSON errors, or logs. Spec private-file = host-session only.
@@ -74,7 +74,7 @@ Eligible only for a managed clone-origin container with complete volume-mode sta
 - `RecoveryConfigSession.cleanup` fail-closed bar: path/ownership/session-id only — not on-disk metadata equality after `applyValidatedEdit` advances `lastAppliedHash`.
 - Helper/session retained for retry; crossing helper delete gate detaches/replaces helper before another edit. Cleanup only after successful final verification.
 - **Named apply after volume auto-start** (order: volume auto-start → apply/write). Helper must be **exec-ready** before exec (probe → `start` → stop+start bounce); status alone insufficient (`cannot exec: container is not running` while listed running).
-- No `container cp`, volume delete/recreate/repopulate, or image rollback (named-volume `cp` limitation still applies independently).
+- No `container cp`, volume delete/replace/repopulate, or image rollback (named-volume `cp` limitation still applies independently).
 
 #### Bind / `up` path
 
