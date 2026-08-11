@@ -68,7 +68,7 @@ adevcontainer exec --name <name> -it
 
 The cloned source remains in a named volume. You can work, commit, and push from inside the container.
 
-## Essential commands
+## Commands
 
 | Command | Purpose |
 | --- | --- |
@@ -77,14 +77,16 @@ The cloned source remains in a named volume. You can work, commit, and push from
 | `adevcontainer clone <git-url> [--vscode]` | Clone a repository into a named volume and start its dev container |
 | `adevcontainer exec [-it] [--name <name>] [--] [cmd…]` | Open a shell or run a command in a running managed container |
 | `adevcontainer list [--json]` | List managed dev containers |
-| `adevcontainer start [--vscode] \| stop \| delete \| prune \| inspect [--name <name>]` | Manage a container by name or with the interactive picker |
+| `adevcontainer start [--vscode] \| stop \| inspect [--name <name>]` | Manage a container by name or with the interactive picker |
+| `adevcontainer delete [--name <name>]` | Remove a container, keeping its managed volumes |
+| `adevcontainer prune [--name <name>]` | Remove a container, its managed volumes, and the image |
 | `adevcontainer rebuild [--name <name>] [--vscode]` | Rebuild a managed container from its current configuration |
+| `adevcontainer help [<command>]` | Show main usage or per-command help |
+| `adevcontainer version [--version]` | Print the CLI version |
 
-Use `delete` to remove only the container. Use `prune` to remove the container and its managed volumes. See the [technical documentation](wiki/index.md) before cleanup or for configuration, lifecycle, Features, recovery, and compatibility behavior.
+## Visual Studio Code integration
 
-## Optional: VS Code
-
-Install VS Code, the [Remote - Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers), and make sure the `code` CLI is available. Then add `--vscode` to `up`, `clone`, `start`, or `rebuild`:
+Make sure the [Remote - Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) is installed and the `code` CLI is available. Then add `--vscode` to `up`, `clone`, `start`, or `rebuild`:
 
 ```bash
 adevcontainer up --vscode
@@ -92,15 +94,7 @@ adevcontainer up --vscode
 
 The CLI opens the remote workspace and applies supported VS Code settings and extensions from `devcontainer.json`.
 
-Apple Remote Containers attach uses the container’s default user (it does not pass exec `-u`). On create, `adevcontainer` therefore applies a non-root connection user as create `-u` when `containerUser` is unset (for example metadata `remoteUser: vscode`), so the integrated terminal matches the intended remote user. Explicit `containerUser` still wins create `-u` when set; `remoteUser` remains the connection/exec/nameConfig user.
-
-## Terminal output
-
-Progress phases (`==> …`), quieter info lines, and connection hints write to **stderr**. Internal tool output (lifecycle hooks, Features build, clone populate) is live-teed to stderr with each line indented and prefixed `| `. Warnings (`warning: …`) and human errors (`error: …`) always appear. Machine JSON still includes structured `code`.
-
-- `ADEVCONTAINER_QUIET=1` silences progress/info only — warnings, errors, tool body lines, and interactive prompts still emit.
-- Color is enabled when stderr is a TTY and `NO_COLOR` is unset; `FORCE_COLOR=1` may force color; `NO_COLOR` always wins. There is no verbose flag or product log file for this presentation.
-- `--json` keeps host stdout pure machine JSON; progress/tool/warn stay on stderr.
+<img src="assets/vscode-integration.png" alt="VSCode integration">
 
 ## Contributing
 
