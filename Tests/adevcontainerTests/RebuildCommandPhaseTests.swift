@@ -3,6 +3,33 @@ import Foundation
 
 // MARK: - Scenario builder (sections 3–5)
 
+/// Editor runner that rewrites the temp path and reports launch timing for TTY named-retry tests.
+private final class RebuildTTYEditorRunner: ProcessRunning, @unchecked Sendable {
+    let bytes: Data
+    var launches = 0
+    let onLaunch: (Int) -> Void
+
+    init(bytes: Data, onLaunch: @escaping (Int) -> Void = { _ in }) {
+        self.bytes = bytes
+        self.onLaunch = onLaunch
+    }
+
+    func run(
+        executable: String,
+        arguments: [String],
+        environment: [String: String]?,
+        currentDirectory: String?,
+        stdinData: Data?
+    ) throws -> ProcessResult {
+        launches += 1
+        onLaunch(launches)
+        if let path = arguments.last {
+            try bytes.write(to: URL(fileURLWithPath: path))
+        }
+        return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+    }
+}
+
 /// Mock runtime scenario for rebuild Phase A/B tests.
 final class RebuildScenario {
     let mock = MockProcessRunner()
@@ -13,6 +40,7 @@ final class RebuildScenario {
     var startFails = false
     var deleteFails = false
     var createFails = false
+    var volumeCreateFails = false
     var buildFails = false
     var newContainerId = "new-id-created"
     /// exec script substrings that should exit non-zero.
@@ -23,6 +51,14 @@ final class RebuildScenario {
     }
 
     func install() {
+        for container in containers where RecoveryHelper.isEligible(container) {
+            if !existingImages.contains(RecoveryHelper.helperImageReference) {
+                existingImages.append(RecoveryHelper.helperImageReference)
+            }
+            if let volume = container.labels[ContainerIdentity.labelWorkspaceVolume], !volumes.contains(volume) {
+                volumes.append(volume)
+            }
+        }
         mock.handlers.append { [weak self] args in self?.handle(args) }
     }
 
@@ -82,11 +118,24 @@ final class RebuildScenario {
             return ok(try! JSONSerialization.data(withJSONObject: volumes.map { ["name": $0] }))
         }
         if args.starts(with: ["volume", "create"]) {
-            return ok(Data())
+            return volumeCreateFails ? fail("volume create failed") : ok(Data())
         }
         if args.starts(with: ["image", "inspect"]) {
             let ref = args.last ?? ""
-            return existingImages.contains(ref) ? ok(Data()) : fail("missing")
+            guard existingImages.contains(ref) else { return fail("missing") }
+            if ref == RecoveryHelper.helperImageReference {
+                let object: [String: Any] = [
+                    "configuration": [
+                        "name": ref,
+                        "variants": [[
+                            "digest": RecoveryHelper.helperImageDigest,
+                            "platform": ["os": "linux", "architecture": "arm64", "variant": "v8"]
+                        ]]
+                    ]
+                ]
+                return ok(try! JSONSerialization.data(withJSONObject: [object]))
+            }
+            return ok(Data())
         }
         if args.first == "start" {
             return startFails ? fail("start failed") : ok(Data())
@@ -742,6 +791,424 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(createArgs.contains { $0.contains("adev-repo-ws") }, "create mounts existing workspace volume")
     }),
 
+    ("rebuildNamedRecoveryRetryStripsHelperMarkers", {
+        let rawBytes = Data(#"{"image":"alpine:3.20","remoteUser":"vscode"}"#.utf8)
+        let sessionID = "retry-marker-\(String(UUID().uuidString.prefix(8)).lowercased())"
+        let helperLabels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
+            ContainerIdentity.labelGitURL: "https://github.com/example/repo.git",
+            ContainerIdentity.labelWorkspaceVolume: "adev-repo-ws",
+            ContainerIdentity.labelConfigFile: ".devcontainer/devcontainer.json",
+            ContainerIdentity.labelWorkspaceFolder: "/workspaces/repo",
+            ContainerIdentity.labelConfigHash: "old-hash",
+            ContainerIdentity.labelRemoteUser: "vscode",
+            RecoveryHelper.recoveryMarkerLabel: RecoveryHelper.recoveryMarkerValue,
+            RecoveryHelper.recoverySessionLabel: sessionID,
+            RecoveryHelper.recoveryForLabel: "adev-repo-123456789abc",
+            "devcontainer.recovery_future": "must-not-leak"
+        ]
+        let helper = ContainerInfo(
+            id: "adev-repo-123456789abc",
+            name: "adev-repo-123456789abc",
+            state: "running",
+            labels: helperLabels,
+            image: RecoveryHelper.helperImageReference
+        )
+        let raw = RawVolumeConfig(
+            bytes: rawBytes,
+            pathInContainer: "/workspaces/repo/.devcontainer/devcontainer.json",
+            workspaceFolder: "/workspaces/repo",
+            workspaceFolderBasename: "repo"
+        )
+        let session = try RecoveryConfigSession(
+            rawVolumeConfig: raw,
+            targetContainerID: "old-id",
+            targetContainerName: helper.name,
+            workspaceVolume: "adev-repo-ws",
+            configFile: ".devcontainer/devcontainer.json",
+            sessionID: sessionID
+        )
+        defer { try? session.cleanup() }
+        let conflictBytes = Data(#"{"image":"alpine:3.20","name":"conflict-baseline"}"#.utf8)
+        let conflictRunner = MockProcessRunner()
+        conflictRunner.handlers = [{ args in
+            guard args.first == "exec", args.contains("cat") else { return nil }
+            return ProcessResult(exitCode: 0, stdout: conflictBytes, stderr: Data())
+        }]
+        let conflictRuntime = AppleContainerRuntime(executablePath: "container", runner: conflictRunner)
+        do {
+            _ = try session.applyEdit(helperContainerID: helper.id, runtime: conflictRuntime)
+        } catch {
+            // Seed the retained session with the conflict that the JSON retry must acknowledge.
+        }
+        try MiniTest.expectEqual(session.conflictHash, RecoveryConfigSession.sha256Hex(conflictBytes))
+        try MiniTest.expect(session.conflictFileURL != nil)
+
+        let imageJSON: Data = {
+            let object: [String: Any] = [
+                "configuration": [
+                    "name": RecoveryHelper.helperImageReference,
+                    "variants": [[
+                        "digest": RecoveryHelper.helperImageDigest,
+                        "platform": ["os": "linux", "architecture": "arm64", "variant": "v8"]
+                    ]]
+                ]
+            ]
+            return try! JSONSerialization.data(withJSONObject: [object])
+        }()
+        let mountJSON: Data = {
+            let object: [String: Any] = [
+                "configuration": [
+                    "id": helper.id,
+                    "mounts": [[
+                        "source": "/var/lib/container/volumes/adev-repo-ws.img",
+                        "destination": "/workspaces/repo",
+                        "options": [],
+                        "type": ["volume": ["name": "adev-repo-ws"]]
+                    ]]
+                ]
+            ]
+            return try! JSONSerialization.data(withJSONObject: [object])
+        }()
+        var catReads = 0
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.starts(with: ["list", "--all"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: try! JSONSerialization.data(withJSONObject: [
+                        MockProcessRunner.containerListJSON(
+                            id: helper.id,
+                            state: "running",
+                            labels: helperLabels,
+                            image: RecoveryHelper.helperImageReference
+                        )
+                    ]),
+                    stderr: Data()
+                )
+            }
+            if args.starts(with: ["volume", "list"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: try! JSONSerialization.data(withJSONObject: [["configuration": ["name": "adev-repo-ws"]]]),
+                    stderr: Data()
+                )
+            }
+            if args.starts(with: ["image", "inspect"]) {
+                return ProcessResult(exitCode: 0, stdout: args.last == RecoveryHelper.helperImageReference ? imageJSON : Data(#"{"configuration":{"labels":{}}}"#.utf8), stderr: Data())
+            }
+            if args == ["inspect", helper.id] {
+                return ProcessResult(exitCode: 0, stdout: mountJSON, stderr: Data())
+            }
+            if args.first == "exec", args.contains("cat") {
+                catReads += 1
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: catReads <= 2 ? conflictBytes : rawBytes,
+                    stderr: Data()
+                )
+            }
+            if args.first == "exec", args.contains("adevcontainer-recovery-write") {
+                let hash = RecoveryConfigSession.sha256Hex(rawBytes)
+                return ProcessResult(exitCode: 0, stdout: Data("RECOVERY_APPLIED:\(hash)\n".utf8), stderr: Data())
+            }
+            if args.first == "create" {
+                return ProcessResult(exitCode: 0, stdout: Data("final-id\n".utf8), stderr: Data())
+            }
+            if args.first == "start" || args.first == "delete" {
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            return nil
+        }]
+        let runtime = AppleContainerRuntime(executablePath: "container", runner: mock)
+        try withRebuildVolumeOverrides {
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(name: helper.name, skipPull: true, jsonOutput: true),
+                runtime: runtime
+            )
+        }
+        guard let createArgs = mock.calls.first(where: { $0.arguments.first == "create" })?.arguments else {
+            throw MiniTest.Failure(message: "final replacement create call was not recorded")
+        }
+        try MiniTest.expect(createArgs.contains("devcontainer.managed=adevcontainer"))
+        try MiniTest.expect(!createArgs.contains { $0.hasPrefix("devcontainer.recovery") }, "recovery markers are not copied to final container")
+        try MiniTest.expect(!createArgs.contains("devcontainer.recovery_for=adev-repo-123456789abc"))
+        try MiniTest.expect(!FileManager.default.fileExists(atPath: session.directoryURL.path), "successful retry cleans the consumed session")
+    }),
+
+    ("rebuildNamedRecoveryRetryTTYOpensEditorBeforeWrite", {
+        // First interactive named retry after non-TTY retention must open the editor before
+        // applyValidatedEdit / helper delete — not silently replay the retained broken temp.
+        let broken = Data(#"{"image":"alpine:3.20","postCreateCommand":"exit 42","remoteUser":"vscode"}"#.utf8)
+        let fixed = Data(#"{"image":"alpine:3.20","postCreateCommand":"true","remoteUser":"vscode"}"#.utf8)
+        let sessionID = "tty-named-\(String(UUID().uuidString.prefix(8)).lowercased())"
+        let helperLabels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
+            ContainerIdentity.labelGitURL: "https://github.com/example/repo.git",
+            ContainerIdentity.labelWorkspaceVolume: "adev-repo-ws",
+            ContainerIdentity.labelConfigFile: ".devcontainer/devcontainer.json",
+            ContainerIdentity.labelWorkspaceFolder: "/workspaces/repo",
+            ContainerIdentity.labelConfigHash: "old-hash",
+            ContainerIdentity.labelRemoteUser: "vscode",
+            RecoveryHelper.recoveryMarkerLabel: RecoveryHelper.recoveryMarkerValue,
+            RecoveryHelper.recoverySessionLabel: sessionID
+        ]
+        let helper = ContainerInfo(
+            id: "adev-repo-123456789abc",
+            name: "adev-repo-123456789abc",
+            state: "running",
+            labels: helperLabels,
+            image: RecoveryHelper.helperImageReference
+        )
+        let raw = RawVolumeConfig(
+            bytes: broken,
+            pathInContainer: "/workspaces/repo/.devcontainer/devcontainer.json",
+            workspaceFolder: "/workspaces/repo",
+            workspaceFolderBasename: "repo"
+        )
+        let session = try RecoveryConfigSession(
+            rawVolumeConfig: raw,
+            targetContainerID: "old-id",
+            targetContainerName: helper.name,
+            workspaceVolume: "adev-repo-ws",
+            configFile: ".devcontainer/devcontainer.json",
+            sessionID: sessionID
+        )
+        defer { try? session.cleanup() }
+
+        let imageJSON: Data = {
+            let object: [String: Any] = [
+                "configuration": [
+                    "name": RecoveryHelper.helperImageReference,
+                    "variants": [[
+                        "digest": RecoveryHelper.helperImageDigest,
+                        "platform": ["os": "linux", "architecture": "arm64", "variant": "v8"]
+                    ]]
+                ]
+            ]
+            return try! JSONSerialization.data(withJSONObject: [object])
+        }()
+        let mountJSON: Data = {
+            let object: [String: Any] = [
+                "configuration": [
+                    "id": helper.id,
+                    "mounts": [[
+                        "source": "/var/lib/container/volumes/adev-repo-ws.img",
+                        "destination": "/workspaces/repo",
+                        "options": [],
+                        "type": ["volume": ["name": "adev-repo-ws"]]
+                    ]]
+                ]
+            ]
+            return try! JSONSerialization.data(withJSONObject: [object])
+        }()
+        var sawWrite = false
+        var editorLaunchesBeforeWrite = 0
+        let editorRunner = RebuildTTYEditorRunner(bytes: fixed) { launches in
+            if !sawWrite { editorLaunchesBeforeWrite = launches }
+        }
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.starts(with: ["list", "--all"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: try! JSONSerialization.data(withJSONObject: [
+                        MockProcessRunner.containerListJSON(
+                            id: helper.id,
+                            state: "running",
+                            labels: helperLabels,
+                            image: RecoveryHelper.helperImageReference
+                        )
+                    ]),
+                    stderr: Data()
+                )
+            }
+            if args.starts(with: ["volume", "list"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: try! JSONSerialization.data(withJSONObject: [["configuration": ["name": "adev-repo-ws"]]]),
+                    stderr: Data()
+                )
+            }
+            if args.starts(with: ["image", "inspect"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: args.last == RecoveryHelper.helperImageReference
+                        ? imageJSON
+                        : Data(#"{"configuration":{"labels":{}}}"#.utf8),
+                    stderr: Data()
+                )
+            }
+            if args == ["inspect", helper.id] {
+                return ProcessResult(exitCode: 0, stdout: mountJSON, stderr: Data())
+            }
+            if args.first == "exec", args.contains("cat") {
+                // Before editor apply, volume still has broken bytes; after write, fixed.
+                return ProcessResult(exitCode: 0, stdout: sawWrite ? fixed : broken, stderr: Data())
+            }
+            if args.first == "exec", args.contains("adevcontainer-recovery-write") {
+                sawWrite = true
+                let hash = RecoveryConfigSession.sha256Hex(fixed)
+                return ProcessResult(exitCode: 0, stdout: Data("RECOVERY_APPLIED:\(hash)\n".utf8), stderr: Data())
+            }
+            if args.first == "create" {
+                return ProcessResult(exitCode: 0, stdout: Data("final-id\n".utf8), stderr: Data())
+            }
+            if args.first == "start" || args.first == "delete" {
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            return nil
+        }]
+        let runtime = AppleContainerRuntime(executablePath: "container", runner: mock)
+        let editor = RecoveryEditor(
+            environment: ["VISUAL": "/test-editor"],
+            runner: editorRunner,
+            fallbackEditors: [],
+            executableChecker: { _ in true }
+        )
+        try withRebuildVolumeOverrides {
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(name: helper.name, skipPull: true),
+                runtime: runtime,
+                isTTY: true,
+                recoveryEditor: editor
+            )
+        }
+        try MiniTest.expectEqual(editorRunner.launches, 1, "TTY named retry launches the editor once")
+        try MiniTest.expectEqual(editorLaunchesBeforeWrite, 1, "editor runs before the recovery write")
+        try MiniTest.expect(sawWrite, "validated edit is written through the helper")
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "create" }, "rebuild proceeds after edit")
+    }),
+
+    ("rebuildNamedRecoveryRetryMissingWorkspaceVolumeFailsClosed", {
+        let rawBytes = Data(#"{"image":"alpine:3.20","remoteUser":"vscode"}"#.utf8)
+        // Unique id avoids stranded sessions from a prior failed run colliding on create.
+        let sessionID = "missing-retry-volume-\(String(UUID().uuidString.prefix(8)).lowercased())"
+        let helperLabels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
+            ContainerIdentity.labelGitURL: "https://github.com/example/repo.git",
+            ContainerIdentity.labelWorkspaceVolume: "adev-repo-ws",
+            ContainerIdentity.labelConfigFile: ".devcontainer/devcontainer.json",
+            ContainerIdentity.labelWorkspaceFolder: "/workspaces/repo",
+            ContainerIdentity.labelConfigHash: "old-hash",
+            ContainerIdentity.labelRemoteUser: "vscode",
+            RecoveryHelper.recoveryMarkerLabel: RecoveryHelper.recoveryMarkerValue,
+            RecoveryHelper.recoverySessionLabel: sessionID
+        ]
+        let helper = ContainerInfo(
+            id: "adev-repo-123456789abc",
+            name: "adev-repo-123456789abc",
+            state: "running",
+            labels: helperLabels,
+            image: RecoveryHelper.helperImageReference
+        )
+        let raw = RawVolumeConfig(
+            bytes: rawBytes,
+            pathInContainer: "/workspaces/repo/.devcontainer/devcontainer.json",
+            workspaceFolder: "/workspaces/repo",
+            workspaceFolderBasename: "repo"
+        )
+        let session = try RecoveryConfigSession(
+            rawVolumeConfig: raw,
+            targetContainerID: "old-id",
+            targetContainerName: helper.name,
+            workspaceVolume: "adev-repo-ws",
+            configFile: ".devcontainer/devcontainer.json",
+            sessionID: sessionID
+        )
+        defer { try? session.cleanup() }
+        let imageJSON: Data = {
+            let object: [String: Any] = [
+                "configuration": [
+                    "name": RecoveryHelper.helperImageReference,
+                    "variants": [[
+                        "digest": RecoveryHelper.helperImageDigest,
+                        "platform": ["os": "linux", "architecture": "arm64", "variant": "v8"]
+                    ]]
+                ]
+            ]
+            return try! JSONSerialization.data(withJSONObject: [object])
+        }()
+        let mountJSON: Data = {
+            let object: [String: Any] = [
+                "configuration": [
+                    "id": helper.id,
+                    "mounts": [[
+                        "source": "/var/lib/container/volumes/adev-repo-ws.img",
+                        "destination": "/workspaces/repo",
+                        "options": [],
+                        "type": ["volume": ["name": "adev-repo-ws"]]
+                    ]]
+                ]
+            ]
+            return try! JSONSerialization.data(withJSONObject: [object])
+        }()
+        var volumeListCalls = 0
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.starts(with: ["list", "--all"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: try! JSONSerialization.data(withJSONObject: [
+                        MockProcessRunner.containerListJSON(
+                            id: helper.id,
+                            state: "running",
+                            labels: helperLabels,
+                            image: RecoveryHelper.helperImageReference
+                        )
+                    ]),
+                    stderr: Data()
+                )
+            }
+            if args.starts(with: ["volume", "list"]) {
+                volumeListCalls += 1
+                let names = volumeListCalls <= 2 ? ["adev-repo-ws"] : []
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: try! JSONSerialization.data(withJSONObject: names.map { ["configuration": ["name": $0]] }),
+                    stderr: Data()
+                )
+            }
+            if args.starts(with: ["image", "inspect"]) {
+                return ProcessResult(exitCode: 0, stdout: imageJSON, stderr: Data())
+            }
+            if args == ["inspect", helper.id] {
+                return ProcessResult(exitCode: 0, stdout: mountJSON, stderr: Data())
+            }
+            if args.first == "exec", args.contains("cat") {
+                return ProcessResult(exitCode: 0, stdout: rawBytes, stderr: Data())
+            }
+            if args.first == "exec", args.contains("adevcontainer-recovery-write") {
+                let hash = RecoveryConfigSession.sha256Hex(rawBytes)
+                return ProcessResult(exitCode: 0, stdout: Data("RECOVERY_APPLIED:\(hash)\n".utf8), stderr: Data())
+            }
+            if args.first == "delete" || args.first == "create" {
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            return nil
+        }]
+        let runtime = AppleContainerRuntime(executablePath: "container", runner: mock)
+        try withRebuildVolumeOverrides {
+            try MiniTest.expectThrows({
+                _ = try RebuildCommand.run(
+                    options: RebuildOptions(name: helper.name, skipPull: true, jsonOutput: true),
+                    runtime: runtime
+                )
+            }) { error in
+                let cli = error as? CLIError
+                try MiniTest.expectEqual(cli?.code, CLIErrorCode.recoveryUnavailable)
+                try MiniTest.expectEqual(cli?.recovery?.helperAvailable, false)
+                try MiniTest.expect(cli?.recovery?.retryCommand.contains("rebuild") == true)
+            }
+        }
+        try MiniTest.expect(volumeListCalls >= 2, "retry rechecks the workspace volume")
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "volume" && $0.arguments.dropFirst().first == "create" })
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" }, "replacement delete is recorded before the raced disappearance")
+    }),
+
     ("rebuildConfigNamedVolumesReused", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
         {
@@ -762,6 +1229,24 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         s.install()
         _ = try RebuildCommand.run(options: RebuildOptions(), runtime: s.runtime)
         try MiniTest.expect(!s.mock.calls.contains { $0.arguments.starts(with: ["volume", "create"]) }, "existing config volume reused")
+    }),
+
+    ("rebuildVolumeEnsureFailureDoesNotOfferRecovery", {
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(id: "vol-old", labels: s.volumeLabels())
+        s.containers = [info]
+        s.volumeConfigText = #"{"image":"alpine:3.20","mounts":[{"type":"volume","source":"missing-config","target":"/data"}]}"#
+        s.volumeCreateFails = true
+        s.install()
+        try withRebuildVolumeOverrides {
+            try MiniTest.expectThrows({
+                _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+            }) { error in
+                try MiniTest.expectEqual((error as? CLIError)?.property, "volumes")
+            }
+        }
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "create" }, "no replacement or recovery helper after ensure failure")
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.contains("adevcontainer-recovery-write") }, "no recovery write after ensure failure")
     }),
 
     ("rebuildCreatesNewlyDeclaredConfigVolume", {
@@ -984,15 +1469,147 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         s.containers = [info]
         s.failingExecSubstrings = ["postStartCustom"]
         s.install()
+        defer { try? BindRecoveryResume.cleanup(name: info.name) }
+        let prevEnabled = StatusPrinter.enabled
+        defer { StatusPrinter.enabled = prevEnabled }
+        StatusPrinter.enabled = true
+        var stderr = ""
         try MiniTest.expectThrows({
-            _ = try RebuildCommand.run(options: RebuildOptions(), runtime: s.runtime)
+            try withCapturedStderr(
+                {
+                    _ = try RebuildCommand.run(
+                        options: RebuildOptions(jsonOutput: true),
+                        runtime: s.runtime,
+                        isTTY: false
+                    )
+                },
+                capture: &stderr
+            )
         }, validate: { err in
-            try MiniTest.expectEqual(rebuildErrorCode(err), CLIErrorCode.lifecycleFailed)
+            // Bind-mode hard post-delete hook failure offers host-path recovery (non-TTY).
+            let cli = err as? CLIError
+            try MiniTest.expectEqual(cli?.code, CLIErrorCode.recoveryUnavailable)
+            try MiniTest.expectEqual(cli?.recovery?.mode, "bind")
+            try MiniTest.expectEqual(cli?.recovery?.helperAvailable, false)
+            try MiniTest.expect(cli?.recovery?.configPath.contains("devcontainer.json") == true)
+            try MiniTest.expect(cli?.recovery?.retryCommand.contains("rebuild") == true)
+            try MiniTest.expectEqual(cli?.recovery?.cleanupCommand, "")
         })
-        let deletesNew = s.mock.calls.filter {
-            $0.arguments.first == "delete" && $0.arguments.last == s.newContainerId
+        // LifecycleRunner deletes the NEW container on hook fail; bind recovery may
+        // re-check/delete by id when still listed. No helper create.
+        try MiniTest.expect(
+            s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.last == s.newContainerId },
+            "new container deleted on hook failure"
+        )
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "create" && $0.arguments.contains(RecoveryHelper.helperImageReference) })
+        try MiniTest.expect(stderr.contains("was already removed") || stderr.contains("entering recovery"), "operator is told recovery/old-removed context")
+        try MiniTest.expect(!stderr.contains("internalError"), "no internal error noise on the delete-on-fail path")
+    }),
+
+    ("rebuildExecFailureDeletesDiscoverableNewContainer", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "postCreateCommand": "echo postCreateCustom"
         }
-        try MiniTest.expect(!deletesNew.isEmpty, "new container deleted on hook failure")
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "old-id",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        let expectedError = CLIError(
+            code: CLIErrorCode.runtimeFailed,
+            property: "postCreateCommand",
+            message: "exec transport failed",
+            hint: "retry"
+        )
+        s.mock.throwingHandler = { args in
+            guard args.first == "exec" else { return nil }
+            throw expectedError
+        }
+        var foundNewContainer = false
+        s.mock.handlers.append { [weak s] args in
+            guard let s else { return nil }
+            if args.first == "create" {
+                s.containers.append(RebuildScenario.container(id: s.newContainerId, labels: info.labels))
+            } else if args.starts(with: ["list"]) {
+                foundNewContainer = s.containers.contains { $0.id == s.newContainerId } || foundNewContainer
+            } else if args.first == "delete", args.last == s.newContainerId {
+                if s.containers.contains(where: { $0.id == s.newContainerId }) {
+                    s.containers.removeAll { $0.id == s.newContainerId }
+                } else {
+                    let noise = "internalError: failed to delete container (notFound)\n"
+                    FileHandle.standardError.write(Data(noise.utf8))
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data(noise.utf8))
+                }
+            }
+            return nil
+        }
+        s.install()
+        defer { try? BindRecoveryResume.cleanup(name: info.name) }
+
+        let previousStatusEnabled = StatusPrinter.enabled
+        defer { StatusPrinter.enabled = previousStatusEnabled }
+        StatusPrinter.enabled = true
+        var stderr = ""
+        try MiniTest.expectThrows({
+            try withCapturedStderr(
+                {
+                    _ = try RebuildCommand.run(
+                        options: RebuildOptions(jsonOutput: true),
+                        runtime: s.runtime,
+                        isTTY: false
+                    )
+                },
+                capture: &stderr
+            )
+        }, validate: { error in
+            // Bind recovery wraps the hard failure; original failure kind is preserved.
+            let cli = error as? CLIError
+            try MiniTest.expectEqual(cli?.code, CLIErrorCode.recoveryUnavailable)
+            try MiniTest.expectEqual(cli?.recovery?.mode, "bind")
+            try MiniTest.expectEqual(cli?.recovery?.failureKind, CLIErrorCode.runtimeFailed)
+        })
+
+        try MiniTest.expect(foundNewContainer, "new container was discoverable for catch cleanup")
+        try MiniTest.expect(
+            s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.last == s.newContainerId },
+            "new container deleted after exec failure"
+        )
+        try MiniTest.expect(stderr.contains("was already removed") || stderr.contains("entering recovery"))
+        try MiniTest.expect(!stderr.contains("notFound"), "no duplicate not-found noise")
+        try MiniTest.expect(!stderr.contains("internalError"), "no duplicate internal error noise")
+    }),
+
+    ("lifecycleRunnerCreatePathDeletesOnceOnHookFailure", {
+        // LifecycleRunner-level path: deleteContainerThenFail policy deletes the
+        // container exactly once when a create-path hook exits non-zero.
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("boom".utf8))
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "container", runner: mock)
+        var config = ResolvedDevContainerConfig(image: "alpine:3.20", workspaceFolder: "/workspaces/x")
+        config.postCreateCommand = .shell("echo boom")
+        try MiniTest.expectThrows({
+            try LifecycleRunner.runCreatePath(containerId: "new-ctr", config: config, runtime: runtime)
+        }, validate: { err in
+            try MiniTest.expectEqual((err as? CLIError)?.code, CLIErrorCode.postCreateFailed)
+        })
+        let deletes = mock.calls.filter { $0.arguments.first == "delete" }
+        try MiniTest.expectEqual(deletes.count, 1, "deleteContainerThenFail deletes exactly once")
+        try MiniTest.expectEqual(deletes.first?.arguments.last, "new-ctr", "delete targets the failed new container")
     }),
 
     ("rebuildStartFailureDeletesNewContainer", {
@@ -1009,15 +1626,167 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         s.containers = [info]
         s.startFails = true
         s.install()
+        defer { try? BindRecoveryResume.cleanup(name: info.name) }
         try MiniTest.expectThrows({
-            _ = try RebuildCommand.run(options: RebuildOptions(), runtime: s.runtime)
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(jsonOutput: true),
+                runtime: s.runtime,
+                isTTY: false
+            )
         }, validate: { err in
-            try MiniTest.expect(rebuildErrorCode(err) != nil, "start failure surfaced")
+            let cli = err as? CLIError
+            try MiniTest.expectEqual(cli?.code, CLIErrorCode.recoveryUnavailable)
+            try MiniTest.expectEqual(cli?.recovery?.mode, "bind")
+            try MiniTest.expectEqual(cli?.recovery?.helperAvailable, false)
         })
         try MiniTest.expect(
             s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.last == s.newContainerId },
             "new container deleted after start failure"
         )
+        try MiniTest.expect(!s.mock.calls.contains {
+            $0.arguments.contains(RecoveryHelper.helperImageReference)
+        }, "no Alpine helper for bind start recovery")
+    }),
+
+    ("rebuildBindPreDeleteParseNeverOffersRecovery", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: "{ not valid json")
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "old-id",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.install()
+        try MiniTest.expectThrows({
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(jsonOutput: true),
+                runtime: s.runtime,
+                isTTY: false
+            )
+        }, validate: { err in
+            try MiniTest.expectEqual(rebuildErrorCode(err), CLIErrorCode.configParse)
+            try MiniTest.expect((err as? CLIError)?.recovery == nil)
+        })
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "delete" }, "old left untouched")
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "create" })
+        try MiniTest.expect(try BindRecoveryResume.load(name: info.name) == nil)
+    }),
+
+    ("rebuildBindPostCreateNonTTYOffersHostPathRecovery", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "postCreateCommand": "echo postCreateBoom"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let configPath = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "old-id",
+            labels: s.bindLabels(localFolder: ws.path, configFile: configPath)
+        )
+        s.containers = [info]
+        s.failingExecSubstrings = ["postCreateBoom"]
+        s.install()
+        defer { try? BindRecoveryResume.cleanup(name: info.name) }
+
+        try MiniTest.expectThrows({
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(name: info.name, jsonOutput: true),
+                runtime: s.runtime,
+                isTTY: false
+            )
+        }, validate: { err in
+            let cli = err as? CLIError
+            try MiniTest.expectEqual(cli?.code, CLIErrorCode.recoveryUnavailable)
+            try MiniTest.expectEqual(cli?.recovery?.mode, "bind")
+            try MiniTest.expectEqual(
+                cli?.recovery?.configPath,
+                (configPath as NSString).standardizingPath
+            )
+            try MiniTest.expect(cli?.recovery?.editCommand.contains("devcontainer.json") == true)
+            try MiniTest.expect(cli?.recovery?.retryCommand.contains(info.name) == true)
+            try MiniTest.expectEqual(cli?.recovery?.cleanupCommand, "")
+            try MiniTest.expectEqual(cli?.recovery?.helperAvailable, false)
+            try MiniTest.expectEqual(cli?.recovery?.sessionID, "")
+        })
+        try MiniTest.expect(!s.mock.calls.contains {
+            $0.arguments.first == "create" && $0.arguments.contains(where: { $0.contains("alpine@sha256") })
+        }, "no recovery helper create")
+        try MiniTest.expect(try BindRecoveryResume.load(name: info.name) != nil, "resume retained for named retry")
+    }),
+
+    ("rebuildBindTTYRecoveryEditsHostAndRetries", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "postCreateCommand": "echo postCreateBoom"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let configURL = ws.appendingPathComponent(".devcontainer/devcontainer.json")
+        let fixed = Data(#"{"image":"alpine:3.20"}"#.utf8)
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "old-id",
+            labels: s.bindLabels(localFolder: ws.path, configFile: configURL.path)
+        )
+        s.containers = [info]
+        // Fail postCreate only on the first rebuild attempt.
+        var postCreateFails = true
+        s.mock.handlers.append { args in
+            guard args.first == "exec", let script = args.last, script.contains("postCreateBoom") else {
+                return nil
+            }
+            if postCreateFails {
+                return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("boom".utf8))
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        s.install()
+        defer { try? BindRecoveryResume.cleanup(name: info.name) }
+
+        let editorRunner = RebuildTTYEditorRunner(bytes: fixed) { _ in
+            // After the editor writes a good config, subsequent hooks succeed.
+            postCreateFails = false
+        }
+        let editor = RecoveryEditor(
+            environment: ["VISUAL": "/test-editor"],
+            runner: editorRunner,
+            fallbackEditors: [],
+            executableChecker: { _ in true }
+        )
+        final class PromptAnswers: @unchecked Sendable {
+            var remaining: [String?] = [""]
+        }
+        let promptAnswers = PromptAnswers()
+        let openPrompt = RecoveryOpenEditorPrompt(
+            readLine: {
+                if promptAnswers.remaining.isEmpty { return nil }
+                return promptAnswers.remaining.removeFirst()
+            },
+            writeError: { _ in }
+        )
+        let result = try RebuildCommand.run(
+            options: RebuildOptions(name: info.name),
+            runtime: s.runtime,
+            isTTY: true,
+            recoveryEditor: editor,
+            openEditorPrompt: openPrompt
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(editorRunner.launches, 1)
+        let onDisk = try Data(contentsOf: configURL)
+        try MiniTest.expectEqual(onDisk, fixed)
+        try MiniTest.expect(!s.mock.calls.contains {
+            $0.arguments.contains("adevcontainer-recovery-write")
+        })
+        try MiniTest.expect(try BindRecoveryResume.load(name: info.name) == nil, "resume cleaned after success")
     }),
 
     // ═══════════════════════ Section 4: open / extensions / postAttach ═══════════════════════

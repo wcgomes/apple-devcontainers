@@ -1,4 +1,5 @@
 import Foundation
+import Crypto
 
 public struct ContainerInfo: Equatable, Sendable {
     public var id: String
@@ -10,6 +11,93 @@ public struct ContainerInfo: Equatable, Sendable {
     public var isRunning: Bool {
         state.lowercased() == "running"
     }
+}
+
+public enum ContainerMountType: String, Equatable, Sendable {
+    case bind
+    case volume
+    case virtiofs
+    case tmpfs
+    case unknown
+}
+
+/// A mount reported by Apple `container inspect`/`list` machine JSON.
+public struct ContainerMountInfo: Equatable, Sendable {
+    public var type: ContainerMountType
+    /// Backing source reported by Apple container (for a named volume this is usually a
+    /// volume image path, not the logical volume name).
+    public var source: String
+    public var destination: String
+    public var readOnly: Bool
+    /// Logical named-volume identity from `type.volume.name`.
+    public var logicalVolumeName: String?
+
+    public init(
+        type: ContainerMountType,
+        source: String,
+        destination: String,
+        readOnly: Bool = false,
+        logicalVolumeName: String? = nil
+    ) {
+        self.type = type
+        self.source = source
+        self.destination = destination
+        self.readOnly = readOnly
+        self.logicalVolumeName = logicalVolumeName
+    }
+}
+
+public struct RuntimeImagePlatform: Equatable, Sendable {
+    public var os: String
+    public var architecture: String
+    public var variant: String?
+    public var digest: String?
+
+    public init(
+        os: String,
+        architecture: String,
+        variant: String? = nil,
+        digest: String? = nil
+    ) {
+        self.os = os
+        self.architecture = architecture
+        self.variant = variant
+        self.digest = digest
+    }
+
+    public var normalizedPlatform: String {
+        "\(os.lowercased())/\(architecture.lowercased())"
+    }
+}
+
+public struct RuntimeImageInspection: Equatable, Sendable {
+    public var reference: String
+    public var digests: [String]
+    public var platforms: [RuntimeImagePlatform]
+
+    public init(
+        reference: String,
+        digests: [String] = [],
+        platforms: [RuntimeImagePlatform] = []
+    ) {
+        self.reference = reference
+        self.digests = digests
+        self.platforms = platforms
+    }
+
+    public func hasPlatform(_ platform: String) -> Bool {
+        let wanted = platform.lowercased()
+        return platforms.contains { $0.normalizedPlatform == wanted }
+    }
+
+    public func containsDigest(_ digest: String) -> Bool {
+        digests.contains { $0.lowercased() == digest.lowercased() }
+    }
+}
+
+public enum SafeFileWriteResult: Equatable, Sendable {
+    case applied(hash: String)
+    case conflict(currentHash: String)
 }
 
 /// Sole module that invokes the Apple `container` CLI.
@@ -344,6 +432,67 @@ public struct AppleContainerRuntime: Sendable {
         return imageListContains(arr, ref: ref)
     }
 
+    /// Inspect an image using the Apple CLI's machine-readable JSON response.
+    ///
+    /// Apple `container image inspect` emits JSON without accepting the Docker-style
+    /// `--format` flag, so the command itself is kept minimal while the response is parsed
+    /// strictly here. Recovery image preflight uses the returned digest/platform data rather
+    /// than a tag-only existence check.
+    public func inspectImage(ref: String) throws -> RuntimeImageInspection {
+        let result = try invoke(["image", "inspect", ref])
+        try ensureSuccess(result, action: "image inspect \(ref)")
+
+        let object: [String: Any]
+        if let arr = try? parseJSONArray(result.stdout, requireObjectEntries: true) {
+            guard arr.count == 1, let first = arr.first else {
+                throw CLIError(
+                    code: CLIErrorCode.runtimeFailed,
+                    message: "Image inspect array must contain exactly one object"
+                )
+            }
+            object = first
+        } else {
+            object = try parseJSONObject(result.stdout)
+        }
+        return try parseImageInspection(object, requestedReference: ref)
+    }
+
+    /// Ensure an image is locally available and its machine-inspected platform matches the
+    /// requested OCI platform. Pulling is explicit and never falls back to another platform.
+    public func preflightImage(
+        reference: String,
+        platform: String,
+        pullIfMissing: Bool = true
+    ) throws -> RuntimeImageInspection {
+        if let inspection = try? inspectImage(ref: reference) {
+            guard inspection.hasPlatform(platform) else {
+                throw CLIError(
+                    code: CLIErrorCode.runtimeFailed,
+                    message: "Image \(reference) is not available for \(platform)",
+                    hint: "Use an image manifest that contains the requested native platform"
+                )
+            }
+            return inspection
+        }
+        guard pullIfMissing else {
+            throw CLIError(
+                code: CLIErrorCode.runtimeFailed,
+                message: "Image \(reference) is not available locally",
+                hint: "Pull the image before the destructive operation"
+            )
+        }
+        try pullImage(reference, platform: platform)
+        let inspection = try inspectImage(ref: reference)
+        guard inspection.hasPlatform(platform) else {
+            throw CLIError(
+                code: CLIErrorCode.runtimeFailed,
+                message: "Image \(reference) is not available for \(platform)",
+                hint: "Use an image manifest that contains the requested native platform"
+            )
+        }
+        return inspection
+    }
+
     /// Labels from a local image inspect (empty when unavailable).
     public func imageLabels(ref: String) throws -> [String: String] {
         let result = try invoke(["image", "inspect", ref])
@@ -424,10 +573,12 @@ public struct AppleContainerRuntime: Sendable {
         throw mapFailure(result, action: "volume create \(name)")
     }
 
-    public func volumeExists(_ name: String) throws -> Bool {
+    public func volumeExists(_ name: String, requireObjectEntries: Bool = false) throws -> Bool {
         let list = try invoke(["volume", "list", "--format", "json"])
         guard list.succeeded else { return false }
-        guard let arr = try? parseJSONArray(list.stdout) else { return false }
+        guard let arr = try? parseJSONArray(list.stdout, requireObjectEntries: requireObjectEntries) else {
+            return false
+        }
         for item in arr {
             if let id = item["id"] as? String, id == name { return true }
             if let n = item["name"] as? String, n == name { return true }
@@ -451,14 +602,16 @@ public struct AppleContainerRuntime: Sendable {
         throw mapFailure(result, action: "image delete \(reference)")
     }
 
-    public func create(request: CreateRequest) throws -> String {
+    public func create(request: CreateRequest, ensureVolumes: Bool = true) throws -> String {
         // Ensure workspace named volume (clone / volume-mode)
-        if request.workspaceMountMode == .volume {
+        if ensureVolumes, request.workspaceMountMode == .volume {
             try ensureVolume(name: request.workspaceBindHost)
         }
         // Ensure named volumes from config mounts
-        for mount in request.mounts where mount.type == .volume {
-            try ensureVolume(name: mount.source)
+        if ensureVolumes {
+            for mount in request.mounts where mount.type == .volume {
+                try ensureVolume(name: mount.source)
+            }
         }
 
         let args = request.createArguments()
@@ -492,7 +645,8 @@ public struct AppleContainerRuntime: Sendable {
         user: String? = nil,
         workdir: String? = nil,
         env: [String: String] = [:],
-        interactive: Bool = false
+        interactive: Bool = false,
+        stdinData: Data? = nil
     ) throws -> ProcessResult {
         var args = ["exec"]
         if let user, !user.isEmpty {
@@ -510,6 +664,10 @@ public struct AppleContainerRuntime: Sendable {
         }
         if interactive {
             args += ["-i", "-t"]
+        } else if stdinData != nil {
+            // A non-TTY stdin stream still requires `-i`; never allocate a pseudo-TTY for
+            // exact byte transfer.
+            args.append("-i")
         }
         args.append(nameOrId)
         args.append(contentsOf: command)
@@ -519,26 +677,164 @@ public struct AppleContainerRuntime: Sendable {
             executable: executablePath,
             arguments: args,
             environment: nil,
-            currentDirectory: nil
+            currentDirectory: nil,
+            stdinData: stdinData
         )
+    }
+
+    /// Read a regular file through the helper's exec/stdout boundary. This is deliberately
+    /// separate from `copy`: Apple `container cp` is not reliable for named-volume mounts.
+    public func readFile(nameOrId: String, path: String) throws -> Data {
+        let result = try exec(nameOrId: nameOrId, command: ["cat", path])
+        guard result.succeeded else {
+            throw mapFailure(result, action: "read file in \(nameOrId)")
+        }
+        return result.stdout
+    }
+
+    /// Hash a file after reading it through the same safe exec boundary.
+    public func readFileSHA256(nameOrId: String, path: String) throws -> String {
+        Self.sha256Hex(try readFile(nameOrId: nameOrId, path: path))
+    }
+
+    /// Stream exact bytes to a same-directory temporary file in the helper and atomically
+    /// replace `path`. The path and hashes are argv values, never shell-interpolated. Exit 42
+    /// is reserved by the helper script for an optimistic-concurrency conflict.
+    public func atomicWriteFile(
+        nameOrId: String,
+        path: String,
+        bytes: Data,
+        expectedCurrentHash: String,
+        expectedBytesHash: String
+    ) throws -> SafeFileWriteResult {
+        let command = [
+            "sh", "-ceu", Self.atomicWriteScript,
+            "adevcontainer-recovery-write", path, expectedCurrentHash, expectedBytesHash,
+            "\(bytes.count)"
+        ]
+        let result = try exec(
+            nameOrId: nameOrId,
+            command: command,
+            stdinData: bytes
+        )
+        if result.exitCode == 42 {
+            let current = Self.parseRecoveryHash(result.stderr)
+                ?? Self.parseRecoveryHash(result.stdout)
+                ?? ""
+            return .conflict(currentHash: current)
+        }
+        guard result.succeeded else {
+            throw mapFailure(result, action: "atomically write recovery config in \(nameOrId)")
+        }
+        let applied = Self.parseRecoveryHash(result.stdout)
+            ?? Self.parseRecoveryHash(result.stderr)
+            ?? expectedBytesHash
+        return .applied(hash: applied)
+    }
+
+    /// Machine-JSON mount inspection for one container.
+    public func inspectMounts(nameOrId: String) throws -> [ContainerMountInfo] {
+        let result = try invoke(["inspect", nameOrId])
+        try ensureSuccess(result, action: "inspect mounts \(nameOrId)")
+        let object = try parseSingleContainerObject(result.stdout)
+        return try parseMounts(from: object)
+    }
+
+    /// Verify one exact named-volume attachment. The logical volume name comes from Apple's
+    /// nested `type.volume.name` field; the backing `source` path is intentionally ignored.
+    public func verifyVolumeAttachment(
+        nameOrId: String,
+        volumeName: String,
+        targetPath: String,
+        readOnly: Bool = false
+    ) throws {
+        let mounts = try inspectMounts(nameOrId: nameOrId)
+        let volumeMounts = mounts.filter { $0.type == .volume }
+        guard mounts.count == 1,
+              volumeMounts.count == 1,
+              let mount = volumeMounts.first,
+              mount.logicalVolumeName == volumeName,
+              mount.destination == targetPath,
+              mount.readOnly == readOnly
+        else {
+            throw CLIError(
+                code: CLIErrorCode.recoveryUnavailable,
+                message: "Recovery helper volume attachment could not be verified",
+                hint: "The helper must mount only the existing workspace volume read-write at the stamped workspace path"
+            )
+        }
+    }
+
+    /// Return managed/runtime containers currently attached to a named volume. The list call
+    /// is machine JSON and includes mounts on Apple container 1.x.
+    public func containersAttached(to volumeName: String) throws -> [ContainerInfo] {
+        let result = try invoke(["list", "--all", "--format", "json"])
+        try ensureSuccess(result, action: "list container attachments")
+        let arr = try parseJSONArray(result.stdout, requireObjectEntries: true)
+        var attached: [ContainerInfo] = []
+        attached.reserveCapacity(arr.count)
+        for object in arr {
+            guard let info = parseContainerInfo(object) else {
+                throw mountSchemaError("container attachment entry has no id")
+            }
+            let mounts = try parseMounts(from: object)
+            if mounts.contains(where: {
+                $0.type == .volume && $0.logicalVolumeName == volumeName
+            }) {
+                attached.append(info)
+            }
+        }
+        return attached
+    }
+
+    public func isVolumeAttached(
+        volumeName: String,
+        excludingContainerID: String? = nil
+    ) throws -> Bool {
+        try containersAttached(to: volumeName).contains { info in
+            guard let excludingContainerID else { return true }
+            return info.id != excludingContainerID
+        }
+    }
+
+    /// Fail closed when the exact workspace volume still has any attached container.
+    public func verifyVolumeDetached(
+        volumeName: String,
+        excludingContainerID: String? = nil
+    ) throws {
+        let attached = try containersAttached(to: volumeName).filter { info in
+            guard let excludingContainerID else { return true }
+            return info.id != excludingContainerID
+        }
+        guard attached.isEmpty else {
+            throw CLIError(
+                code: CLIErrorCode.recoveryUnavailable,
+                message: "Workspace volume remains attached to a container",
+                hint: "Stop and remove the failed container before starting recovery"
+            )
+        }
     }
 
     public func listAll() throws -> [ContainerInfo] {
         let result = try invoke(["list", "--all", "--format", "json"])
         try ensureSuccess(result, action: "list")
-        let arr = try parseJSONArray(result.stdout)
-        return arr.compactMap { parseContainerInfo($0) }
+        let arr = try parseJSONArray(result.stdout, requireObjectEntries: true)
+        return try arr.map { object in
+            guard let info = parseContainerInfo(object) else {
+                throw CLIError(
+                    code: CLIErrorCode.runtimeFailed,
+                    message: "Container list entry is missing an id"
+                )
+            }
+            return info
+        }
     }
 
     public func inspect(nameOrId: String) throws -> ContainerInfo {
         let result = try invoke(["inspect", nameOrId])
         try ensureSuccess(result, action: "inspect \(nameOrId)")
-        // inspect returns array
-        if let arr = try? parseJSONArray(result.stdout), let first = arr.first,
-           let info = parseContainerInfo(first) {
-            return info
-        }
-        if let obj = try? parseJSONObject(result.stdout), let info = parseContainerInfo(obj) {
+        let object = try parseSingleContainerObject(result.stdout)
+        if let info = parseContainerInfo(object) {
             return info
         }
         throw CLIError(
@@ -553,6 +849,257 @@ public struct AppleContainerRuntime: Sendable {
     }
 
     // MARK: - Internals
+
+    private static let atomicWriteScript = #"""
+set -eu
+target="$1"
+expected_current="$2"
+expected_bytes="$3"
+expected_length="$4"
+dir=$(dirname -- "$target")
+hash_file() {
+  sha256sum -- "$1" | cut -d ' ' -f 1
+}
+current=$(hash_file "$target")
+if [ "$current" != "$expected_current" ]; then
+  printf 'RECOVERY_CONFLICT:%s\n' "$current" >&2
+  exit 42
+fi
+# Private temp while streaming bytes; final in-volume config must remain readable by
+# the workspace remoteUser (final-container verification and normal volume cat use
+# non-root). umask 077 only protects the transient temp file.
+umask 077
+tmp=$(mktemp "$dir/.adevcontainer-recovery.XXXXXX")
+cleanup() {
+  rm -f -- "$tmp"
+}
+trap cleanup EXIT
+chmod 600 "$tmp"
+cat > "$tmp"
+actual_length=$(wc -c < "$tmp" | tr -d '[:space:]')
+if [ "$actual_length" != "$expected_length" ]; then
+  printf 'RECOVERY_LENGTH_MISMATCH:%s\n' "$actual_length" >&2
+  exit 43
+fi
+actual=$(hash_file "$tmp")
+if [ "$actual" != "$expected_bytes" ]; then
+  printf 'RECOVERY_STREAM_MISMATCH:%s\n' "$actual" >&2
+  exit 43
+fi
+mv -f -- "$tmp" "$target"
+trap - EXIT
+# Match ordinary workspace file readability (owner rw, group/other r).
+chmod 644 -- "$target"
+actual=$(hash_file "$target")
+printf 'RECOVERY_APPLIED:%s\n' "$actual"
+"""#
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func parseRecoveryHash(_ data: Data) -> String? {
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        for line in text.split(whereSeparator: \.isNewline) {
+            let value = String(line)
+            if let range = value.range(of: "RECOVERY_CONFLICT:") {
+                let hash = String(value[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if hash.count == 64 { return hash }
+            }
+            if let range = value.range(of: "RECOVERY_APPLIED:") {
+                let hash = String(value[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if hash.count == 64 { return hash }
+            }
+        }
+        return nil
+    }
+
+    private func parseImageInspection(
+        _ object: [String: Any],
+        requestedReference: String
+    ) throws -> RuntimeImageInspection {
+        var digests: [String] = []
+        var platforms: [RuntimeImagePlatform] = []
+
+        func addDigest(_ value: String?) {
+            guard let value, !value.isEmpty, !digests.contains(value) else { return }
+            digests.append(value)
+        }
+
+        func parsePlatform(_ object: [String: Any]?, digest: String? = nil) {
+            guard let object,
+                  let os = object["os"] as? String,
+                  let architecture = (object["architecture"] as? String)
+                      ?? (object["arch"] as? String)
+            else { return }
+            let value = RuntimeImagePlatform(
+                os: os,
+                architecture: architecture,
+                variant: object["variant"] as? String,
+                digest: digest
+            )
+            if !platforms.contains(value) { platforms.append(value) }
+            addDigest(digest)
+        }
+
+        if let id = object["id"] as? String, id.hasPrefix("sha256:") {
+            addDigest(id)
+        }
+        if let digest = object["digest"] as? String {
+            addDigest(digest)
+        }
+        if let configuration = object["configuration"] as? [String: Any] {
+            if let name = configuration["name"] as? String, !name.isEmpty {
+                _ = name
+            }
+            if let descriptor = configuration["descriptor"] as? [String: Any] {
+                addDigest(descriptor["digest"] as? String)
+            }
+            parsePlatform(configuration["platform"] as? [String: Any])
+            if let variants = configuration["variants"] as? [[String: Any]] {
+                for variant in variants {
+                    parsePlatform(
+                        variant["platform"] as? [String: Any] ?? variant,
+                        digest: variant["digest"] as? String
+                    )
+                }
+            }
+        }
+        parsePlatform(object["platform"] as? [String: Any])
+        if let variants = object["variants"] as? [[String: Any]] {
+            for variant in variants {
+                parsePlatform(
+                    variant["platform"] as? [String: Any] ?? variant,
+                    digest: variant["digest"] as? String
+                )
+            }
+        }
+
+        guard !platforms.isEmpty || !digests.isEmpty else {
+            throw CLIError(
+                code: CLIErrorCode.runtimeFailed,
+                message: "Unexpected image inspect JSON for \(requestedReference)"
+            )
+        }
+        let reference = (object["reference"] as? String)
+            ?? ((object["configuration"] as? [String: Any])?["name"] as? String)
+            ?? requestedReference
+        return RuntimeImageInspection(
+            reference: reference,
+            digests: digests,
+            platforms: platforms
+        )
+    }
+
+    private func parseMounts(from object: [String: Any]) throws -> [ContainerMountInfo] {
+        let configuration = object["configuration"] as? [String: Any] ?? object
+        guard let rawMounts = configuration["mounts"] else {
+            throw mountSchemaError("container mounts metadata is missing")
+        }
+        guard let rawMounts = rawMounts as? [Any] else {
+            throw mountSchemaError("container mounts is not an array")
+        }
+        var mounts: [ContainerMountInfo] = []
+        mounts.reserveCapacity(rawMounts.count)
+        for rawValue in rawMounts {
+            guard let raw = rawValue as? [String: Any] else {
+                throw mountSchemaError("container mount entry is not an object")
+            }
+            guard let destination = raw["destination"] as? String, !destination.isEmpty else {
+                throw mountSchemaError("container mount has no destination")
+            }
+            let options: [String]
+            if let rawOptions = raw["options"] {
+                guard let parsedOptions = rawOptions as? [Any],
+                      parsedOptions.allSatisfy({ $0 is String })
+                else {
+                    throw mountSchemaError("container mount options are malformed")
+                }
+                options = parsedOptions.compactMap { $0 as? String }
+            } else {
+                options = []
+            }
+
+            let parsedType = try parseMountType(raw["type"])
+            let source: String
+            if let rawSource = raw["source"] {
+                guard let parsedSource = rawSource as? String else {
+                    throw mountSchemaError("container mount source is malformed")
+                }
+                source = parsedSource
+            } else if parsedType.type == .tmpfs {
+                source = ""
+            } else {
+                throw mountSchemaError("container mount source is missing")
+            }
+            let readOnly: Bool
+            if let explicit = raw["readOnly"] {
+                guard let parsed = explicit as? Bool else {
+                    throw mountSchemaError("container mount readOnly is malformed")
+                }
+                readOnly = parsed
+            } else {
+                readOnly = options.contains { option in
+                    let lower = option.lowercased()
+                    return lower == "ro" || lower == "readonly"
+                }
+            }
+            mounts.append(ContainerMountInfo(
+                type: parsedType.type,
+                source: source,
+                destination: destination,
+                readOnly: readOnly,
+                logicalVolumeName: parsedType.logicalVolumeName
+            ))
+        }
+        return mounts
+    }
+
+    private func parseMountType(_ raw: Any?) throws -> (
+        type: ContainerMountType,
+        logicalVolumeName: String?
+    ) {
+        guard let object = raw as? [String: Any], object.count == 1,
+              let key = object.keys.first
+        else {
+            throw mountSchemaError("container mount type is malformed")
+        }
+        switch key.lowercased() {
+        case "volume":
+            guard let details = object[key] as? [String: Any],
+                  let name = details["name"] as? String,
+                  !name.isEmpty
+            else {
+                throw mountSchemaError("container volume mount has no logical name")
+            }
+            return (.volume, name)
+        case "bind":
+            guard object[key] is [String: Any] else {
+                throw mountSchemaError("container bind mount details are malformed")
+            }
+            return (.bind, nil)
+        case "virtiofs":
+            guard object[key] is [String: Any] else {
+                throw mountSchemaError("container virtiofs mount details are malformed")
+            }
+            return (.virtiofs, nil)
+        case "tmpfs":
+            guard object[key] is [String: Any] else {
+                throw mountSchemaError("container tmpfs mount details are malformed")
+            }
+            return (.tmpfs, nil)
+        default:
+            throw mountSchemaError("container mount type is unknown")
+        }
+    }
+
+    private func mountSchemaError(_ detail: String) -> CLIError {
+        CLIError(
+            code: CLIErrorCode.recoveryUnavailable,
+            message: "Unable to verify container mount schema: \(detail)",
+            hint: "Recovery requires machine-readable Apple container mount metadata"
+        )
+    }
 
     @discardableResult
     public func invoke(_ arguments: [String], streamStderr: Bool = false) throws -> ProcessResult {
@@ -590,7 +1137,32 @@ public struct AppleContainerRuntime: Sendable {
         )
     }
 
-    private func parseJSONArray(_ data: Data) throws -> [[String: Any]] {
+    private func parseSingleContainerObject(_ data: Data) throws -> [String: Any] {
+        let obj: Any
+        do {
+            obj = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+        } catch {
+            throw mountSchemaError("container inspect JSON is malformed")
+        }
+        if let dict = obj as? [String: Any] {
+            return dict
+        }
+        if let arr = obj as? [Any] {
+            guard arr.count == 1,
+                   arr.allSatisfy({ $0 is [String: Any] }),
+                   let first = arr.first as? [String: Any]
+            else {
+                throw mountSchemaError("container inspect array must contain exactly one object")
+            }
+            return first
+        }
+        throw mountSchemaError("container inspect JSON is neither an object nor an array")
+    }
+
+    private func parseJSONArray(
+        _ data: Data,
+        requireObjectEntries: Bool = false
+    ) throws -> [[String: Any]] {
         if data.isEmpty { return [] }
         let obj: Any
         do {
@@ -603,6 +1175,9 @@ public struct AppleContainerRuntime: Sendable {
         }
         if let arr = obj as? [[String: Any]] { return arr }
         if let arr = obj as? [Any] {
+            if requireObjectEntries, !arr.allSatisfy({ $0 is [String: Any] }) {
+                throw mountSchemaError("JSON array contains a non-object entry")
+            }
             return arr.compactMap { $0 as? [String: Any] }
         }
         throw CLIError(code: CLIErrorCode.runtimeFailed, message: "Expected JSON array from container CLI")

@@ -1592,6 +1592,35 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(arr[0]["id"] as? String, "adev-app-aaaabbbbcccc")
         try MiniTest.expectEqual(arr[0]["gitUrl"] as? String, "https://github.com/org/app")
     }),
+    ("listMarksRecoveryHelperHumanAndJSON", {
+        let mock = MockProcessRunner()
+        let helper = MockProcessRunner.containerListJSON(
+            id: "adev-recovery-helper",
+            state: "running",
+            labels: [
+                ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+                ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
+                RecoveryHelper.recoveryMarkerLabel: RecoveryHelper.recoveryMarkerValue,
+                RecoveryHelper.recoverySessionLabel: "list-session"
+            ],
+            image: RecoveryHelper.helperImageReference
+        )
+        mock.handlers = [{ args in
+            guard args.starts(with: ["list"]) else { return nil }
+            return ProcessResult(
+                exitCode: 0,
+                stdout: try! JSONSerialization.data(withJSONObject: [helper]),
+                stderr: Data()
+            )
+        }]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let table = try ListCommand.run(options: ListOptions(jsonOutput: false), runtime: runtime)
+        try MiniTest.expect(table.contains("adev-recovery-helper [RECOVERY]"))
+        let json = try ListCommand.run(options: ListOptions(jsonOutput: true), runtime: runtime)
+        let rows = try JSONSerialization.jsonObject(with: Data(json.utf8)) as! [[String: Any]]
+        let labels = rows.first?["labels"] as? [String: String]
+        try MiniTest.expectEqual(labels?[RecoveryHelper.recoveryMarkerLabel], RecoveryHelper.recoveryMarkerValue)
+    }),
     ("startStoppedManagedNoHooks", {
         let mock = MockProcessRunner()
         let entry = MockProcessRunner.containerListJSON(

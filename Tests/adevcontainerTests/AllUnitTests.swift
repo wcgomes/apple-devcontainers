@@ -33,6 +33,7 @@ final class MockProcessRunner: ProcessRunning, @unchecked Sendable {
     var calls: [MockProcessCall] = []
     var results: [ProcessResult] = []
     var handlers: [([String]) -> ProcessResult?] = []
+    var throwingHandler: (([String]) throws -> ProcessResult?)?
     /// Optional handlers that also receive stdin (for credential fill tests).
     var stdinHandlers: [([String], Data?) -> ProcessResult?] = []
     var defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
@@ -66,6 +67,7 @@ final class MockProcessRunner: ProcessRunning, @unchecked Sendable {
         for handler in stdinHandlers {
             if let r = handler(arguments, stdinData) { return r }
         }
+        if let throwingHandler, let r = try throwingHandler(arguments) { return r }
         for handler in handlers {
             if let r = handler(arguments) { return r }
         }
@@ -1028,6 +1030,42 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(list[0].id, "c1")
         try MiniTest.expect(list[0].isRunning)
         try MiniTest.expectEqual(list[0].labels[ContainerIdentity.labelConfigHash], "h1")
+    }),
+    ("inspectAcceptsObjectAndSingleEntryArray", {
+        let object = MockProcessRunner.containerListJSON(id: "c1", state: "running")
+        for response in [object, [object]] as [Any] {
+            let mock = MockProcessRunner()
+            try mock.enqueueJSON(response)
+            let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+            let info = try runtime.inspect(nameOrId: "c1")
+            try MiniTest.expectEqual(info.id, "c1")
+        }
+    }),
+    ("inspectRejectsMultiAndMixedEntryArrays", {
+        let object = MockProcessRunner.containerListJSON(id: "c1", state: "running")
+        for response in [[object, object], [object, "not-an-object"]] as [Any] {
+            let mock = MockProcessRunner()
+            try mock.enqueueJSON(response)
+            let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+            try MiniTest.expectThrows({ _ = try runtime.inspect(nameOrId: "c1") }) { _ in }
+        }
+    }),
+    ("inspectImageRejectsMultiEntryArray", {
+        let image = ["id": "sha256:abc"]
+        let mock = MockProcessRunner()
+        try mock.enqueueJSON([image, image])
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({ _ = try runtime.inspectImage(ref: "alpine:3.20") }) { _ in }
+    }),
+    ("inspectImageAcceptsObjectAndSingleEntryArray", {
+        let image = ["id": "sha256:abc"]
+        for response in [image, [image]] as [Any] {
+            let mock = MockProcessRunner()
+            try mock.enqueueJSON(response)
+            let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+            let inspection = try runtime.inspectImage(ref: "alpine:3.20")
+            try MiniTest.expectEqual(inspection.digests, ["sha256:abc"])
+        }
     }),
     ("nonZeroMapsToError", {
         let mock = MockProcessRunner()
@@ -2337,4 +2375,3 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!pull.contains("--rosetta"))
     })
 ]
-

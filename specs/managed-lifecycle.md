@@ -13,10 +13,12 @@ Lifecycle commands share **one** selection model. Only `up` accepts `-w` / `--wo
 | Command | Selection |
 |---------|-----------|
 | `up` | `-w` / `--workspace` (default cwd) — bind-mode create/start/reuse |
-| `exec`, `stop`, `delete`, `prune`, `inspect`, `start` | `ManagedContainers.resolveSelection(name:)` only — `--name` and/or interactive picker over `devcontainer.managed=adevcontainer` |
+| `exec`, `stop`, `delete`, `prune`, `inspect`, `start`, `rebuild` | `ManagedContainers.resolveSelection(name:)` only — `--name` and/or interactive picker over `devcontainer.managed=adevcontainer` |
 | `clone`, `list`, `doctor` | no `-w` (unchanged) |
 
-If the user passes `-w` / `--workspace` on any non-`up` command, the CLI MUST fail with a structured **usage** error whose message includes that `-w is only valid for up` (clearer than silently ignoring).
+If the user passes `-w` / `--workspace` on any non-`up` command (including `rebuild`), the CLI MUST fail with a structured **usage** error whose message includes that `-w is only valid for up` (clearer than silently ignoring).
+
+`rebuild` is the **sole forced recreate** path: `up` has no `--recreate` flag. On config-hash mismatch, `up` MUST fail with `config_hash_mismatch` and a hint pointing to `adevcontainer rebuild` (managed selection `--name`/auto when applicable). `rebuild` MUST recreate the selected managed container even when the resolved config hash equals the stamped `devcontainer.config_hash`, and MUST preserve the workspace volume and config named volumes (container-only delete then create).
 
 **`exec`:** MUST resolve managed only (no ConfigResolver / host workspace path branch). User and workdir MUST come from labels `devcontainer.remote_user` and `devcontainer.workspace_folder` stamped at `up`/`clone` create (empty label → omit). `adevcontainer exec` MUST run a command or shell inside the running managed container via AppleContainerRuntime. If the container is not running, exec MUST fail with a structured error.
 
@@ -64,6 +66,21 @@ If no container exists, inspect MUST fail structurally or report not-found consi
 - Given a managed container with bind or volume managed labels
 - When the user runs `adevcontainer inspect --name <that-name>`
 - Then payload remoteUser/remoteWorkspaceFolder/configPath/workspacePath/configHash match labels and portsAttributes is empty
+
+#### Scenario: rebuild is selectable like other lifecycle commands
+- Given a running managed container (bind or volume) with `devcontainer.managed=adevcontainer`
+- When the user runs `adevcontainer rebuild --name <that-name>`
+- Then the rebuild targets that managed container through the same resolution rules as `start`/`stop`/`delete`
+
+#### Scenario: -w on rebuild is usage error
+- Given any rebuild invocation including `-w <path>`
+- When the user runs the command
+- Then the CLI fails usage with a message that `-w is only valid for up`
+
+#### Scenario: rebuild multiple non-interactive requests --name
+- Given two managed containers and non-interactive stdin
+- When the user runs `adevcontainer rebuild` without `--name`
+- Then the CLI fails with the `selection_required`-class structured error requesting `--name` (same as `start`)
 
 ---
 

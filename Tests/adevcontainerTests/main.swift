@@ -38,7 +38,19 @@ let allTests: [(String, () throws -> Void)] = []
     + configReaderTests
     + rebuildCommandTests
     + rebuildPhaseTests
+    + recoveryEditorTests
+    + recoveryHelperTests
+    + recoveryConfigSessionTests
+    + recoveryOrchestratorTests
+    + recoveryOutputTests
     + integrationTests
+
+// Optional PTY restore probe: run under a fresh controlling terminal so job-control
+// claim/restore can be verified without a developer TTY on the suite process itself.
+// Invoked by the PTY round-trip test via `script`/`python` — not part of the normal suite.
+if ProcessInfo.processInfo.environment["ADEVCONTAINER_TTY_RESTORE_PROBE"] == "1" {
+    exit(InteractiveTTYRestoreProbe.run())
+}
 
 let code = MiniTest.runAll(allTests)
 exit(code)

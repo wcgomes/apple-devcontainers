@@ -84,6 +84,9 @@ nonisolated(unsafe) let rebuildCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(text.contains("--vscode"), "usage mentions --vscode")
         try MiniTest.expect(text.contains("--json"), "usage mentions --json")
         try MiniTest.expect(text.contains("--name"), "usage mentions --name")
+        try MiniTest.expect(!text.contains("--recreate"), "usage must not list removed --recreate")
+        let upHelp = CommandSurface.commandHelpText("up") ?? ""
+        try MiniTest.expect(!upHelp.contains("--recreate"), "up help must not list removed --recreate")
     }),
 
     ("commandHelpRebuildPresent", {
@@ -99,5 +102,43 @@ nonisolated(unsafe) let rebuildCommandTests: [(String, () throws -> Void)] = [
 
     ("commandHelpUnknownSubcommandNil", {
         try MiniTest.expect(CommandSurface.commandHelpText("nope") == nil)
+    }),
+
+    ("helpRoutesCommandSpecificHelp", {
+        // `help <command>` MUST print the same command-specific help as `<command> --help`
+        // (regression: `help rebuild` printed the main usage text instead).
+        for cmd in ["up", "clone", "rebuild", "list", "start", "exec", "stop", "delete", "prune", "inspect"] {
+            try MiniTest.expectEqual(
+                CommandSurface.resolveHelpSubcommand(args: ["help", cmd]),
+                cmd,
+                "help \(cmd) routes to \(cmd) command help"
+            )
+            try MiniTest.expect(CommandSurface.commandHelpText(cmd) != nil, "\(cmd) has command-specific help")
+        }
+        try MiniTest.expect(CommandSurface.resolveHelpSubcommand(args: ["help"]) == nil, "bare help is main usage")
+        try MiniTest.expect(CommandSurface.resolveHelpSubcommand(args: ["-h"]) == nil, "-h is main usage")
+        try MiniTest.expect(CommandSurface.resolveHelpSubcommand(args: ["--help"]) == nil, "--help is main usage")
+        try MiniTest.expect(
+            CommandSurface.resolveHelpSubcommand(args: ["rebuild", "--help"]) == nil,
+            "command-side --help stays command-side"
+        )
+    }),
+
+    ("helpRebuildMatchesRebuildHelpOutput", {
+        // `help rebuild` and `rebuild --help` MUST both print printCommandHelp("rebuild")
+        // content (selection, forced recreate, volume preservation, --vscode gate) —
+        // never the main usage text.
+        try MiniTest.expectEqual(CommandSurface.resolveHelpSubcommand(args: ["help", "rebuild"]), "rebuild")
+        let usage = CommandSurface.usageText()
+        let help = CommandSurface.commandHelpText("rebuild")
+        try MiniTest.expect(help != nil, "rebuild help present")
+        guard let help else { return }
+        try MiniTest.expect(help != usage, "command help differs from main usage")
+        try MiniTest.expect(help.contains("rebuild"), "help names the command")
+        try MiniTest.expect(help.contains("--skip-pull"), "help lists --skip-pull")
+        try MiniTest.expect(help.contains("--vscode"), "help lists --vscode")
+        try MiniTest.expect(help.contains("Force-recreate"), "help describes forced recreate")
+        try MiniTest.expect(help.contains("volume"), "help describes volume preservation")
+        try MiniTest.expect(!usage.contains("preflight"), "main usage stays the overview, not rebuild specifics")
     })
 ]

@@ -10,6 +10,7 @@ All host runtime interaction goes through **AppleContainerRuntime**. No other mo
 - Non-zero exit + stderr → map to structured CLI errors (command, args class, message).
 - `doctor` validates binary presence/version/runnability before `up` paths rely on it.
 - **ProcessRunner:** async-drain stdout/stderr pipes before and during `wait`, or a full pipe can deadlock the child.
+- **InteractiveProcessRunner:** after Foundation `Process` launch, put the child in the TTY foreground process group (`tcsetpgrp`) and `SIGCONT` if needed. Inherited stdio alone is insufficient — without foreground, full-screen editors (`nano`/`vi`) stop (`STAT=T`) and the parent hangs at `waitUntilExit`. Used by interactive `exec` and recovery TTY editor.
 
 ## Apple container machine JSON (list/inspect; tested 1.2.x)
 
@@ -81,7 +82,7 @@ Set on create and use for reuse/inspect/`list`:
 | Label `devcontainer.managed=adevcontainer` | Managed filter for `list` / picker / lifecycle commands |
 | Label `devcontainer.local_folder` | Bind: host path; volume-mode: `volume://…` |
 | Label `devcontainer.config_file` | Config file identity |
-| App config hash label | Detect config drift / recreate need |
+| App config hash label | Stamped at create; `up` reuse requires match — mismatch → `config_hash_mismatch` (force-recreate via `rebuild` only; no `up --recreate`) |
 | Label `devcontainer.workspace_mode` | `bind` on `up` create; `volume` on `clone` create |
 | Label `devcontainer.workspace_volume` | Workspace volume name (`adev-*-ws`; volume-mode) |
 | Label `devcontainer.git_url` | Normalized remote (userinfo stripped; volume-mode) |
@@ -138,9 +139,19 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 **Only `up` uses `-w`/cwd** (bind workspace path). All other lifecycle commands resolve a managed container via `--name` or interactive picker — never `-w`.
 
 - `list [--json]`: client-side filter to `devcontainer.managed=adevcontainer` only.
-- `start` / `exec` / `stop` / `delete` / `prune` / `inspect`: `--name` or picker among managed; no host workspace path required.
+- `start` / `exec` / `stop` / `delete` / `prune` / `rebuild` / `inspect`: `--name` or picker among managed; no host workspace path required.
 - `start`: runtime start of a managed container; **volume-mode runs no hooks** (bind start-stopped `postStart` stays on `up` path).
 - `exec`: user/workdir from labels `devcontainer.remote_user` / `devcontainer.workspace_folder` when set (both bind and volume create stamp these).
+
+## `up` reuse vs `rebuild` (force-recreate)
+
+| Path | Behavior |
+|------|----------|
+| `up` create | Fresh bind-mode create when no managed container for identity |
+| `up` reuse / start-stopped | Only when existing container's stamped config hash **equals** current resolve. Running → reuse (no Features re-run); stopped → start + bind `postStart` only |
+| `up` config hash mismatch | Fail closed: `config_hash_mismatch`; **does not** delete or recreate. Hint: `adevcontainer rebuild` (managed selection: `--name` or auto) |
+| `up --recreate` | **Removed** — not a flag |
+| `rebuild` | **Sole** force-recreate (landed; archive [`20260810-rebuild`](../../specs/changes/archive/20260810-rebuild/)): read current stamped config **before** any delete; hostRequirements + Features; then container-only delete old → create same name (bind) or reuse same `adev-*-ws` (volume; ensureVolume, never delete/recreate workspace volume; no re-clone). Pre-delete failure leaves old container untouched. Optional `--skip-pull` / `--vscode` / `--json`. Volume-mode rebuild: OCI features only (local-path / host DefaultFeatureFetcher unsupported — fail clean pre-delete). Hard post-delete recovery mode-split (TTY `Open the recovery editor now? [Y/n]` default Y; decline/EOF retain; named retry skips prompt; README + CLI help document UX): [gaps — Failed rebuild recovery](../domain/devcontainer-apple-gaps.md#failed-rebuild-recovery-mode-split) |
 
 ## `prune` resource set
 
@@ -160,7 +171,7 @@ Missing resources are skipped. Exit non-zero only if deleting an **existing** re
 
 ## Features runner
 
-On `up`/`clone` when `features` is non-empty after resolve (and after clone git-ensure). Code: `Sources/ADevContainerLib/Features/`.
+On `up`/`clone`/`rebuild` when `features` is non-empty after resolve (and after clone git-ensure; volume-mode rebuild admits OCI only). Code: `Sources/ADevContainerLib/Features/`.
 
 | Step | Behavior |
 |------|----------|
@@ -188,7 +199,7 @@ On `AppleContainerRuntime.build` (Features derived image):
 
 **Fixtures:** `features-node`, `features-triple`, `features-local`, `features-docker-ood`, `features-sample/*`.
 
-**Tests:** suite of record is `swift run adevcontainerTests`. Local E2E when Apple `container` available; OCI E2E opt-in `ADEVCONTAINER_FEATURES_E2E=1`.
+**Tests:** suite of record is `swift run adevcontainerTests`. Local E2E when Apple `container` available; OCI E2E opt-in `ADEVCONTAINER_FEATURES_E2E=1`. Recovery remaining gaps only: live non-TTY recovery E2E opt-in `ADEVCONTAINER_RECOVERY_E2E=1` (default suite skips); automated TTY recovery E2E absent (`ADEVCONTAINER_RECOVERY_E2E_TTY=1` surfaces skip guidance only; operator-validated). Recovery E2E bootstraps clone-origin labels/volumes when live `CloneCommand` populate is unreachable (guest DNS / host `file://`). Feature material for rebuild/recovery git inject must use a durable host path such as `~/Library/Caches` — Apple `container build` drops/breaks `/var/folders` temp contexts.
 
 Progress lines: `==> Resolving features`, `==> Fetching features`, `==> Building features` (or Reusing); `==> Configuring native arm64 builds (build.rosetta=false)` only when changing config.
 
@@ -217,12 +228,13 @@ Hooks run via runtime **exec** into the running container (effective user + work
 
 | Path | Hooks / apply |
 |------|----------------|
-| Fresh create (`up` bind or `clone` volume) | `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand` → **settings apply** (soft-fail; not gated on `--vscode`) |
-| Reuse running | no create-path hooks; settings repair on marker drift; feature postAttach mergeable from image metadata when gated open succeeds |
-| Bind start-stopped (`up`) | `postStartCommand` only |
+| Fresh create (`up` bind, `clone` volume, or `rebuild` replacement) | `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand` → **settings apply** (soft-fail; not gated on `--vscode`) |
+| Reuse running (`up`, config hash match) | no create-path hooks; settings repair on marker drift; feature postAttach mergeable from image metadata when gated open succeeds |
+| Config hash mismatch (`up`) | fail `config_hash_mismatch`; no hooks/delete; remediate with `rebuild` |
+| Bind start-stopped (`up`, hash match) | `postStartCommand` only |
 | Bare `start` | no create-path / postStart; settings repair on marker drift when config loadable; extensions + postAttach only via gate below |
 | `customizations.vscode` | **CLI apply** config-file v1 (`VSCodeCustomizationsApply`): settings create-path / drift repair; extensions after successful `--vscode` open only (host VSIX → tar-pipe → unzip → **`extensions.json` registry upsert** + cache invalidate; BFS `extensionDependencies`; soft-fail per ID); then postAttach. Soft-fail apply ≠ postAttach fail-keep. Marker `$HOME/.adevcontainer/vscode-customizations.applied` (config payload hash only). Not image build; not feature/metadata merge; Apple attach does not auto-install. Detail: [architecture.md — VS Code flow](../architecture.md#vs-code-flow) |
-| `postAttachCommand` | **implemented** on `up`/`start`/`clone`: after open success and after extensions apply — **RUNS** config then feature postAttach; **SKIP** + status if no flag or open soft-fails (no status line if absent). Not always-skip-forever. Contract: [`specs/vscode.md`](../../specs/vscode.md); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../../specs/changes/archive/20260808-vscode-customizations-apply/) |
+| `postAttachCommand` | **implemented** on `up`/`start`/`clone`/`rebuild`: after open success and after extensions apply — **RUNS** config then feature postAttach; **SKIP** + status if no flag or open soft-fails (no status line if absent). Not always-skip-forever. Contract: [`specs/vscode.md`](../../specs/vscode.md); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../../specs/changes/archive/20260808-vscode-customizations-apply/) |
 
 - Capture exit codes; failed hook fails the command — do not pretend success.
 - **Create-path failure** (any of onCreate / updateContent / postCreate / postStart on fresh create): delete the container **before** returning failure, so reuse cannot treat a half-bootstrapped container as healthy. Customizations apply is **not** part of create-path delete-on-fail.
@@ -236,7 +248,7 @@ Hooks run via runtime **exec** into the running container (effective user + work
 ## `exec`: selection, interactive vs non-interactive
 
 - **Selection:** `--name` or interactive picker among managed only — **no `-w`/cwd** (that flag is `up`-only). Workdir/user from labels `devcontainer.workspace_folder` / `devcontainer.remote_user` when set at create (bind or volume).
-- **Interactive** (no command, or `-i` / `-t` / `-it`): **InteractiveProcessRunner** (inherit stdio) + `container exec -i -t`; default command is `bash`.
+- **Interactive** (no command, or `-i` / `-t` / `-it`): **InteractiveProcessRunner** (inherit stdio **plus** child TTY foreground via `tcsetpgrp` + `SIGCONT` after launch — see Subprocess rules) + `container exec -i -t`; default command is `bash`.
 - **Non-interactive** (command exec without those flags): capture stdout/stderr pipes; do **not** pass `-i`/`-t`.
 - Feature/config `containerEnv` on exec expands `${PATH}` / `$PATH` the same as create.
 

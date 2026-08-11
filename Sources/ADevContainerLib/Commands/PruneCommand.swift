@@ -19,6 +19,16 @@ public enum PruneCommand {
             runtime: runtime,
             picker: picker
         )
+
+        // A recovery helper is an active repair endpoint. Ordinary prune must not remove the
+        // endpoint, its workspace/config volumes, or its image; explicit container-only
+        // `delete --name` remains the operator-facing cleanup path.
+        if RecoveryHelper.isRecoveryHelper(info) {
+            StatusPrinter.status("Skipping recovery helper resources")
+            print("Skipped recovery helper \(info.id) and referenced resources")
+            return 0
+        }
+
         let target = PruneTarget(
             container: info,
             expectedContainerName: info.name,

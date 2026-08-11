@@ -177,7 +177,11 @@ When `features` is absent or empty, create MUST continue to use the config `imag
 
 **MUST NOT** depend on Rosetta being installed: Features builds rely on `build.rosetta=false` (native arm64 BuildKit).
 
-Reuse running / start stopped: MUST NOT re-fetch/rebuild features (already baked into the image on create). Config hash (including features) still drives recreate when features change.
+Reuse running / start stopped: MUST NOT re-fetch/rebuild features (already baked into the image on create). Config hash (including features) still drives `config_hash_mismatch` on `up` when features change; force recreate is `rebuild` only.
+
+**Rebuild reuse clause**
+
+On `rebuild`, the same derived-tag identity material applies: when the rebuilt config's base image + features material is **unchanged**, the existing derived tag `adev-{base}:{hash12}` MUST be reused (no `container build`), making the unchanged config cheap; when the material **changed**, the derived image MUST be built before the old container is deleted (pre-delete ordering gate). Feature option changes alter the material and MUST produce a different derived tag, engaging the build path.
 
 #### Scenario: Create uses derived image after build
 - Given a config with `image` and one OCI feature
@@ -212,7 +216,17 @@ Reuse running / start stopped: MUST NOT re-fetch/rebuild features (already baked
 #### Scenario: Feature option change changes config identity
 - Given the same feature ref but different options object
 - When config hashes (and derived tags) are computed
-- Then the hashes/tags differ (recreate path engages; no silent wrong-feature reuse)
+- Then the hashes/tags differ (`up` hash-mismatch / `rebuild` build path; no silent wrong-feature reuse)
+
+#### Scenario: rebuild with unchanged features material reuses derived tag
+- Given a managed container created from a config with OCI features and an existing derived tag `adev-{base}:{hash12}` for the same material
+- When the user runs `adevcontainer rebuild --name <that-name>` without changing feature material
+- Then no `container build` is invoked and the new container is created from the existing derived tag
+
+#### Scenario: rebuild with changed features material builds before delete
+- Given a managed container whose edited config changes a feature ref or option
+- When the user runs `adevcontainer rebuild --name <that-name>`
+- Then a new derived image is built (new tag material), the build completes **before** the old container is deleted, and the new container is created from the new derived image
 
 ---
 

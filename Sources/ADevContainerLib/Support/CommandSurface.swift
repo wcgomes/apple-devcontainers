@@ -85,11 +85,6 @@ public enum CommandSurface {
                 i += 1
                 continue
             }
-            if a == "--recreate" {
-                flags.insert("recreate")
-                i += 1
-                continue
-            }
             if a == "--skip-pull" {
                 flags.insert("skip-pull")
                 i += 1
@@ -153,6 +148,15 @@ public enum CommandSurface {
         return ParsedArgs(workspace: workspace, name: name, flags: flags, passthrough: passthrough)
     }
 
+    /// Subcommand targeted by a `help <command>` invocation, or nil when `args`
+    /// is not `help <command>` (including bare `help`, which the caller routes to
+    /// main usage). `help <command>` MUST print the same command-specific help as
+    /// `<command> --help` (both go through `printCommandHelp` in the CLI entry).
+    public static func resolveHelpSubcommand(args: [String]) -> String? {
+        guard args.first == "help", args.count >= 2 else { return nil }
+        return args[1]
+    }
+
     /// `-w` / `--workspace` is only valid for `up` (bind-mode create).
     public static func enforceWorkspaceGate(subcommand: String, parsed: ParsedArgs) throws {
         if parsed.workspace != nil, subcommand != "up" {
@@ -192,7 +196,6 @@ public enum CommandSurface {
           -w, --workspace <path>   Workspace root for `up` only (default: cwd)
           --name <container>       Managed container name/id (exec/start/stop/delete/prune/rebuild/inspect)
           --json                   Machine-readable output (up, list, rebuild)
-          --recreate               Delete and recreate on up if exists / hash mismatch
           --skip-pull              Skip image pull on up/clone/rebuild
           --vscode                 Best-effort open VS Code; gates postAttach + extensions apply
           -h, --help               Show help
@@ -232,6 +235,11 @@ public enum CommandSurface {
             config fails with config_not_found and the old container is untouched.
           - Container-only delete of the old container; workspace and config named
             volumes are reused via ensureVolume (never deleted/recreated).
+          - Config hash mismatch on up → config_hash_mismatch → rebuild (sole force-recreate).
+          - Hard post-delete failure recovery (create/start/onCreate…postStart):
+            bind = host stamped config; clone-origin volume = Alpine helper + temp.
+            TTY: error then "Open the recovery editor now? [Y/n]" (default Y);
+            non-TTY/--json: retain + retry commands; named rebuild skips the prompt.
 
         Exit codes: 0 success, non-zero failure
         """
@@ -242,7 +250,7 @@ public enum CommandSurface {
         switch subcommand {
         case "up":
             return """
-            adevcontainer up [-w <path>] [--json] [--recreate] [--skip-pull] [--vscode]
+            adevcontainer up [-w <path>] [--json] [--skip-pull] [--vscode]
 
             Create/start/reuse a bind-mode workspace container for a host checkout.
             -w/--workspace defaults to the current directory. Stamps managed labels
@@ -334,7 +342,8 @@ public enum CommandSurface {
 
             Force-recreate a managed container (bind from up, volume from clone): a forced
             recreate from the container's CURRENT devcontainer.json. Selection via
-            --name / auto-single / interactive picker (same as start/delete).
+            --name / auto-single / interactive picker (same as start/delete). -w is
+            usage error (up only). Sole force-recreate path (up never force-recreates).
 
             The old container is deleted only after the config read, host requirements
             preflight, and Features work all succeed; any failure before that leaves the
@@ -342,6 +351,15 @@ public enum CommandSurface {
             same workspace volume (volume mode) — volume data is preserved, never
             re-cloned or re-created. Container-only delete: workspace *-ws and config
             named volumes are reused via ensureVolume.
+
+            Recovery (hard post-delete failures only: create/start/onCreate…postStart;
+            not pre-delete, not settings/open/postAttach soft-fail):
+              - Bind: edit host stamped devcontainer.json (no helper/Alpine/volume write).
+              - Clone-origin volume: Alpine helper + secure temp + atomic write to *-ws.
+              - TTY (no --json): print error → "Open the recovery editor now? [Y/n]"
+                (default Y). Decline retains state + rebuild --name retry.
+              - Non-TTY/--json: no prompt/editor; structured retain + edit/retry/cleanup.
+              - Named rebuild --name retry skips the Y/n prompt.
 
             --vscode: best-effort open VS Code on the resolved remote folder after
             success (same soft-fail/postAttach + extensions gate as up --vscode).

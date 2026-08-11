@@ -24,8 +24,8 @@ The CLI MUST admit and honor these lifecycle properties in addition to existing 
 - Then the CLI runs hooks in order **onCreate → updateContent → postCreate → postStart** via exec and `up` succeeds
 
 #### Scenario: Reuse running skips lifecycle
-- Given a matching container already running
-- When the user runs `up` without recreate
+- Given a matching container already running (matching config hash)
+- When the user runs `up` (no rebuild)
 - Then no lifecycle hook is executed and `up` succeeds
 
 #### Scenario: Start stopped runs postStart only

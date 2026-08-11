@@ -3,7 +3,6 @@ import Foundation
 public struct UpOptions: Sendable {
     public var workspacePath: String
     public var jsonOutput: Bool
-    public var recreate: Bool
     public var skipPull: Bool
     /// Best-effort open of VS Code on the remote workspace after lifecycle success.
     public var openVSCode: Bool
@@ -11,13 +10,11 @@ public struct UpOptions: Sendable {
     public init(
         workspacePath: String,
         jsonOutput: Bool = false,
-        recreate: Bool = false,
         skipPull: Bool = false,
         openVSCode: Bool = false
     ) {
         self.workspacePath = workspacePath
         self.jsonOutput = jsonOutput
-        self.recreate = recreate
         self.skipPull = skipPull
         self.openVSCode = openVSCode
     }
@@ -51,18 +48,12 @@ public enum UpCommand {
         if let existing {
             let existingHash = existing.labels[ContainerIdentity.labelConfigHash]
             if let existingHash, existingHash != resolved.configHash {
-                if options.recreate {
-                    try runtime.delete(nameOrId: existing.id, force: true)
-                } else {
-                    throw CLIError(
-                        code: CLIErrorCode.configHashMismatch,
-                        property: ContainerIdentity.labelConfigHash,
-                        message: "Existing container config hash does not match current config",
-                        hint: "Run 'adevcontainer up --recreate' to delete and recreate, or 'adevcontainer delete' first"
-                    )
-                }
-            } else if options.recreate {
-                try runtime.delete(nameOrId: existing.id, force: true)
+                throw CLIError(
+                    code: CLIErrorCode.configHashMismatch,
+                    property: ContainerIdentity.labelConfigHash,
+                    message: "Existing container config hash does not match current config",
+                    hint: "Run 'adevcontainer rebuild' (managed selection: --name or auto) to force-recreate from current config"
+                )
             } else if existing.isRunning {
                 // Reuse running: no feature fetch/build; settings repair on marker drift; postAttach gated after open.
                 StatusPrinter.status("Reusing running container \(existing.name)")
@@ -104,7 +95,7 @@ public enum UpCommand {
             }
         }
 
-        // Create path (missing or just deleted for recreate)
+        // Create path (missing container)
         if !resolved.mountPromotions.isEmpty {
             let warning = MountNormalizer.warningMessage(promotions: resolved.mountPromotions) + "\n"
             FileHandle.standardError.write(Data(warning.utf8))

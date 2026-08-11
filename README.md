@@ -1,7 +1,7 @@
 # Apple Dev Container CLI (adevcontainer)
 
 [![CI](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml/badge.svg)](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-345%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
+[![tests](https://img.shields.io/badge/tests-528%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Native Swift CLI that reads `devcontainer.json` and runs dev containers on **Apple `container`**.
@@ -88,7 +88,21 @@ Uses your Mac git credentials (HTTPS helpers / SSH agent), confirms author ident
 
 ```bash
 adevcontainer rebuild --name <name>   # or auto-single / interactive picker
+adevcontainer rebuild --name <name> --vscode
+adevcontainer rebuild --name <name> --json
 ```
+
+There is **no** `up --recreate` (unknown flag). Config hash mismatch on `up` → `config_hash_mismatch`; remediate with `rebuild`.
+
+**Rebuild recovery** (hard post-delete failures only — create/start/`onCreate`…`postStart`; not pre-delete, not settings/open/`postAttach` soft-fail):
+
+| Mode | Edit target |
+|------|-------------|
+| Bind (`up`) | Host stamped `devcontainer.json` (no helper, no Alpine, no volume write) |
+| Clone-origin volume | Alpine helper + secure temp + atomic write into `*-ws` |
+
+- **TTY** (no `--json`): print structured error → `Open the recovery editor now? [Y/n]` (default **Y**). Decline/EOF retains recovery state and prints `rebuild --name` retry. Named `rebuild --name` retries skip the Y/n prompt.
+- **Non-TTY / `--json`**: no prompt, no editor; structured retain + exact edit/retry/cleanup commands.
 
 ### Config and workspace behavior
 
@@ -96,23 +110,23 @@ Config: `.devcontainer/devcontainer.json`, else `.devcontainer.json`.
 
 - **`up`** bind-mounts the host folder. **`clone`** uses volume `adev-*-ws` (no host checkout to edit).
 - **`rebuild`** force-recreates from the current config: bind keeps the container name, volume mode reuses the same `adev-*-ws` workspace volume — data preserved, never re-cloned.
-- Config hash mismatch → `up` errors; use `--recreate`.
-- **`delete`** = container only. **`prune`** = container + named volumes (including clone `*-ws`) + config image. Never deletes host bind paths.
+- Config hash mismatch → `up` errors with `config_hash_mismatch`; run `adevcontainer rebuild` (managed selection: `--name` or auto). No `--recreate`.
+- **`delete`** = container only. **`prune`** = container + named volumes (including clone `*-ws`) + config image. Never deletes host bind paths. Ordinary `prune` skips marked recovery helpers.
 - Progress on **stderr** (`==> …`). `ADEVCONTAINER_QUIET=1` silences it. `--json` keeps stdout clean.
 
 ### Lifecycle hooks
 
-Fresh create (`up` or `clone`, after the tree exists):
+Fresh create (`up`, `clone`, or `rebuild` after the tree exists / volume reused):
 
 `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand`
 
 | Path | Hooks |
 |------|--------|
-| Fresh create | full order; container deleted if any fail |
+| Fresh create (`up` / `clone` / `rebuild`) | full order; container deleted if any fail (`rebuild`: new container only; volumes preserved) |
 | Reuse running | none |
 | `up` start stopped | `postStartCommand` only |
 | `start` (managed) | none |
-| `postAttachCommand` | runs only after successful `--vscode` open; otherwise skipped (status when present); failure fails command, keeps container |
+| `postAttachCommand` | runs only after successful `--vscode` open on `up`/`start`/`clone`/`rebuild`; otherwise skipped (status when present); failure fails command, keeps container |
 
 ### runArgs allowlist
 
@@ -131,9 +145,9 @@ Mapped onto `container create` (empty/`[]` OK; `=VALUE` or two-token):
 
 ### hostRequirements
 
-Preflight on **`up` and `clone`** parses `memory` (`8gb` / `8192mb`) and `cpus`:
+Preflight on **`up`**, **`clone`**, and **`rebuild`** parses `memory` (`8gb` / `8192mb`) and `cpus`:
 
-- **Fail `up` / `clone`** on capacity shortfall or unreadable host
+- **Fail** the command on capacity shortfall or unreadable host (`rebuild`: before the old container is deleted)
 - When host OK, pass requested limits to `container create` (`-m`/`-c`); absent → no limit flags
 - **Warn** that `gpu` is unsupported (does not fail alone)
 - **Fail** on unparseable values or unknown keys
@@ -145,6 +159,7 @@ Top-level `features` map (ref → options) on **`up` / `clone` / `rebuild`**. Bu
 - **OCI** — e.g. `ghcr.io/devcontainers/features/node:1`
 - **Local path** — `./…`, `../…`, absolute, or `file://…` (relative to **workspace root**; needs `devcontainer-feature.json` + `install.sh`)
 - **Volume-mode `rebuild`** fetches OCI features only: the host fetcher (`DefaultFeatureFetcher`) and local-path feature refs inside the workspace volume are unsupported there and fail cleanly before the old container is deleted (bind-mode `rebuild` keeps `up` behavior)
+- **Derived-tag reuse** on `rebuild`: unchanged base image + features material reuses `adev-{base}:{hash12}` (no `container build`)
 - **Forever-reject:** refs containing `docker-in-docker` / `docker-outside-of-docker` / `docker-from-docker`, or feature metadata with `privileged` / `securityOpt`
 - **Rosetta / BuildKit:** if prompted once to set `build.rosetta=false`, accept — or set `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1` for CI
 
@@ -152,7 +167,7 @@ Top-level `features` map (ref → options) on **`up` / `clone` / `rebuild`**. Bu
 
 Prerequisites: VS Code with the [Remote - Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) installed (required for `--vscode`) and a discoverable `code` CLI.
 
-Pass **`--vscode`** on `up`, `start`, or `clone` to open a new VS Code window on the remote workspace folder.
+Pass **`--vscode`** on `up`, `start`, `clone`, or `rebuild` to open a new VS Code window on the remote workspace folder.
 
 - Runs config + feature **`postAttachCommand`** only after a successful open. Without `--vscode`, or if open soft-fails, postAttach is skipped.
 - Soft-fail: missing VS Code/`code` → warn on stderr; container still succeeds.
@@ -160,7 +175,7 @@ Pass **`--vscode`** on `up`, `start`, or `clone` to open a new VS Code window on
 
 **Config-file `customizations.vscode`:**
 
-- **`settings`** — applied into the container on create (`up`/`clone`); not gated on `--vscode`
+- **`settings`** — applied into the container on create-path (`up`/`clone`/`rebuild`); not gated on `--vscode`
 - **`extensions`** — installed only after a successful `--vscode` open; dependency extensions installed automatically. Without `--vscode`, the CLI does not auto-install extensions
 - Apply failures warn on stderr but do not fail the command
 - After first extension install you may need **Developer: Reload Window** once

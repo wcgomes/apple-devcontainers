@@ -28,43 +28,164 @@ public enum RebuildCommand {
         picker: InteractivePicker = .default,
         localEnv: [String: String] = ProcessInfo.processInfo.environment,
         hostResources: any HostResourceProviding = SystemHostResourceInfo(),
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        isTTY: Bool = AppleContainerConfig.stdinIsTTY(),
+        recoveryEditor: RecoveryEditor? = nil,
+        openEditorPrompt: RecoveryOpenEditorPrompt = .default
     ) throws -> RebuildResult {
-        let selected = try ManagedContainers.resolveSelection(
-            name: options.name,
+        try runInternal(
+            options: options,
             runtime: runtime,
-            picker: picker
+            picker: picker,
+            localEnv: localEnv,
+            hostResources: hostResources,
+            fileManager: fileManager,
+            isTTY: isTTY,
+            recoveryEditor: recoveryEditor,
+            openEditorPrompt: openEditorPrompt
         )
+    }
+
+    private static func runInternal(
+        options: RebuildOptions,
+        runtime: AppleContainerRuntime,
+        picker: InteractivePicker,
+        localEnv: [String: String],
+        hostResources: any HostResourceProviding,
+        fileManager: FileManager,
+        recovery: RecoveryOrchestrator.Prepared? = nil,
+        recoveryHelperID: String? = nil,
+        /// Same-process bind recovery retry: reuse stamps without requiring a live container.
+        selectedOverride: ContainerInfo? = nil,
+        allowRecovery: Bool = true,
+        isTTY: Bool = AppleContainerConfig.stdinIsTTY(),
+        recoveryEditor: RecoveryEditor? = nil,
+        openEditorPrompt: RecoveryOpenEditorPrompt = .default
+    ) throws -> RebuildResult {
+        let selected: ContainerInfo
+        if let selectedOverride {
+            selected = selectedOverride
+        } else {
+            do {
+                selected = try ManagedContainers.resolveSelection(
+                    name: options.name,
+                    runtime: runtime,
+                    picker: picker
+                )
+            } catch let error as CLIError where error.code == CLIErrorCode.containerNotFound {
+                // Named bind recovery retry after non-TTY retention: container was removed;
+                // resume from retained stamps and the (already edited) host stamped path.
+                if let name = options.name,
+                   let resume = try BindRecoveryResume.load(name: name, fileManager: fileManager)
+                {
+                    selected = BindRecoveryResume.containerInfo(from: resume)
+                } else {
+                    throw error
+                }
+            }
+        }
         let labels = selected.labels
         let isVolumeMode = labels[ContainerIdentity.labelWorkspaceMode]
             == ContainerIdentity.workspaceModeVolume
+        let bindRecoveryEligible = RecoveryOrchestrator.isBindEligible(labels: labels)
+        var recoveryContext = recovery
+        var recoveryEndpointID = recoveryHelperID
+        var crossedDeleteBoundary = false
+        defer {
+        if !crossedDeleteBoundary, let recoveryContext {
+                if recoveryEndpointID == nil {
+                    try? recoveryContext.session.cleanup()
+                }
+            }
+        }
 
         // ═══════════════════════════ PHASE A (non-destructive gate) ═══════════════════════════
 
         // Volume mode: the config lives in the volume; a stopped container cannot cat it.
         // Bare runtime start (no lifecycle hooks) is the only pre-delete runtime action
-        // allowed on the old container.
+        // allowed on the old container. Named recovery retry also needs the helper up before
+        // apply/write — do not run recovery apply above this gate.
         if isVolumeMode, !selected.isRunning {
             StatusPrinter.status("Starting container")
             try runtime.start(nameOrId: selected.id)
         }
 
+        // A later named retry uses the retained helper and session. Validate both identities and
+        // write/edit through the helper before the normal strict config read or helper delete gate.
+        // TTY (no --json): open the editor first so a retained broken config is fixed before recreate.
+        // Non-TTY / --json: apply the current temp bytes (operator already edited offline).
+        // openRetry/apply also bounce Apple zombie helpers (list=running, exec rejected).
+        if recoveryContext == nil, RecoveryHelper.isRecoveryHelper(selected) {
+            let opened = try RecoveryOrchestrator.openRetry(
+                helper: selected,
+                runtime: runtime,
+                fileManager: fileManager,
+                pullIfMissing: !options.skipPull
+            )
+            recoveryContext = opened
+            recoveryEndpointID = selected.id
+            try RecoveryOrchestrator.applyNamedRetryEdit(
+                prepared: opened,
+                helperID: selected.id,
+                selectedName: selected.name,
+                runtime: runtime,
+                options: options,
+                localEnv: localEnv,
+                isTTY: isTTY,
+                editor: recoveryEditor
+            )
+        }
+
         // Strict read of the CURRENT config from stamps. Any miss (config_not_found /
         // config_parse) fails here with the old container untouched (strict mode throws;
         // the guard is defensive only).
-        guard let resolvedConfig = try ConfigReader.read(
-            labels: labels,
-            containerId: selected.id,
-            runtime: runtime,
-            localEnv: localEnv,
-            fileManager: fileManager,
-            mode: .strict
-        ) else {
+        let volumeRead: ResolvedVolumeConfigRead?
+        let resolvedConfig: ResolvedDevContainerConfig
+        if isVolumeMode {
+            volumeRead = try ConfigReader.readVolumeWithRaw(
+                labels: labels,
+                containerId: selected.id,
+                runtime: runtime,
+                fileManager: fileManager
+            )
+            resolvedConfig = volumeRead!.config
+        } else {
+            volumeRead = nil
+            guard let config = try ConfigReader.read(
+                labels: labels,
+                containerId: selected.id,
+                runtime: runtime,
+                localEnv: localEnv,
+                fileManager: fileManager,
+                mode: .strict
+            ) else {
+                throw CLIError(
+                    code: CLIErrorCode.configNotFound,
+                    property: ContainerIdentity.labelConfigFile,
+                    message: "Managed container has no readable devcontainer config",
+                    hint: "Recreate the container with 'adevcontainer up' or 'adevcontainer clone'"
+                )
+            }
+            resolvedConfig = config
+        }
+
+        if recoveryContext == nil, RecoveryHelper.isEligible(labels: labels), let volumeRead {
+            // This is deliberately before host/Features work and before the old-container
+            // delete. Preparation failures therefore leave the selected container untouched.
+            recoveryContext = try RecoveryOrchestrator.prepare(
+                container: selected,
+                rawConfig: volumeRead.raw,
+                runtime: runtime,
+                fileManager: fileManager,
+                pullIfMissing: !options.skipPull
+            )
+        }
+
+        if recoveryContext == nil && isVolumeMode && RecoveryHelper.isEligible(labels: labels) {
             throw CLIError(
-                code: CLIErrorCode.configNotFound,
-                property: ContainerIdentity.labelConfigFile,
-                message: "Managed container has no readable devcontainer config",
-                hint: "Recreate the container with 'adevcontainer up' or 'adevcontainer clone'"
+                code: CLIErrorCode.recoveryUnavailable,
+                message: "Recovery config could not be retained",
+                hint: "The old container was not deleted"
             )
         }
 
@@ -144,7 +265,7 @@ public enum RebuildCommand {
         let configVolumeNames = effectiveConfig.mounts
             .filter { $0.type == .volume }
             .map(\.source)
-        var newLabels = labels
+        var newLabels = RecoveryHelper.normalContainerLabels(labels)
         newLabels[ContainerIdentity.labelConfigHash] = configHash
         newLabels[ContainerIdentity.labelWorkspaceFolder] = effectiveConfig.workspaceFolder
         newLabels[ContainerIdentity.labelRemoteUser] = effectiveConfig.effectiveUser ?? ""
@@ -154,11 +275,58 @@ public enum RebuildCommand {
             newLabels[ContainerIdentity.labelConfigVolumes] = configVolumeNames.joined(separator: ",")
         }
 
+        // A retained helper is only a write endpoint for the exact pre-existing workspace
+        // volume. Recheck before deleting it; recovery must never manufacture a blank volume.
+        if isVolumeMode, let recovery = recoveryContext {
+            let present: Bool
+            do {
+                present = try runtime.volumeExists(
+                    stampedWorkspaceVolume(labels),
+                    requireObjectEntries: true
+                )
+            } catch {
+                throw RecoveryOrchestrator.retainedUnavailableFailure(
+                    session: recovery.session,
+                    helperID: recoveryEndpointID ?? selected.id,
+                    selectedName: selected.name,
+                    failure: error,
+                    environment: localEnv,
+                    helperAvailable: recoveryEndpointID != nil
+                )
+            }
+            guard present else {
+                let missing = CLIError(
+                    code: CLIErrorCode.recoveryUnavailable,
+                    message: "The retained recovery workspace volume is no longer present",
+                    hint: "Recovery refuses to create a blank replacement volume"
+                )
+                throw RecoveryOrchestrator.retainedUnavailableFailure(
+                    session: recovery.session,
+                    helperID: recoveryEndpointID ?? selected.id,
+                    selectedName: selected.name,
+                    failure: missing,
+                    environment: localEnv,
+                    helperAvailable: recoveryEndpointID != nil
+                )
+            }
+        }
+
         // ═══════════════════════════ PHASE B (destructive create path) ═══════════════════════════
 
         // Container-only delete of the OLD container (never volumes/images).
-        StatusPrinter.status("Deleting container \(selected.id)")
-        try runtime.delete(nameOrId: selected.id, force: true)
+        // Bind recovery resume / same-process retry may already have no live container.
+        if let existing = try runtime.findByName(selected.id)
+            ?? (selected.name != selected.id ? try runtime.findByName(selected.name) : nil)
+        {
+            StatusPrinter.status("Deleting container \(existing.id)")
+            try runtime.delete(nameOrId: existing.id, force: true)
+        } else if selectedOverride != nil || bindRecoveryEligible {
+            StatusPrinter.status("Old container already removed; continuing rebuild")
+        } else {
+            StatusPrinter.status("Deleting container \(selected.id)")
+            try runtime.delete(nameOrId: selected.id, force: true)
+        }
+        crossedDeleteBoundary = true
 
         let request: CreateRequest
         if isVolumeMode {
@@ -186,11 +354,111 @@ public enum RebuildCommand {
 
         // create() ensureVolumes list-then-reuse workspace/config named volumes
         // (never delete; missing config volumes created on demand).
+        do {
+            if isVolumeMode {
+                if let recovery = recoveryContext {
+                    let present: Bool
+                    do {
+                        present = try runtime.volumeExists(
+                            stampedWorkspaceVolume(labels),
+                            requireObjectEntries: true
+                        )
+                    } catch {
+                        throw RecoveryOrchestrator.retainedUnavailableFailure(
+                            session: recovery.session,
+                            helperID: recoveryEndpointID ?? selected.id,
+                            selectedName: selected.name,
+                            failure: error,
+                            environment: localEnv,
+                            helperAvailable: false
+                        )
+                    }
+                    guard present else {
+                        let missing = CLIError(
+                            code: CLIErrorCode.recoveryUnavailable,
+                            message: "The retained recovery workspace volume disappeared before replacement create",
+                            hint: "Recovery refuses to create a blank replacement volume"
+                        )
+                        throw RecoveryOrchestrator.retainedUnavailableFailure(
+                            session: recovery.session,
+                            helperID: recoveryEndpointID ?? selected.id,
+                            selectedName: selected.name,
+                            failure: missing,
+                            environment: localEnv,
+                            helperAvailable: false
+                        )
+                    }
+                } else {
+                    try runtime.ensureVolume(name: stampedWorkspaceVolume(labels))
+                }
+            }
+            for mount in effectiveConfig.mounts where mount.type == .volume {
+                try runtime.ensureVolume(name: mount.source)
+            }
+        } catch let error as CLIError where error.recovery != nil {
+            throw error
+        } catch {
+            StatusPrinter.warning("Old container '\(selected.name)' was already removed; rebuild failed while ensuring named volumes")
+            try? recoveryContext?.session.cleanup()
+            throw CLIError(
+                code: CLIErrorCode.runtimeFailed,
+                property: "volumes",
+                message: "Failed to ensure rebuild volumes: \(error.localizedDescription)",
+                hint: "Existing volumes were not deleted or recreated"
+            )
+        }
         StatusPrinter.status("Creating container \(selected.name)")
         let id: String
         do {
-            id = try runtime.create(request: request)
+            id = try runtime.create(request: request, ensureVolumes: false)
         } catch {
+            if allowRecovery, let recovery = recoveryContext {
+                return try RecoveryOrchestrator.recover(
+                    prepared: recovery,
+                    failure: .init(error: error),
+                    selected: selected,
+                    runtime: runtime,
+                    options: options,
+                    localEnv: localEnv,
+                    fileManager: fileManager,
+                    isTTY: isTTY,
+                    editor: recoveryEditor,
+                    openEditorPrompt: openEditorPrompt,
+                    retry: { helperID, session in
+                        try runInternal(
+                            options: options,
+                            runtime: runtime,
+                            picker: picker,
+                            localEnv: localEnv,
+                            hostResources: hostResources,
+                            fileManager: fileManager,
+                            recovery: recovery,
+                            recoveryHelperID: helperID,
+                            allowRecovery: false,
+                            isTTY: isTTY,
+                            recoveryEditor: recoveryEditor,
+                            openEditorPrompt: openEditorPrompt
+                        )
+                    }
+                )
+            }
+            if allowRecovery, bindRecoveryEligible {
+                StatusPrinter.status("Create failed; entering recovery")
+                return try offerBindRecovery(
+                    failure: .init(error: error),
+                    selected: selected,
+                    labels: labels,
+                    runtime: runtime,
+                    options: options,
+                    localEnv: localEnv,
+                    hostResources: hostResources,
+                    fileManager: fileManager,
+                    picker: picker,
+                    isTTY: isTTY,
+                    recoveryEditor: recoveryEditor,
+                    openEditorPrompt: openEditorPrompt
+                )
+            }
             StatusPrinter.warning("Old container '\(selected.name)' was already removed; rebuild failed before creating the new container")
             throw error
         }
@@ -199,6 +467,53 @@ public enum RebuildCommand {
         do {
             try runtime.start(nameOrId: id)
         } catch {
+            if allowRecovery, let recovery = recoveryContext {
+                return try RecoveryOrchestrator.recover(
+                    prepared: recovery,
+                    failure: .init(error: error, containerID: id),
+                    selected: selected,
+                    runtime: runtime,
+                    options: options,
+                    localEnv: localEnv,
+                    fileManager: fileManager,
+                    isTTY: isTTY,
+                    editor: recoveryEditor,
+                    openEditorPrompt: openEditorPrompt,
+                    retry: { helperID, _ in
+                        try runInternal(
+                            options: options,
+                            runtime: runtime,
+                            picker: picker,
+                            localEnv: localEnv,
+                            hostResources: hostResources,
+                            fileManager: fileManager,
+                            recovery: recovery,
+                            recoveryHelperID: helperID,
+                            allowRecovery: false,
+                            isTTY: isTTY,
+                            recoveryEditor: recoveryEditor,
+                            openEditorPrompt: openEditorPrompt
+                        )
+                    }
+                )
+            }
+            if allowRecovery, bindRecoveryEligible {
+                StatusPrinter.status("Start failed; entering recovery")
+                return try offerBindRecovery(
+                    failure: .init(error: error, containerID: id),
+                    selected: selected,
+                    labels: labels,
+                    runtime: runtime,
+                    options: options,
+                    localEnv: localEnv,
+                    hostResources: hostResources,
+                    fileManager: fileManager,
+                    picker: picker,
+                    isTTY: isTTY,
+                    recoveryEditor: recoveryEditor,
+                    openEditorPrompt: openEditorPrompt
+                )
+            }
             try? runtime.delete(nameOrId: id, force: true)
             StatusPrinter.warning("Old container '\(selected.name)' was already removed; rebuilt container deleted after start failure")
             throw error
@@ -228,9 +543,62 @@ public enum RebuildCommand {
                 runtime: runtime
             )
         } catch {
-            // runCreatePath already deletes the new container on hook exec failure;
-            // ensure it is gone for exec-level failures too.
-            try? runtime.delete(nameOrId: id, force: true)
+            // Delete-on-fail must run exactly once. runCreatePath already deletes the
+            // new container when a create-path hook exits non-zero; only an exec-level
+            // failure (the hook could not run at all) leaves it in place. Deleting an
+            // already-removed container a second time would stream a spurious runtime
+            // notFound error to stderr before the warning below.
+            if allowRecovery, let recovery = recoveryContext {
+                StatusPrinter.status("Create-path hook failed; entering recovery")
+                return try RecoveryOrchestrator.recover(
+                    prepared: recovery,
+                    failure: .init(error: error, containerID: id),
+                    selected: selected,
+                    runtime: runtime,
+                    options: options,
+                    localEnv: localEnv,
+                    fileManager: fileManager,
+                    isTTY: isTTY,
+                    editor: recoveryEditor,
+                    openEditorPrompt: openEditorPrompt,
+                    retry: { helperID, _ in
+                        try runInternal(
+                            options: options,
+                            runtime: runtime,
+                            picker: picker,
+                            localEnv: localEnv,
+                            hostResources: hostResources,
+                            fileManager: fileManager,
+                            recovery: recovery,
+                            recoveryHelperID: helperID,
+                            allowRecovery: false,
+                            isTTY: isTTY,
+                            recoveryEditor: recoveryEditor,
+                            openEditorPrompt: openEditorPrompt
+                        )
+                    }
+                )
+            }
+            if allowRecovery, bindRecoveryEligible {
+                StatusPrinter.status("Create-path hook failed; entering recovery")
+                return try offerBindRecovery(
+                    failure: .init(error: error, containerID: id),
+                    selected: selected,
+                    labels: labels,
+                    runtime: runtime,
+                    options: options,
+                    localEnv: localEnv,
+                    hostResources: hostResources,
+                    fileManager: fileManager,
+                    picker: picker,
+                    isTTY: isTTY,
+                    recoveryEditor: recoveryEditor,
+                    openEditorPrompt: openEditorPrompt
+                )
+            }
+            if (try? runtime.findByName(id)) != nil {
+                try? runtime.delete(nameOrId: id, force: true)
+            }
             StatusPrinter.warning("Old container '\(selected.name)' was already removed; rebuilt container deleted after hook failure")
             throw error
         }
@@ -242,14 +610,131 @@ public enum RebuildCommand {
             runtime: runtime
         )
 
-        return try finish(
+        let result: RebuildResult
+        do {
+            result = try finish(
+                options: options,
+                id: id,
+                name: selected.name,
+                config: effectiveConfig,
+                imagesLabels: labels,
+                isVolumeMode: isVolumeMode,
+                runtime: runtime
+            )
+        } catch {
+            // Open/postAttach failures are terminal non-recovery outcomes. Do not leak the
+            // prepared session after the delete boundary.
+            if let recoveryContext { try? recoveryContext.session.cleanup() }
+            throw error
+        }
+        if let recovery = recoveryContext {
+            if recoveryEndpointID != nil {
+                let expected = recovery.session.lastAppliedHash
+                let finalBytes: Data?
+                let readError: String?
+                do {
+                    finalBytes = try runtime.readFile(
+                        nameOrId: id,
+                        path: recovery.session.configPathInContainer
+                    )
+                    readError = nil
+                } catch {
+                    finalBytes = nil
+                    readError = error.localizedDescription
+                }
+                let actualHash = finalBytes.map { RecoveryConfigSession.sha256Hex($0) }
+                let verified = expected != nil && actualHash == expected
+                if !verified {
+                    let detail: String
+                    if expected == nil {
+                        detail = "missing last-applied hash on the recovery session"
+                    } else if let readError {
+                        detail = "final container config read failed: \(readError)"
+                    } else if let actualHash {
+                        detail = "hash mismatch expected=\(expected!) actual=\(actualHash)"
+                    } else {
+                        detail = "final container config was empty"
+                    }
+                    let verificationError = CLIError(
+                        code: CLIErrorCode.recoveryVerificationFailed,
+                        message: "The final container could not verify the recovered config (\(detail))",
+                        hint: "The secure recovery session was retained; no recovery helper remains"
+                    )
+                    throw RecoveryOrchestrator.finalVerificationFailure(
+                        session: recovery.session,
+                        selectedName: selected.name,
+                        failure: verificationError,
+                        environment: localEnv
+                    )
+                }
+            }
+            do {
+                try recovery.session.cleanup()
+            } catch {
+                throw RecoveryOrchestrator.retainedFailure(
+                    session: recovery.session,
+                    helperID: recoveryEndpointID ?? "not-created",
+                    selectedName: selected.name,
+                    failure: error,
+                    environment: localEnv
+                )
+            }
+        }
+        // Bind recovery resume is only needed while the managed container is missing.
+        try? BindRecoveryResume.cleanup(name: selected.name, fileManager: fileManager)
+        return result
+    }
+
+    /// Shared bind host-editor recovery entry used by create/start/create-path hard failures.
+    private static func offerBindRecovery(
+        failure: RecoveryOrchestrator.Failure,
+        selected: ContainerInfo,
+        labels: [String: String],
+        runtime: AppleContainerRuntime,
+        options: RebuildOptions,
+        localEnv: [String: String],
+        hostResources: any HostResourceProviding,
+        fileManager: FileManager,
+        picker: InteractivePicker,
+        isTTY: Bool,
+        recoveryEditor: RecoveryEditor?,
+        openEditorPrompt: RecoveryOpenEditorPrompt
+    ) throws -> RebuildResult {
+        StatusPrinter.warning(
+            "Old container '\(selected.name)' was already removed; entering bind recovery"
+        )
+        return try RecoveryOrchestrator.recoverBind(
+            labels: labels,
+            failure: failure,
+            selected: selected,
+            runtime: runtime,
             options: options,
-            id: id,
-            name: selected.name,
-            config: effectiveConfig,
-            imagesLabels: labels,
-            isVolumeMode: isVolumeMode,
-            runtime: runtime
+            localEnv: localEnv,
+            fileManager: fileManager,
+            isTTY: isTTY,
+            editor: recoveryEditor,
+            openEditorPrompt: openEditorPrompt,
+            retry: {
+                // Same-process retry: stamps only (container already gone). allowRecovery
+                // stays false so a nested hard failure returns to recoverBind's loop.
+                var retryOptions = options
+                if retryOptions.name == nil {
+                    retryOptions.name = selected.name
+                }
+                return try runInternal(
+                    options: retryOptions,
+                    runtime: runtime,
+                    picker: picker,
+                    localEnv: localEnv,
+                    hostResources: hostResources,
+                    fileManager: fileManager,
+                    selectedOverride: selected,
+                    allowRecovery: false,
+                    isTTY: isTTY,
+                    recoveryEditor: recoveryEditor,
+                    openEditorPrompt: openEditorPrompt
+                )
+            }
         )
     }
 

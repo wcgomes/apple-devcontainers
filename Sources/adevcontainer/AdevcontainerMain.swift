@@ -9,7 +9,9 @@ struct AdevcontainerMain {
             let code = try dispatch(args: args)
             exit(code)
         } catch let error as CLIError {
-            FileHandle.standardError.write(Data((error.formatted() + "\n").utf8))
+            FileHandle.standardError.write(
+                CLIErrorOutput.data(for: error, json: requestsJSON(args: args))
+            )
             exit(error.exitCode)
         } catch {
             FileHandle.standardError.write(Data(("error[internal]: \(error.localizedDescription)\n").utf8))
@@ -18,9 +20,20 @@ struct AdevcontainerMain {
     }
 
     static func dispatch(args: [String]) throws -> Int32 {
-        if args.isEmpty || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+        if args.isEmpty || args[0] == "-h" || args[0] == "--help" {
             printUsage()
             return args.isEmpty ? 1 : 0
+        }
+
+        // `help <command>` prints the same command-specific help as `<command> --help`
+        // (falling back to main usage for an unknown command); bare `help` is usage.
+        if args[0] == "help" {
+            if let subcommand = CommandSurface.resolveHelpSubcommand(args: args) {
+                printCommandHelp(subcommand)
+            } else {
+                printUsage()
+            }
+            return 0
         }
 
         let (subcommand, rest) = (args[0], Array(args.dropFirst()))
@@ -47,7 +60,6 @@ struct AdevcontainerMain {
             let opts = UpOptions(
                 workspacePath: defaultWorkspace,
                 jsonOutput: parsed.flags.contains("json"),
-                recreate: parsed.flags.contains("recreate"),
                 skipPull: parsed.flags.contains("skip-pull"),
                 openVSCode: parsed.flags.contains("vscode")
             )
@@ -188,5 +200,19 @@ struct AdevcontainerMain {
         } else {
             printUsage()
         }
+    }
+
+    private static func requestsJSON(args: [String]) -> Bool {
+        var afterDoubleDash = false
+        for argument in args.dropFirst() {
+            if argument == "--" {
+                afterDoubleDash = true
+                continue
+            }
+            if !afterDoubleDash, argument == "--json" {
+                return true
+            }
+        }
+        return false
     }
 }

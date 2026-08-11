@@ -139,7 +139,7 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(result.outcome, "success")
         try MiniTest.expect(mock.calls.contains { $0.arguments.first == "start" })
     }),
-    ("hashMismatchErrorsWithoutRecreate", {
+    ("hashMismatchErrorsHintsRebuild", {
         let workspace = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
         defer { try? FileManager.default.removeItem(at: workspace) }
         let mock = MockProcessRunner()
@@ -168,7 +168,24 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
                 localEnv: [:]
             )
         }) { error in
-            try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.configHashMismatch)
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.configHashMismatch)
+            let hint = err.hint ?? ""
+            try MiniTest.expect(hint.contains("adevcontainer rebuild"), "hint points to rebuild")
+            try MiniTest.expect(hint.contains("--name") || hint.contains("auto"), "hint mentions managed selection")
+            try MiniTest.expect(!hint.contains("--recreate"), "hint must not mention removed --recreate")
+        }
+    }),
+    ("upRecreateFlagIsUnknown", {
+        try MiniTest.expectThrows({
+            _ = try CommandSurface.parseArgs(["--recreate"])
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.usage)
+            try MiniTest.expect(
+                err.message.contains("Unknown option") && err.message.contains("--recreate"),
+                "unknown-flag fail-closed for removed --recreate"
+            )
         }
     })
 ]
@@ -522,6 +539,57 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(volBIdx! < imageIdx!)
         // Bind mounts must not trigger volume delete
         try MiniTest.expect(!argSeq.contains { $0.starts(with: ["volume", "delete"]) && $0.contains("/tmp") })
+    }),
+    ("pruneSkipsRecoveryHelperAndReferencedResources", {
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
+            ContainerIdentity.labelWorkspaceVolume: "adev-repo-ws",
+            ContainerIdentity.labelConfigVolumes: "config-a,config-b",
+            RecoveryHelper.recoveryMarkerLabel: RecoveryHelper.recoveryMarkerValue,
+            RecoveryHelper.recoverySessionLabel: "prune-session"
+        ]
+        let entry = MockProcessRunner.containerListJSON(
+            id: "recovery-helper",
+            state: "running",
+            labels: labels,
+            image: RecoveryHelper.helperImageReference
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            guard args.starts(with: ["list"]) else { return nil }
+            return ProcessResult(
+                exitCode: 0,
+                stdout: try! JSONSerialization.data(withJSONObject: [entry]),
+                stderr: Data()
+            )
+        }]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectEqual(
+            try PruneCommand.run(name: "recovery-helper", runtime: runtime),
+            0
+        )
+        try MiniTest.expect(
+            !mock.calls.contains { call in
+                ["delete", "volume", "image"].contains(call.arguments.first ?? "")
+            },
+            "prune does not delete the helper, referenced volumes, or image"
+        )
+
+        let deleteMock = MockProcessRunner()
+        deleteMock.handlers = [{ args in
+            if args.starts(with: ["list"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: try! JSONSerialization.data(withJSONObject: [entry]),
+                    stderr: Data()
+                )
+            }
+            return nil
+        }]
+        let deleteRuntime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: deleteMock)
+        try DeleteCommand.run(name: "recovery-helper", runtime: deleteRuntime)
+        try MiniTest.expect(deleteMock.calls.contains { $0.arguments.first == "delete" })
     }),
     ("pruneMissingManagedErrors", {
         let mock = MockProcessRunner()

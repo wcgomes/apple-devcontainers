@@ -179,14 +179,31 @@ nonisolated(unsafe) let configReaderTests: [(String, () throws -> Void)] = [
             return nil
         }
         _ = try ConfigReader.read(
-            labels: volumeLabels(configFile: "/cfg/devcontainer.json", workspaceFolder: "/workspaces/edge"),
+            labels: volumeLabels(configFile: "/workspaces/edge/cfg/devcontainer.json", workspaceFolder: "/workspaces/edge"),
             containerId: "c1",
             runtime: mockRuntime(mock),
             mode: .strict
         )
         let cat = catArgs(in: mock)
         try MiniTest.expect(cat != nil, "exec cat must be invoked")
-        try MiniTest.expectEqual(cat![3], "/cfg/devcontainer.json", "absolute path used verbatim")
+        try MiniTest.expectEqual(cat![3], "/workspaces/edge/cfg/devcontainer.json", "absolute path used verbatim")
+    }),
+
+    ("strictVolumeRejectsConfigPathEscapingWorkspace", {
+        for path in ["../../etc/passwd", "/etc/passwd"] {
+            let mock = MockProcessRunner()
+            try MiniTest.expectThrows({
+                _ = try ConfigReader.read(
+                    labels: volumeLabels(configFile: path, workspaceFolder: "/workspaces/edge"),
+                    containerId: "c1",
+                    runtime: mockRuntime(mock),
+                    mode: .strict
+                )
+            }, validate: { err in
+                try MiniTest.expectEqual(errorCode(err), CLIErrorCode.configNotFound)
+            })
+            try MiniTest.expect(mock.calls.isEmpty, "escaping config path never reaches exec")
+        }
     }),
 
     ("strictVolumeFallbackWorkspaceFolderMatchesLoader", {
@@ -230,6 +247,27 @@ nonisolated(unsafe) let configReaderTests: [(String, () throws -> Void)] = [
             )
         }, validate: { err in
             try MiniTest.expectEqual(errorCode(err), CLIErrorCode.configNotFound, "cat failure")
+        })
+    }),
+
+    ("strictVolumeCatTransportThrowIsConfigNotFoundWithStampedPath", {
+        let mock = MockProcessRunner()
+        mock.throwingHandler = { args in
+            guard args.first == "exec" else { return nil }
+            throw CLIError(code: CLIErrorCode.runtimeFailed, message: "transport failed")
+        }
+        let stamped = "/workspaces/edge/.devcontainer/devcontainer.json"
+        try MiniTest.expectThrows({
+            _ = try ConfigReader.read(
+                labels: volumeLabels(configFile: ".devcontainer/devcontainer.json", workspaceFolder: "/workspaces/edge"),
+                containerId: "c1",
+                runtime: mockRuntime(mock),
+                mode: .strict
+            )
+        }, validate: { err in
+            try MiniTest.expectEqual(errorCode(err), CLIErrorCode.configNotFound)
+            try MiniTest.expect((err as? CLIError)?.message.contains(stamped) == true)
+            try MiniTest.expect((err as? CLIError)?.message.contains("transport failed") != true)
         })
     }),
 
