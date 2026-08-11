@@ -2039,6 +2039,157 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         }
         try MiniTest.expect(sawStop)
         try MiniTest.expect(mock.calls.contains { $0.arguments.starts(with: ["builder", "stop"]) })
+    }),
+    ("workspaceOwnershipSkipsRootAndEmptyUser", {
+        let mock = MockProcessRunner()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try WorkspaceOwnership.ensureWorkspaceWritableByRemoteUser(
+            containerId: "ctr",
+            workspaceFolder: "/workspaces/app",
+            remoteUser: "root",
+            runtime: runtime
+        )
+        try WorkspaceOwnership.ensureWorkspaceWritableByRemoteUser(
+            containerId: "ctr",
+            workspaceFolder: "/workspaces/app",
+            remoteUser: nil,
+            runtime: runtime
+        )
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "ctr",
+            mounts: [MountSpec(type: .volume, source: "v", target: "/home/vscode/.config")],
+            remoteUser: "root",
+            runtime: runtime
+        )
+        try MiniTest.expect(mock.calls.isEmpty, "root/unset remoteUser must not exec chown")
+    }),
+    ("workspaceOwnershipNamedVolumesChownTargetsOnly", {
+        let mock = MockProcessRunner()
+        mock.defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let mounts = [
+            MountSpec(type: .bind, source: "/host/path", target: "/bound"),
+            MountSpec(type: .volume, source: "opencode-config", target: "/home/vscode/.config/opencode"),
+            MountSpec(type: .volume, source: "opencode-data", target: "/home/vscode/.local/share/opencode"),
+            MountSpec(type: .volume, source: "empty-target", target: "  ")
+        ]
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "ctr",
+            mounts: mounts,
+            remoteUser: "vscode",
+            runtime: runtime
+        )
+        let execs = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execs.count, 1)
+        let args = execs[0].arguments
+        try MiniTest.expect(args.contains("-u"))
+        try MiniTest.expect(args.contains("root"))
+        let script = args.last ?? ""
+        try MiniTest.expect(script.contains("chown -R"))
+        try MiniTest.expect(script.contains("/home/vscode/.config/opencode"))
+        try MiniTest.expect(script.contains("/home/vscode/.local/share/opencode"))
+        try MiniTest.expect(!script.contains("/bound"), "must not chown bind mount targets")
+        try MiniTest.expect(!script.contains("empty-target"))
+    }),
+    ("workspaceOwnershipNamedVolumesChownParentPaths", {
+        let mock = MockProcessRunner()
+        mock.defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "ctr",
+            mounts: [
+                MountSpec(
+                    type: .volume,
+                    source: "opencode-data",
+                    target: "/home/vscode/.local/share/opencode"
+                )
+            ],
+            remoteUser: "vscode",
+            runtime: runtime
+        )
+        let script = mock.calls.first(where: { $0.arguments.first == "exec" })?.arguments.last ?? ""
+        try MiniTest.expect(script.contains("chown -R \"$OWN\" \"$T\""), "recursive chown target only")
+        try MiniTest.expect(script.contains("dirname \"$T\""), "walk parents from target")
+        try MiniTest.expect(script.contains("chown \"$OWN\" \"$P\""), "non-recursive parent chown")
+        try MiniTest.expect(
+            script.contains("|/home|"),
+            "parent walk denylist must include /home"
+        )
+        try MiniTest.expect(
+            script.contains("[ \"$N\" = \"$P\" ]"),
+            "stop when dirname equals current path"
+        )
+        try MiniTest.expect(!script.contains("chown -R \"$OWN\" \"$P\""), "must not recurse parents")
+        // Generated script must not emit a literal chown of system top /home
+        // (only intermediate parents under the remote user home).
+        try MiniTest.expect(
+            !script.contains("chown \"$OWN\" \"/home\""),
+            "must not chown /home for paths under /home/vscode/..."
+        )
+    }),
+    ("workspaceOwnershipNamedVolumesSkipsReadonly", {
+        let mock = MockProcessRunner()
+        mock.defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let mounts = [
+            MountSpec(
+                type: .volume,
+                source: "ro-data",
+                target: "/home/vscode/.cache/ro-vol",
+                readonly: true
+            ),
+            MountSpec(
+                type: .volume,
+                source: "rw-data",
+                target: "/home/vscode/.local/share/opencode",
+                readonly: false
+            )
+        ]
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "ctr",
+            mounts: mounts,
+            remoteUser: "vscode",
+            runtime: runtime
+        )
+        let script = mock.calls.first(where: { $0.arguments.first == "exec" })?.arguments.last ?? ""
+        try MiniTest.expect(script.contains("/home/vscode/.local/share/opencode"))
+        try MiniTest.expect(
+            !script.contains("/home/vscode/.cache/ro-vol"),
+            "must not chown readonly volume targets"
+        )
+    }),
+    ("workspaceOwnershipNamedVolumesReadonlyOnlyNoop", {
+        let mock = MockProcessRunner()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "ctr",
+            mounts: [
+                MountSpec(
+                    type: .volume,
+                    source: "ro-only",
+                    target: "/data/ro",
+                    readonly: true
+                )
+            ],
+            remoteUser: "vscode",
+            runtime: runtime
+        )
+        try MiniTest.expect(mock.calls.isEmpty, "readonly-only volumes must not exec chown")
+    }),
+    ("workspaceOwnershipBindOnlyMountsNoop", {
+        let mock = MockProcessRunner()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "ctr",
+            mounts: [MountSpec(type: .bind, source: "/host", target: "/in")],
+            remoteUser: "vscode",
+            runtime: runtime
+        )
+        try MiniTest.expect(mock.calls.isEmpty, "bind-only mounts must not chown")
+    }),
+    ("workspaceOwnershipShellSingleQuoted", {
+        try MiniTest.expectEqual(WorkspaceOwnership.shellSingleQuoted("vscode"), "'vscode'")
+        try MiniTest.expectEqual(WorkspaceOwnership.shellSingleQuoted("a'b"), "'a'\\''b'")
     })
 ]
 

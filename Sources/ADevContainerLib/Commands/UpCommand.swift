@@ -198,6 +198,19 @@ public enum UpCommand {
             throw error
         }
 
+        // Config named volumes mount root:root; chown targets before hooks as connectionUser.
+        do {
+            try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+                containerId: id,
+                mounts: effectiveConfig.mounts,
+                remoteUser: connectionUser,
+                runtime: runtime
+            )
+        } catch {
+            try? runtime.delete(nameOrId: id, force: true)
+            throw error
+        }
+
         try LifecycleRunner.runCreatePath(
             containerId: id,
             config: effectiveConfig,

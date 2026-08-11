@@ -19,6 +19,7 @@ Facts that constrain the CLI. Not a full Apple container manual — only gaps th
 | Create identity | Name vs id often distinct | `create --name` **is** the id (`configuration.id`) |
 | Bind mounts | File or directory host source OK | **Directory sources only** — file binds rejected by runtime |
 | Workspace I/O | Often bind or named volume | **Bind:** host APFS via virtiofs. **Named volume:** `volume.img` ext4 via virtio-blk — better metadata I/O; rationale for `clone` volume-mode |
+| Named volume ownership | Engine/user mapping varies; often usable by non-root | Apple named volumes mount **root:root**. Non-root connection users get **EACCES** writing home-dir volumes (e.g. config mounts) and creating siblings under root-owned intermediate parents during postCreate/postStart. Product chowns via `WorkspaceOwnership` — see [Named volume ownership](#named-volume-ownership-rootroot) |
 | Host→guest copy | `docker cp` into bind or volume | **`container cp` into a named-volume mount can exit 0 without writing files** (silent no-op). Rootfs paths may still accept `cp`. Product clone populate avoids host→guest copy entirely (in-container `git clone`); tar-pipe utility remains if ever needed — see below |
 | Env PATH | Shell/`${PATH}` often expanded | Apple `container` does **not** expand `${PATH}` — product expands on **create and exec** (`expandEnvPathRefs`); exec-only miss breaks lifecycle (`sh -lc` needs `/bin` on PATH) |
 | Image USER / remoteUser | Docker inspect `Config.User`; metadata often on image labels | Apple image inspect: **`variants[].config.config.User`** (not top-level `Config`). Labels may carry `devcontainer.metadata` with `remoteUser`/`containerUser`. Official `mcr.microsoft.com/devcontainers/base:*` typically **OCI USER root** + metadata **`remoteUser: vscode`**. Product connection-user precedence + stamp: [cli-runtime-boundary — Connection user](../conventions/cli-runtime-boundary.md#connection-user-remoteuser--containeruser). **Inspect failure ≠ root**; never hardcode `vscode`/`node` |
@@ -42,6 +43,12 @@ Detail: [architecture.md](../architecture.md), [cli-runtime-boundary.md](../conv
 - Live non-TTY recovery E2E is opt-in via `ADEVCONTAINER_RECOVERY_E2E=1` (default suite skips). TTY editor path is manual-only; `ADEVCONTAINER_RECOVERY_E2E_TTY=1` only surfaces skip guidance.
 - Feature material for rebuild/recovery git inject on live rebuild must use a durable host path (e.g. `~/Library/Caches`). Apple `container build` effectively drops or breaks contexts under `/var/folders` temp.
 - `--skip-pull` suppresses adevcontainer's explicit image-pull step only. Apple `container` may still auto-fetch a missing image during `create`, so the flag does not guarantee fail-if-absent or runtime-level no-fetch behavior.
+
+### Named volume ownership (root:root)
+
+Apple named volumes present as **root:root** at the mount target. Without a product fix, a non-root connection user cannot write the volume (classic symptom: EACCES on home-dir `type=volume` mounts such as opencode-config) and cannot `mkdir` siblings under intermediate parents that `mkdir -p` created as root (e.g. `/home/vscode/.local` blocks `devcontainer-features` next to a volume target under `.local/share/…`).
+
+**Product:** after start, before create-path hooks, `WorkspaceOwnership` chowns `type=volume` mount targets to the connection user (non-root). Workspace named-volume path (`adev-*-ws`) remains a separate call (`ensureWorkspaceWritableByRemoteUser`); config mounts use the same helper (`ensureNamedVolumeMountsWritableByRemoteUser`). **Never** chown bind mounts on the host; **skip** readonly volume mounts. Intermediate parents get **non-recursive** chown; walk stops before system tops (`/`, `/home`, `/Users`, `/var`, …) so nested home paths become writable for siblings without chowning `/home`. Failure: hard-fail + delete on `up`/`clone`; soft-fail warn on `rebuild`. Detail: [cli-runtime-boundary — Named volumes / ownership](../conventions/cli-runtime-boundary.md#named-volumes-ensure--reuse--ownership).
 
 ### File bind mounts
 

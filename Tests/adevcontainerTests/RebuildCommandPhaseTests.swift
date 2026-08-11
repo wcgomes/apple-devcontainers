@@ -1420,6 +1420,36 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!execsRoot.contains { $0.contains("chown") }, "no chown for root remote user")
     }),
 
+    ("rebuildBindChownsConfigNamedVolumeMounts", {
+        // Bind rebuild with non-root + config volume: chown mount target even when remoteUser unchanged.
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "vscode",
+          "mounts": [
+            "source=opencode-config,target=/home/vscode/.config/opencode,type=volume"
+          ]
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "bind-vol",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path,
+                remoteUser: "vscode"
+            )
+        )
+        s.containers = [info]
+        s.install()
+        _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+        let chownScripts = s.mock.calls.compactMap { $0.arguments.last }.filter { $0.contains("chown -R") }
+        try MiniTest.expect(!chownScripts.isEmpty, "bind rebuild chowns config named volumes")
+        try MiniTest.expect(chownScripts.contains { $0.contains("/home/vscode/.config/opencode") })
+        try MiniTest.expect(!chownScripts.contains { $0.contains(ws.path) }, "must not chown host bind path")
+    }),
+
     ("rebuildHookOrderOnNewContainer", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
         {

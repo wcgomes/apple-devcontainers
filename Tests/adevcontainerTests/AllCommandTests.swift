@@ -180,6 +180,124 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
             try MiniTest.expect(hint.contains("adevcontainer rebuild"), "hint points to rebuild")
             try MiniTest.expect(hint.contains("--name") || hint.contains("auto"), "hint mentions managed selection")
         }
+    }),
+    ("upChownsNamedVolumeMountsForNonRoot", {
+        let bindDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("adev-up-bind-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: bindDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: bindDir) }
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "vscode",
+          "mounts": [
+            "source=opencode-config,target=/home/vscode/.config/opencode,type=volume",
+            "source=\(bindDir.path),target=/bound-host,type=bind"
+          ]
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
+                }
+                if args.starts(with: ["volume", "create"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
+            { args in
+                if args.first == "create" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("\(resolved.containerName)\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "start" || args.first == "exec" || args.first == "delete" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.remoteUser, "vscode")
+        let chownExecs = mock.calls.filter { call in
+            call.arguments.first == "exec"
+                && (call.arguments.last?.contains("chown -R") == true)
+        }
+        try MiniTest.expectEqual(chownExecs.count, 1, "exactly one named-volume chown exec")
+        let script = chownExecs[0].arguments.last ?? ""
+        try MiniTest.expect(script.contains("/home/vscode/.config/opencode"))
+        try MiniTest.expect(!script.contains("/bound-host"), "must not chown bind targets")
+        try MiniTest.expect(chownExecs[0].arguments.contains("root"))
+    }),
+    ("upSkipsNamedVolumeChownForRoot", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "root",
+          "mounts": [
+            "source=opencode-config,target=/root/.config/opencode,type=volume"
+          ]
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
+                }
+                if args.starts(with: ["volume", "create"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
+            { args in
+                if args.first == "create" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("\(resolved.containerName)\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "start" || args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        let chownExecs = mock.calls.filter { call in
+            call.arguments.first == "exec"
+                && (call.arguments.last?.contains("chown") == true)
+        }
+        try MiniTest.expect(chownExecs.isEmpty, "root connection user skips named-volume chown")
     })
 ]
 

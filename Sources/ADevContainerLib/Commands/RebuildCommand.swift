@@ -557,6 +557,20 @@ public enum RebuildCommand {
             }
         }
 
+        // Config named volumes mount root:root (bind and volume mode). Soft-fail like workspace.
+        do {
+            try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+                containerId: id,
+                mounts: effectiveConfig.mounts,
+                remoteUser: effectiveConfig.connectionUser,
+                runtime: runtime
+            )
+        } catch {
+            StatusPrinter.warning(
+                "Failed to chown named volume mounts for \(effectiveConfig.connectionUser ?? "remoteUser"): \(error.localizedDescription)"
+            )
+        }
+
         // Create-path hooks (delete-on-fail of the new container).
         do {
             try LifecycleRunner.runCreatePath(

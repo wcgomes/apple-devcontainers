@@ -148,12 +148,27 @@ Bind-mode `up` stamps the full managed label set including `workspace_mode=bind`
 
 Do not depend on Docker-style `ps --filter label=` as the primary discovery mechanism ([gaps](../domain/devcontainer-apple-gaps.md)).
 
-## Named volumes (ensure / reuse)
+## Named volumes (ensure / reuse / ownership)
 
 - Before create, **ensureVolume** for each config named volume: **list first**. Sources must already have `${devcontainerId}` expanded (see above) — e.g. `adev-proj-abc123def456-shellhistory`, not a literal `${…}` token.
 - If the volume already exists → status “already exists — reusing” and mount it; **never fail `up`/`clone` only because a config volume exists**.
 - If missing → create, then mount.
 - **Clone workspace volume:** if `adev-*-ws` already exists → **delete + create** (fresh tree), then mount as the workspace root (not a host bind).
+
+### Ownership (`WorkspaceOwnership`)
+
+Apple named volumes mount **root:root** ([gaps](../domain/devcontainer-apple-gaps.md#named-volume-ownership-rootroot)). Helper: `WorkspaceOwnership` — shared container-side chown as root after start, **before create-path hooks**.
+
+| Path | Behavior |
+|------|----------|
+| Config `type=volume` mounts | `ensureNamedVolumeMountsWritableByRemoteUser` on `up` / `clone` / `rebuild` (bind and volume mode). Targets only; skips binds, readonly volumes, empty targets, root/unset user |
+| Workspace volume (`adev-*-ws`) | Separate `ensureWorkspaceWritableByRemoteUser` on `clone` (always after start); on `rebuild` volume-mode only when effective connection user **differs** from stamped `remote_user` (data already owned otherwise) |
+| Timing | After successful start; before populate (`clone`) and before create-path hooks |
+| Failure | **`up`/`clone`:** hard-fail + delete container (clone also deletes `*-ws`). **`rebuild`:** soft-fail — warn stderr, continue |
+
+**Chown script (per target):** `mkdir -p` target → `chown -R user[:user]` target → walk `dirname` parents with **non-recursive** `chown` until a system-top denylist stop (`/`, `/home`, `/Users`, `/var`, `/usr`, `/opt`, `/tmp`, `/root`, `/etc`, `/mnt`, `/media`, `/dev`, `/proc`, `/sys`, `/run`, `/boot`, `/lib`, `/lib64`, `/bin`, `/sbin`). Makes nested home mounts writable for siblings (e.g. `/home/vscode/.local` for `devcontainer-features`) without chowning `/home`. **Never** chown bind-mount host paths.
+
+**Symptom without fix:** remoteUser EACCES writing home-dir named volumes; lifecycle `mkdir` fails under root-owned intermediate parents.
 
 ## `clone` flow (volume-mode)
 
@@ -164,15 +179,16 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 5. **Ensure in-container git (Features path, not apt):** after resolve + identity, before the Features gate, if no admitted feature id is `git` or `common-utils` (any registry/tag or local path), append `ghcr.io/devcontainers/features/git:1` (empty options). Status: `==> Ensuring git feature for volume workspace`. Empty features → inject then enter FeaturesRunner. Already covered → no double-add. Config hash / effective features include the inject when added. **`up` does not inject.**
 6. Ensure workspace volume (`adev-{base}-{hash12}-ws`); delete+create if present. Existing managed container name → fail closed (no silent reuse).
 7. Create volume-mode container (workspace = named volume; labels as above) and start. Features runner runs when features non-empty after step 5.
-   - **SSH URL:** require host `SSH_AUTH_SOCK` non-empty; inject `AllowlistedRunArg.ssh` (`container create --ssh`) if not already in runArgs. Missing agent → fail structured (hint ssh-agent / HTTPS). Later push uses the same forward.
-   - **HTTPS:** no create-time auth flag; credentials applied at populate (step 8).
-8. **Populate (in-container full clone)** — happy path is **not** host full clone + tar-pipe (`copyTreeIntoContainer` may remain as unused utility). After Features ensure git:
-   - Exec in-container `git clone` of the URL into `workspaceFolder` (as `remoteUser` when set); verify `workspaceFolder/.git`.
-   - **HTTPS auth:** host `git credential fill` (protocol/host/path; GCM/osxkeychain transparent — **no product GCM-in-guest**, no mount of host `~/.git-credentials`). Optional fallbacks: `ADEVCONTAINER_GIT_TOKEN`; `gh auth token` for github.com when `gh` available. When creds exist → one-shot into guest clone via GIT_ASKPASS/env (never log secrets; redact errors) → guest `credential.helper store` + `git credential approve` once. When fill empty → anonymous in-container clone (public); auth failure → structured hint to configure host credentials or use SSH.
-   - **SSH auth:** agent already forwarded via `--ssh` from create.
-   - **Author apply:** when **both** name+email from step 4 → guest `git config --local` both; if either missing → warn once, no partial write; no synthetic defaults.
-9. Create-path lifecycle hooks (same order as fresh `up`). On start/populate/hook failure after create: delete container **and** workspace `*-ws` volume.
-10. **Always** clean config-fetch temps (success or failure). No host full-clone staging temp on the happy path.
+    - **SSH URL:** require host `SSH_AUTH_SOCK` non-empty; inject `AllowlistedRunArg.ssh` (`container create --ssh`) if not already in runArgs. Missing agent → fail structured (hint ssh-agent / HTTPS). Later push uses the same forward.
+    - **HTTPS:** no create-time auth flag; credentials applied at populate (step 8).
+8. **Ownership:** chown workspace folder + config `type=volume` targets to connection user (`WorkspaceOwnership`; hard-fail + delete container/`*-ws` on failure) — see [Named volumes / ownership](#named-volumes-ensure--reuse--ownership).
+9. **Populate (in-container full clone)** — happy path is **not** host full clone + tar-pipe (`copyTreeIntoContainer` may remain as unused utility). After Features ensure git:
+    - Exec in-container `git clone` of the URL into `workspaceFolder` (as `remoteUser` when set); verify `workspaceFolder/.git`.
+    - **HTTPS auth:** host `git credential fill` (protocol/host/path; GCM/osxkeychain transparent — **no product GCM-in-guest**, no mount of host `~/.git-credentials`). Optional fallbacks: `ADEVCONTAINER_GIT_TOKEN`; `gh auth token` for github.com when `gh` available. When creds exist → one-shot into guest clone via GIT_ASKPASS/env (never log secrets; redact errors) → guest `credential.helper store` + `git credential approve` once. When fill empty → anonymous in-container clone (public); auth failure → structured hint to configure host credentials or use SSH.
+    - **SSH auth:** agent already forwarded via `--ssh` from create.
+    - **Author apply:** when **both** name+email from step 4 → guest `git config --local` both; if either missing → warn once, no partial write; no synthetic defaults.
+  10. Create-path lifecycle hooks (same order as fresh `up`). On start/populate/hook/ownership failure after create: delete container **and** workspace `*-ws` volume.
+  11. **Always** clean config-fetch temps (success or failure). No host full-clone staging temp on the happy path.
 
 `up` remains bind-mode host workspace only (no auto git Feature). Detail: [architecture.md](../architecture.md); contract [`specs/clone.md`](../../specs/clone.md).
 
@@ -192,7 +208,7 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 | `up` create | Fresh bind-mode create when no managed container for identity |
 | `up` reuse / start-stopped | Only when existing container's stamped config hash **equals** current resolve. Running → reuse (no Features re-run); stopped → start + bind `postStart` only |
 | `up` config hash mismatch | Fail closed: `config_hash_mismatch`; **does not** delete or replace. Hint: `adevcontainer rebuild` (managed selection: `--name` or auto) |
-| `rebuild` | **Forced rebuild** (landed; archive [`20260810-rebuild`](../../specs/changes/archive/20260810-rebuild/)): read current stamped config **before** any delete; hostRequirements + Features; then container-only delete old → create same name (bind) or reuse same `adev-*-ws` (volume; ensureVolume, never delete/replace workspace volume; no re-clone). Pre-delete failure leaves old container untouched. Optional `--skip-pull` / `--vscode` / `--json`. Volume-mode rebuild: OCI features only (local-path / host DefaultFeatureFetcher unsupported — fail clean pre-delete). Hard post-delete recovery mode-split (TTY `Open the recovery editor now? [Y/n]` default Y; decline/EOF retain; named retry skips prompt; README + CLI help document UX): [gaps — Failed rebuild recovery](../domain/devcontainer-apple-gaps.md#failed-rebuild-recovery-mode-split) |
+| `rebuild` | **Forced rebuild** (landed; archive [`20260810-rebuild`](../../specs/changes/archive/20260810-rebuild/)): read current stamped config **before** any delete; hostRequirements + Features; then container-only delete old → create same name (bind) or reuse same `adev-*-ws` (volume; ensureVolume, never delete/replace workspace volume; no re-clone). Pre-delete failure leaves old container untouched. Optional `--skip-pull` / `--vscode` / `--json`. Volume-mode rebuild: OCI features only (local-path / host DefaultFeatureFetcher unsupported — fail clean pre-delete). After start: config volume ownership always (soft-fail warn); workspace chown only if connection user ≠ stamped `remote_user` (soft-fail) — see [ownership](#named-volumes-ensure--reuse--ownership). Hard post-delete recovery mode-split (TTY `Open the recovery editor now? [Y/n]` default Y; decline/EOF retain; named retry skips prompt; README + CLI help document UX): [gaps — Failed rebuild recovery](../domain/devcontainer-apple-gaps.md#failed-rebuild-recovery-mode-split) |
 
 ## `prune` resource set
 
@@ -287,7 +303,7 @@ Each hook property admits **string** | **argv `string[]`** | **object map** `nam
 
 | Path | Hooks / apply |
 |------|----------------|
-| Fresh create (`up` bind, `clone` volume, or `rebuild` replacement) | `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand` → **settings apply** (soft-fail; not gated on `--vscode`) |
+| Fresh create (`up` bind, `clone` volume, or `rebuild` replacement) | **Named-volume ownership** (`WorkspaceOwnership`) after start, before hooks — see [ownership](#named-volumes-ensure--reuse--ownership); then `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand` → **settings apply** (soft-fail; not gated on `--vscode`) |
 | Reuse running (`up`, config hash match) | no create-path hooks; settings repair on marker drift; feature postAttach mergeable from image metadata when gated open succeeds |
 | Config hash mismatch (`up`) | fail `config_hash_mismatch`; no hooks/delete; remediate with `rebuild` |
 | Bind start-stopped (`up`, hash match) | `postStartCommand` only |

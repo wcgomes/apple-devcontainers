@@ -269,6 +269,12 @@ public enum CloneCommand {
                 remoteUser: connectionUser,
                 runtime: runtime
             )
+            try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+                containerId: id,
+                mounts: effectiveConfig.mounts,
+                remoteUser: connectionUser,
+                runtime: runtime
+            )
         } catch {
             try? runtime.delete(nameOrId: id, force: true)
             try? runtime.deleteVolume(name: identity.workspaceVolumeName)
