@@ -28,20 +28,22 @@ public enum StartCommand {
         if info.isRunning {
             print("Container \(info.id) already running")
             try openAndPostAttach(options: options, nameOrId: info.id, runtime: runtime, picker: picker)
-            if !options.openVSCode {
-                StatusPrinter.connectionHint(nameOrId: info.name)
-            }
+            SuccessPresentation.emitConnectionHintsIfNeeded(
+                openVSCode: options.openVSCode,
+                nameOrId: info.name
+            )
             return
         }
 
-        StatusPrinter.status("Starting container \(info.id)")
+        StatusPrinter.status("Starting container", item: info.id)
         try runtime.start(nameOrId: info.id)
         // Bare start: no create-path / postStart. postAttach only via --vscode open gate.
         print("Started \(info.id)")
         try openAndPostAttach(options: options, nameOrId: info.id, runtime: runtime, picker: picker)
-        if !options.openVSCode {
-            StatusPrinter.connectionHint(nameOrId: info.name)
-        }
+        SuccessPresentation.emitConnectionHintsIfNeeded(
+            openVSCode: options.openVSCode,
+            nameOrId: info.name
+        )
     }
 
     /// Open (optional) then postAttach gate. Loads config from stamped labels when needed.

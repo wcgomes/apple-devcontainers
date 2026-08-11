@@ -233,7 +233,7 @@ After the container is created and started (and Features have ensured in-contain
 
 If start, populate, or create-path lifecycle hooks fail after the workspace volume and/or container have been created, `clone` MUST:
 
-1. Delete the workspace container (force as needed), and
+1. Delete the managed dev container (force as needed), and
 2. Delete the workspace volume (`*-ws`),
 
 before returning the structured failure. (Create-path hook runners that already delete the container still require workspace volume deletion on this path.) Temp dirs remain subject to always-clean rules below. Tests MUST assert no successful outcome and no leftover clone container/workspace volume on these failures.
@@ -315,7 +315,7 @@ After successful populate, `clone` MUST run create-path lifecycle hooks with the
 #### Scenario: Hook failure deletes container and workspace volume
 - Given populate succeeded and `postCreateCommand` exits non-zero
 - When clone runs
-- Then clone fails structured, the workspace container is deleted, the workspace `*-ws` volume is deleted, and temps are cleaned up
+- Then clone fails structured, the managed dev container is deleted, the workspace `*-ws` volume is deleted, and temps are cleaned up
 
 See also: [core.md](core.md) **Up lifecycle** and [lifecycle-hooks.md](lifecycle-hooks.md) for the shared create-path hook matrix; [vscode.md](vscode.md) for postAttach gating.
 
@@ -362,7 +362,7 @@ On `adevcontainer clone` only, after config resolve and **before** the Features 
 2. If `git` or `common-utils` is already present (any registry/tag or local path whose feature id matches) → MUST NOT double-add.
 3. The mutated features list is what FeaturesRunner sees. If the list was empty before inject, clone MUST enter the Features path (pull base, build/reuse derived image, etc.).
 4. `effectiveConfig.features` and the config hash after merge MUST include the injected feature when added.
-5. Progress on stderr MUST report e.g. `==> Ensuring git feature for volume workspace` when injecting (StatusPrinter).
+5. Progress on stderr MUST report e.g. `==> Ensuring git feature for volume-mode dev container` when injecting (StatusPrinter).
 6. Prefer a small helper (e.g. `FeatureGitEnsure.ensurePresent`) under Features/.
 
 **MUST NOT** apply this inject on `up` bind-mode. docker-* Features remain warn-skip (not hard-error). The git feature is the official OCI feature — not a docker-* id.

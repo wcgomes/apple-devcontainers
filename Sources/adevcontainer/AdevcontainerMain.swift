@@ -14,7 +14,10 @@ struct AdevcontainerMain {
             )
             exit(error.exitCode)
         } catch {
-            FileHandle.standardError.write(Data(("error[internal]: \(error.localizedDescription)\n").utf8))
+            let line = TerminalStyle.styleErrorLabel(TerminalStyle.errorPrefix)
+                + TerminalStyle.styleErrorBody(error.localizedDescription)
+                + "\n"
+            FileHandle.standardError.write(Data(line.utf8))
             exit(1)
         }
     }
@@ -67,14 +70,13 @@ struct AdevcontainerMain {
             if opts.jsonOutput {
                 print(try result.jsonString())
             } else {
-                print("outcome: \(result.outcome)")
-                print("containerId: \(result.containerId)")
-                print("remoteUser: \(result.remoteUser)")
-                print("remoteWorkspaceFolder: \(result.remoteWorkspaceFolder)")
-                if let name = result.containerName {
-                    print("containerName: \(name)")
-                }
+                SuccessPresentation.emitHumanDigest(result)
             }
+            // After Ready (stderr) + outcome/JSON (stdout): blank + connection hints.
+            SuccessPresentation.emitConnectionHintsIfNeeded(
+                openVSCode: opts.openVSCode,
+                nameOrId: result.containerName ?? result.containerId
+            )
             return 0
 
         case "clone":
@@ -88,16 +90,21 @@ struct AdevcontainerMain {
                     hint: "Usage: adevcontainer clone <git-url>"
                 )
             }
+            let openVSCode = parsed.flags.contains("vscode")
             let result = try CloneCommand.run(
                 options: CloneOptions(
                     gitURL: parsed.passthrough[0],
                     skipPull: parsed.flags.contains("skip-pull"),
-                    openVSCode: parsed.flags.contains("vscode")
+                    openVSCode: openVSCode
                 ),
                 runtime: runtime
             )
             // Always machine-readable JSON on success (spec).
             print(try result.jsonString())
+            SuccessPresentation.emitConnectionHintsIfNeeded(
+                openVSCode: openVSCode,
+                nameOrId: result.containerName ?? result.containerId
+            )
             return 0
 
         case "list":
@@ -167,14 +174,12 @@ struct AdevcontainerMain {
             if opts.jsonOutput {
                 print(try result.jsonString())
             } else {
-                print("outcome: \(result.outcome)")
-                print("containerId: \(result.containerId)")
-                print("remoteUser: \(result.remoteUser)")
-                print("remoteWorkspaceFolder: \(result.remoteWorkspaceFolder)")
-                if let name = result.containerName {
-                    print("containerName: \(name)")
-                }
+                SuccessPresentation.emitHumanDigest(result)
             }
+            SuccessPresentation.emitConnectionHintsIfNeeded(
+                openVSCode: opts.openVSCode,
+                nameOrId: result.containerName ?? result.containerId
+            )
             return 0
 
         case "version", "--version":

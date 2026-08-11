@@ -171,7 +171,7 @@ When `features` is non-empty after admission, on a fresh create path the product
    - `linux/amd64` only when the host is x86_64
   4. **Build** a derived image with Apple `container build` from a **generated Dockerfile** that `FROM`s the base image and, per feature, `COPY`s the package then `RUN`s recursive `chmod -R 0755` on the package directory **before** `./install.sh` **as root** (options / `_REMOTE_USER` / `_CONTAINER_USER` env) so scripts `install.sh` copies into bare-path lifecycle hooks remain executable (ref CLI parity; avoids exit 126). After **all** feature install layers, the generated Dockerfile MUST restore the **base image’s** final OCI `USER` per **Features install as root then restore base image USER**. Install remains as root with `_REMOTE_USER` / `_CONTAINER_USER` env; the Dockerfile MUST NOT leave the derived image’s final default user as root solely because install ran as root when the base image USER was non-root. `_REMOTE_USER` / `_CONTAINER_USER` install env MUST be derived from config `remoteUser` / `containerUser` without inventing editor usernames; when both unset, install env MUST use the inspected base image USER when non-empty, else `root` — MUST NOT hardcode `vscode`. Callers MUST fail closed on base inspect failure before fabricating install-env users. Build argv MUST include the same host-native **`--platform`**.
   5. **Tag** a deterministic local image as `adev-{base}:{hash12}`, where `base` is the same human base as container identity and `hash12` is a 12-character content hash of base image + features + a product **`recipeVersion`** constant (install Dockerfile semantics epoch). If `base` is empty → `adevcontainer:{hash12}`. MUST NOT use an `adevcontainer/features:` prefix or a `/features` path segment. **Reuse** when that tag already exists locally (skip rebuild). When generator install-layer semantics change (e.g. chmod recipe, final-`USER` restore), the product MUST bump `recipeVersion` so existing tags miss and rebuild.
-6. **Create** the workspace container **from the derived image** (not the raw config `image`) with the same **`--platform`**. Contributions that affect create flags (`init`, `capAdd`, env, mounts) MUST be merged **before** create.
+6. **Create** the managed dev container **from the derived image** (not the raw config `image`) with the same **`--platform`**. Contributions that affect create flags (`init`, `capAdd`, env, mounts) MUST be merged **before** create.
 7. **Start** the container, then run lifecycle hooks (onCreate → …) as today.
 
 When `features` is absent or empty, create MUST continue to use the config `image` reference as written (no derived tag).
@@ -209,7 +209,7 @@ On `rebuild`, the same derived-tag identity material applies: when the rebuilt c
 #### Scenario: Build failure does not create container
 - Given `container build` exits non-zero
 - When features build runs before create
-- Then `up` fails with a structured feature-build error and no workspace container is created
+- Then `up` fails with a structured feature-build error and no managed dev container is created
 
 #### Scenario: Reuse existing derived tag skips build
 - Given the deterministic derived tag already exists locally
@@ -370,24 +370,33 @@ Privileged / `securityOpt` contributions are warn-stripped and not applied to cr
 
 ### Requirement: Features progress status lines
 
-During Features work on `up`, the CLI MUST emit stderr progress status lines in the existing progress family (`==> …` / StatusPrinter), including at least:
+During Features work on `up` (and other create paths that run Features), the CLI MUST emit stderr progress status lines in the progress family (`==> …` / StatusPrinter), including at least:
 
 - Resolving features
 - Fetching feature \<ref or id\> (per feature or equivalent clear wording)
 - Building features image \<tag\> (or Reusing features image \<tag\> when the tag exists)
 - Configuring native arm64 builds (build.rosetta=false) — **only** when actually changing config
 
-`ADEVCONTAINER_QUIET=1` MUST silence these status lines (progress only). Policy warn-skip warnings MUST still emit under QUIET. Machine JSON on stdout MUST remain pure when `--json` (or equivalent) is used.
+Presentation MAY use colors and phase section spacing per [terminal-output.md](terminal-output.md). The monochrome text family of these status lines MUST remain greppable (`==> …` with the same message intent).
+
+When Features build (or other Features tool steps) live-tee subprocess output to host stderr, those body lines MUST use **internal tool output framing** per [terminal-output.md](terminal-output.md); status lines remain product phase lines.
+
+`ADEVCONTAINER_QUIET=1` MUST silence these status lines (progress only). Policy warn-skip warnings MUST still emit under QUIET. Machine JSON on stdout MUST remain pure when `--json` (or equivalent) is used. Tool body tees MUST still emit under QUIET.
 
 #### Scenario: Progress lines during feature up
 - Given a features config and quiet mode unset
 - When `up` runs the Features path (mocked fetch/build OK)
-- Then stderr includes resolving/fetching/building (or reusing) status lines
+- Then stderr includes resolving/fetching/building (or reusing) status lines in the `==> …` family
 
 #### Scenario: Quiet suppresses features progress
 - Given `ADEVCONTAINER_QUIET=1`
 - When `up` runs the Features path
 - Then Features progress status lines are not printed
+
+#### Scenario: Features build tool body framed when streamed
+- Given quiet mode unset and a Features build that live-tees builder output containing a recognizable line
+- When the build runs
+- Then the recognizable builder line appears on host stderr as a framed internal tool line (`| ` after indent), distinct from `==> ` status lines
 
 ---
 

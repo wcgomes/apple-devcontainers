@@ -182,7 +182,7 @@ Apple named volumes mount **root:root** ([gaps](../domain/devcontainer-apple-gap
 2. Host git: sparse/shallow **config-only** fetch into a temp dir (auth = host helpers/SSH agent; git argv puts `--` before the URL). Identity/labels use **normalized** URL (`scheme://` userinfo stripped); host git still gets the **original** URL.
 3. Resolve `devcontainer.json` from that temp tree. **workspaceFolder** default and `${localWorkspaceFolderBasename}` use the **git URL repo basename**, not the host temp checkout directory name.
 4. **Author identity (before Features/create):** host `git -C <sparse-temp> config --get user.name` / `user.email` (includeIf-aware). Env overrides: `ADEVCONTAINER_GIT_AUTHOR_NAME` / `ADEVCONTAINER_GIT_AUTHOR_EMAIL`. **Both env set** → use env, skip prompt (even on TTY). **TTY** and env incomplete: if both resolved → confirm `Use this identity? [Y/n]` (decline → collect name+email); if either missing → prompt for both (empty → fail structured, no Features/create). **Non-TTY:** no prompt; resolved/env silently when complete; incomplete → continue (warn at apply, no hang). Chosen values applied after populate (step 8).
-5. **Ensure in-container git (Features path, not apt):** after resolve + identity, before the Features gate, if no admitted feature id is `git` or `common-utils` (any registry/tag or local path), append `ghcr.io/devcontainers/features/git:1` (empty options). Status: `==> Ensuring git feature for volume workspace`. Empty features → inject then enter FeaturesRunner. Already covered → no double-add. Config hash / effective features include the inject when added. **`up` does not inject.**
+5. **Ensure in-container git (Features path, not apt):** after resolve + identity, before the Features gate, if no admitted feature id is `git` or `common-utils` (any registry/tag or local path), append `ghcr.io/devcontainers/features/git:1` (empty options). Status: `==> Ensuring git feature for volume-mode dev container`. Empty features → inject then enter FeaturesRunner. Already covered → no double-add. Config hash / effective features include the inject when added. **`up` does not inject.**
 6. Ensure workspace volume (`adev-{base}-{hash12}-ws`); delete+create if present. Existing managed container name → fail closed (no silent reuse).
 7. Create volume-mode container (workspace = named volume; labels as above) and start. Features runner runs when features non-empty after step 5.
     - **SSH URL:** require host `SSH_AUTH_SOCK` non-empty; inject `AllowlistedRunArg.ssh` (`container create --ssh`) if not already in runArgs. Missing agent → fail structured (hint ssh-agent / HTTPS). Later push uses the same forward.
@@ -281,17 +281,18 @@ Apple `container` does **not** expand `${PATH}` / `$PATH` in env values. Product
 
 ## Progress / tee
 
-- Progress status lines on **stderr**: `==> …` (pull, create, start, stop, delete, volume create, Features Resolving/Fetching/Building/Reusing, build.rosetta config when changing, lifecycle `==> Running <property>`, and related long steps). StatusPrinter only — not hook script I/O.
-- After successful `up`, `clone`, `start`, or `rebuild`, StatusPrinter emits two connection hints on stderr when the originating command lacks `--vscode`: terminal `adevcontainer exec -it --name <managed-name>` and VS Code `adevcontainer start --name <managed-name> --vscode`. Originating `--vscode` suppresses both; neither contaminates stdout or `--json` output.
-- Tee Apple `container` stderr onto the same stream for those operations.
-- **Lifecycle hook live stream (distinct from status):** hook child **stdout and stderr** are teed **live** to **host stderr** while still captured for failure diagnostics. Prevents long hooks looking stuck (previously capture-until-exit). Non-lifecycle `exec` stays capture-then-print (stream off by default).
-- `--json` keeps **stdout** pure JSON — hook script stdout is teed to host **stderr**, never host stdout. `ADEVCONTAINER_QUIET=1` silences `==> …` status lines, including both connection hints; policy warn-skips and hook script output still emit.
+Presentation stack (StatusPrinter + TerminalStyle, tool `| ` framing, QUIET/color matrix, connectionHint info weight, clone populate `streamOutput`): **[terminal-output.md](terminal-output.md)**. Runtime-boundary facts that stay here:
+
+- Long ops emit product phases on stderr (pull/create/start/stop/delete/volume create; Features Resolving/Fetching/Building/Reusing; build.rosetta when changing; lifecycle `==> Running <property>`; related steps). StatusPrinter only — not hook/tool body I/O.
+- After successful `up`/`clone`/`start`/`rebuild` without originating `--vscode`, connection hints (info, not `==> `) on stderr; `--vscode` suppresses both; never on stdout/`--json`.
+- Tee Apple `container` / internal tool body to host stderr with display framing; capture raw. Lifecycle hooks and Features build already stream; **clone populate** uses `streamOutput: true`. Non-lifecycle user `exec` stays capture-then-print / unframed passthrough; interactive TTY inherit unchanged.
+- `--json` keeps **stdout** pure JSON — tool/hook body teed to host **stderr** only. QUIET silences phase/info (incl. connection hints); warnings, errors, framed tool body, prompts still emit.
 - Under heavy dual-stream load, dual drain threads may interleave stdout/stderr bytes on host stderr.
 - **Test tip:** assert stream flags on the lifecycle `exec` call itself — delete-on-fail invoke also streams and can overwrite mock “last flag” fields.
 
 ## Lifecycle execution (hook matrix)
 
-Hooks run via runtime **exec** into the running container (effective user + workspace folder when set). Omitted properties and empty `{}` maps are no-ops. Nested objects rejected. Exec env PATH expansion applies (see PATH expansion). **Live I/O:** lifecycle exec enables streamOutput — child stdout+stderr teed live to host stderr (still captured for error messages); status `==> Running …` is separate StatusPrinter output. Contract: [`specs/lifecycle-hooks.md`](../../specs/lifecycle-hooks.md).
+Hooks run via runtime **exec** into the running container (effective user + workspace folder when set). Omitted properties and empty `{}` maps are no-ops. Nested objects rejected. Exec env PATH expansion applies (see PATH expansion). **Live I/O:** lifecycle exec enables streamOutput — child stdout+stderr teed live to host stderr framed as internal tool lines (`    | ` display; raw capture); status `==> Running …` is separate StatusPrinter output. Presentation: [terminal-output.md](terminal-output.md). Contract: [`specs/lifecycle-hooks.md`](../../specs/lifecycle-hooks.md).
 
 ### Command forms (`LifecycleCommand`)
 

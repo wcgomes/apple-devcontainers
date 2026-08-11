@@ -17,7 +17,7 @@ public enum StopCommand {
             print("Container \(info.id) already stopped")
             return
         }
-        StatusPrinter.status("Stopping container \(info.id)")
+        StatusPrinter.status("Stopping container", item: info.id)
         try runtime.stop(nameOrId: info.id)
         print("Stopped \(info.id)")
     }

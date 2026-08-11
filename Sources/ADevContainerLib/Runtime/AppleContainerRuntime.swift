@@ -576,7 +576,7 @@ public struct AppleContainerRuntime: Sendable {
 
     public func ensureVolume(name: String) throws {
         if try volumeExists(name) {
-            StatusPrinter.status("Volume '\(name)' already exists — reusing")
+            StatusPrinter.status("Reusing existing volume", item: name)
             return
         }
         let result = try invoke(["volume", "create", name], streamStderr: true)
@@ -584,7 +584,7 @@ public struct AppleContainerRuntime: Sendable {
         // Belt and suspenders: treat race / already-exists create failure as reuse.
         let combined = (result.stdoutString + result.stderrString).lowercased()
         if combined.contains("already") || combined.contains("exists") {
-            StatusPrinter.status("Volume '\(name)' already exists — reusing")
+            StatusPrinter.status("Reusing existing volume", item: name)
             return
         }
         throw mapFailure(result, action: "volume create \(name)")

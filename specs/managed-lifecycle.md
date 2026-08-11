@@ -121,7 +121,7 @@ Identity resolution for prune MUST be managed-only (`--name` / picker), same as 
 - Then host bind paths remain and no global volume/image prune is invoked
 
 #### Scenario: Prune skips missing resources
-- Given no workspace container and no matching named volumes
+- Given no managed dev container and no matching named volumes
 - When the user runs `adevcontainer prune`
 - Then the command succeeds without erroring solely because resources were already absent
 

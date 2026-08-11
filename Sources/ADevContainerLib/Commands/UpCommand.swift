@@ -56,7 +56,7 @@ public enum UpCommand {
                 )
             } else if existing.isRunning {
                 // Reuse running: no feature fetch/build; settings repair on marker drift; postAttach gated after open.
-                StatusPrinter.status("Reusing running container \(existing.name)")
+                StatusPrinter.status("Reusing running container", item: existing.name)
                 let reuseConfig = configForReuse(resolved.config, labels: existing.labels)
                 _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
                     containerId: existing.id,
@@ -99,8 +99,7 @@ public enum UpCommand {
 
         // Create path (missing container)
         if !resolved.mountPromotions.isEmpty {
-            let warning = MountNormalizer.warningMessage(promotions: resolved.mountPromotions) + "\n"
-            FileHandle.standardError.write(Data(warning.utf8))
+            StatusPrinter.warning(MountNormalizer.warningMessage(promotions: resolved.mountPromotions))
         }
 
         var effectiveConfig = resolved.config
@@ -120,7 +119,7 @@ public enum UpCommand {
 
             // Pull base image (native platform) before Features build FROM it.
             if !options.skipPull {
-                StatusPrinter.status("Pulling image \(resolved.config.image)")
+                StatusPrinter.status("Pulling image", item: resolved.config.image)
                 try? runtime.pullImage(resolved.config.image, platform: platform)
             }
             let fetcher: any FeatureFetching = featuresFetcherOverride
@@ -155,7 +154,7 @@ public enum UpCommand {
             }
             knownMetadataUsers = featuresResult.metadataUsers
         } else if !options.skipPull {
-            StatusPrinter.status("Pulling image \(effectiveConfig.image)")
+            StatusPrinter.status("Pulling image", item: effectiveConfig.image)
             try? runtime.pullImage(effectiveConfig.image, platform: platform)
         }
 
@@ -188,7 +187,7 @@ public enum UpCommand {
             platform: platform
         )
 
-        StatusPrinter.status("Creating container \(resolved.containerName)")
+        StatusPrinter.status("Creating container", item: resolved.containerName)
         let id = try runtime.create(request: request)
         StatusPrinter.status("Starting container")
         do {
@@ -276,10 +275,9 @@ public enum UpCommand {
             config: postAttachConfig,
             runtime: runtime
         )
+        // Connection hints are emitted by the entry point after the human outcome digest
+        // so the terminal order is: Ready → outcome fields → blank → connect instructions.
         StatusPrinter.status("Ready")
-        if !options.openVSCode {
-            StatusPrinter.connectionHint(nameOrId: result.containerName ?? result.containerId)
-        }
         return result
     }
 

@@ -77,7 +77,7 @@ public enum ConfigAdmissions {
             throw CLIError(
                 code: CLIErrorCode.unsupportedProperty,
                 property: "image",
-                message: "Property 'image' is required for MVP image-based workspaces",
+                message: "Property 'image' is required for MVP image-based dev containers",
                 hint: "Set \"image\": \"your-image:tag\""
             )
         }

@@ -199,7 +199,7 @@ public enum RebuildCommand {
         if isVolumeMode {
             let gitEnsure = FeatureGitEnsure.ensurePresent(features: effectiveConfig.features)
             if gitEnsure.didInject {
-                StatusPrinter.status("Ensuring git feature for volume workspace")
+                StatusPrinter.status("Ensuring git feature for volume-mode dev container")
             }
             effectiveConfig.features = gitEnsure.features
         }
@@ -215,7 +215,7 @@ public enum RebuildCommand {
                 try AppleContainerConfig.ensureNativeArmBuild(runtime: runtime)
             }
             if !options.skipPull {
-                StatusPrinter.status("Pulling image \(effectiveConfig.image)")
+                StatusPrinter.status("Pulling image", item: effectiveConfig.image)
                 try? runtime.pullImage(effectiveConfig.image, platform: platform)
             }
             let fetcher: any FeatureFetching = RebuildCommand.featuresFetcherOverride
@@ -253,7 +253,7 @@ public enum RebuildCommand {
             }
             knownMetadataUsers = featuresResult.metadataUsers
         } else if !options.skipPull {
-            StatusPrinter.status("Pulling image \(effectiveConfig.image)")
+            StatusPrinter.status("Pulling image", item: effectiveConfig.image)
             try? runtime.pullImage(effectiveConfig.image, platform: platform)
         }
 
@@ -340,12 +340,12 @@ public enum RebuildCommand {
         if let existing = try runtime.findByName(selected.id)
             ?? (selected.name != selected.id ? try runtime.findByName(selected.name) : nil)
         {
-            StatusPrinter.status("Deleting container \(existing.id)")
+            StatusPrinter.status("Deleting container", item: existing.id)
             try runtime.delete(nameOrId: existing.id, force: true)
         } else if selectedOverride != nil || bindRecoveryEligible {
             StatusPrinter.status("Old container already removed; continuing rebuild")
         } else {
-            StatusPrinter.status("Deleting container \(selected.id)")
+            StatusPrinter.status("Deleting container", item: selected.id)
             try runtime.delete(nameOrId: selected.id, force: true)
         }
         crossedDeleteBoundary = true
@@ -429,7 +429,7 @@ public enum RebuildCommand {
                 hint: "Existing volumes were preserved"
             )
         }
-        StatusPrinter.status("Creating container \(selected.name)")
+        StatusPrinter.status("Creating container", item: selected.name)
         let id: String
         do {
             id = try runtime.create(request: request, ensureVolumes: false)
@@ -553,7 +553,7 @@ public enum RebuildCommand {
                     runtime: runtime
                 )
             } catch {
-                StatusPrinter.warning("Failed to chown workspace to \(effectiveConfig.connectionUser ?? "remoteUser"): \(error.localizedDescription)")
+                StatusPrinter.warning("Failed to chown workspace folder to \(effectiveConfig.connectionUser ?? "remoteUser"): \(error.localizedDescription)")
             }
         }
 
@@ -718,9 +718,7 @@ public enum RebuildCommand {
         }
         // Bind recovery resume is only needed while the managed container is missing.
         try? BindRecoveryResume.cleanup(name: selected.name, fileManager: fileManager)
-        if !options.openVSCode {
-            StatusPrinter.connectionHint(nameOrId: result.containerName ?? result.containerId)
-        }
+        // Connection hints: entry point after human outcome digest / JSON.
         return result
     }
 

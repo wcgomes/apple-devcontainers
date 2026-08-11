@@ -180,16 +180,16 @@ public enum CommandSurface {
 
         Commands:
           doctor              Check Apple container runtime readiness
-          up [-w path]        Create/start/reuse bind-mode workspace container (host path)
-          clone <git-url>     Clone repo into named volume workspace (managed)
-          list [--json]       List managed containers (up + clone)
-          start [--name]      Start a stopped managed container (no hooks on volume-mode)
-          exec [-it] [--name] [--] [cmd...]  Run a command (or shell) in a managed container
-          stop [--name]       Stop a managed container (name or picker)
+          up [-w path]        Create/start/reuse bind-mode dev container (host path)
+          clone <git-url>     Clone repo into volume-mode dev container (managed)
+          list [--json]       List managed dev containers (up + clone)
+          start [--name]      Start a stopped managed dev container (no hooks on volume-mode)
+          exec [-it] [--name] [--] [cmd...]  Run a command (or shell) in a managed dev container
+          stop [--name]       Stop a managed dev container (name or picker)
           delete [--name]     Remove container only (not workspace volume)
           prune [--name]      Remove container, volumes (incl. *-ws), and config image
-          rebuild [--name]    Force-rebuild a managed container from its current config
-                              (same name/workspace; volumes preserved)
+          rebuild [--name]    Force-rebuild a managed dev container from its current config
+                               (same name; volumes preserved)
           inspect [--name]    Show identity, state, labels (from runtime + labels)
 
         Options:
@@ -221,7 +221,7 @@ public enum CommandSurface {
 
         Clone notes:
           - Requires host git on PATH (config fetch + HTTPS credential fill)
-          - Full clone runs inside the container (named volume workspace)
+          - Full clone runs inside the container (volume-mode workspace volume)
           - SSH: needs ssh-agent (SSH_AUTH_SOCK); create --ssh for later push
           - HTTPS: host git credential fill one-shot; guest credential.helper store
           - Auto-adds Features git:1 when config lacks git/common-utils
@@ -257,11 +257,12 @@ public enum CommandSurface {
             return """
             adevcontainer up [-w <path>] [--json] [--skip-pull] [--vscode]
 
-            Create/start/reuse a bind-mode workspace container for a host checkout.
-            -w/--workspace defaults to the current directory. Stamps managed labels
-            so the container appears in list and lifecycle commands (--name / picker).
+            Create/start/reuse a bind-mode dev container for a host checkout.
+            -w/--workspace defaults to the current directory (host project root). Stamps
+            managed labels so the container appears in list and lifecycle commands
+            (--name / picker).
 
-            --vscode: best-effort open a new VS Code window on the remote workspace
+            --vscode: best-effort open a new VS Code window on the remote workspace folder
             (requires VS Code with Remote - Containers and a `code` CLI). Soft-fails with
             a stderr warning; open alone does not fail up.
             postAttachCommand runs only after successful open; skipped without flag /
@@ -274,7 +275,7 @@ public enum CommandSurface {
             return """
             adevcontainer clone <git-url> [--skip-pull] [--vscode]
 
-            Create a managed container whose workspace is a named volume.
+            Create a volume-mode managed dev container (workspace on a named volume).
             Host git fetches config only; full clone runs inside the container.
 
             SSH URLs require ssh-agent (SSH_AUTH_SOCK); create injects --ssh.
@@ -302,7 +303,7 @@ public enum CommandSurface {
             Start a stopped managed container. Volume-mode: runtime start only
             (no lifecycle hooks). Already running is success no-op.
 
-            --vscode: best-effort open VS Code on the labeled remote workspace after
+            --vscode: best-effort open VS Code on the labeled remote workspace folder after
             start (inspect for id/image/folder). Soft-fail open; postAttach and pending
             extensions only after successful open (same gate as up). Settings repair on
             marker drift does not require the flag. Not full extension parity.

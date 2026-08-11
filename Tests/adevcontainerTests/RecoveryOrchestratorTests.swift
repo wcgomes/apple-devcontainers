@@ -496,7 +496,7 @@ nonisolated(unsafe) let recoveryOrchestratorTests: [(String, () throws -> Void)]
             try MiniTest.expect(object?["rawConfig"] == nil, "error JSON has no raw config")
 
             let human = String(data: CLIErrorOutput.data(for: error, json: false), encoding: .utf8) ?? ""
-            try MiniTest.expect(human.hasPrefix("error[\(code)]:"), "human rendering remains non-JSON")
+            try MiniTest.expect(human.hasPrefix("error:"), "human rendering remains non-JSON")
         }
     }),
     ("recoveryJSONDispatchWritesErrorToStderrOnly", {
@@ -1293,7 +1293,9 @@ nonisolated(unsafe) let recoveryOrchestratorTests: [(String, () throws -> Void)]
         try MiniTest.expect(joined.contains("post_create_failed") || joined.contains("postCreate"), "structured failure printed before prompt")
         try MiniTest.expect(joined.contains(RecoveryOpenEditorPrompt.promptText), "prompt text on stderr")
         // Failure text must appear before the prompt line.
-        let failIdx = writes.lines.firstIndex { $0.contains("error[") || $0.contains("Rebuild failed") }
+        let failIdx = writes.lines.firstIndex {
+            TerminalStyle.stripANSI($0).hasPrefix("error:") || $0.contains("Rebuild failed")
+        }
         let promptIdx = writes.lines.firstIndex { $0.contains(RecoveryOpenEditorPrompt.promptText) }
         try MiniTest.expect(failIdx != nil && promptIdx != nil && failIdx! < promptIdx!)
     }),

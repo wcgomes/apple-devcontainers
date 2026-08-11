@@ -1602,7 +1602,120 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(configCalls.contains {
             $0.arguments.contains("user.email") && $0.arguments.contains("env@example.com")
         })
-    })
+    }),
+    ("clonePopulateRequestsStreamOutput", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20", "workspaceFolder": "/workspaces/app" }"#
+        let mock = MockProcessRunner()
+        mock.handlers = CloneRuntimeMock.handlers()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try CloneCommand.run(
+            options: CloneOptions(gitURL: "https://github.com/org/stream-pop.git", skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:]
+        )
+        // In-container populate uses `sh -c` (not hooks' `sh -lc`) and must live-stream.
+        let populateCalls = mock.calls.filter {
+            $0.arguments.first == "exec"
+                && $0.arguments.contains("sh")
+                && $0.arguments.contains("-c")
+                && !$0.arguments.contains("-lc")
+        }
+        try MiniTest.expect(!populateCalls.isEmpty, "expected populate sh -c exec")
+        try MiniTest.expect(populateCalls.contains { $0.streamStderr == true })
+        try MiniTest.expect(populateCalls.contains { $0.teeStdoutToStderr == true })
+    }),
+    ("clonePopulateFailureDiagnosticsRawUnframed", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20", "workspaceFolder": "/workspaces/app" }"#
+        let mock = MockProcessRunner()
+        mock.handlers = CloneRuntimeMock.handlers(
+            cloneExecSucceeds: false
+        )
+        // Override clone exec to include recognizable diagnostic mark.
+        mock.handlers = [
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
+            { args in
+                if args.starts(with: ["list"]) || args.starts(with: ["volume", "list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.starts(with: ["image", "list"]) {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+                }
+                if args.first == "build"
+                    || args.starts(with: ["volume", "create"])
+                    || args.starts(with: ["volume", "delete"])
+                    || args.first == "start"
+                    || args.first == "delete"
+                {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "create" {
+                    return ProcessResult(exitCode: 0, stdout: Data("ctr\n".utf8), stderr: Data())
+                }
+                if args.first == "exec" {
+                    if args.contains("-c") && !args.contains("-lc") {
+                        return ProcessResult(
+                            exitCode: 1,
+                            stdout: Data(),
+                            stderr: Data("TOOL_FAIL_MARK populate boom\n".utf8)
+                        )
+                    }
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(gitURL: "https://github.com/org/fail-pop.git", skipPull: true),
+                runtime: runtime,
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:]
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.populateFailed)
+            try MiniTest.expect(err.message.contains("TOOL_FAIL_MARK"))
+            try MiniTest.expect(!err.message.contains("| TOOL_FAIL_MARK"))
+            try MiniTest.expect(!err.message.contains("    | "))
+        }
+    }),
+    ("clonePopulateQuietStillRequestsStream", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let previousEnabled = StatusPrinter.enabled
+        defer { StatusPrinter.enabled = previousEnabled }
+        StatusPrinter.enabled = false
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20", "workspaceFolder": "/workspaces/app" }"#
+        let mock = MockProcessRunner()
+        mock.handlers = CloneRuntimeMock.handlers()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try CloneCommand.run(
+            options: CloneOptions(gitURL: "https://github.com/org/quiet-pop.git", skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:]
+        )
+        let populateCalls = mock.calls.filter {
+            $0.arguments.first == "exec"
+                && $0.arguments.contains("sh")
+                && $0.arguments.contains("-c")
+                && !$0.arguments.contains("-lc")
+        }
+        try MiniTest.expect(populateCalls.contains { $0.streamStderr == true && $0.teeStdoutToStderr == true })
+    }),
 ]
 
 // MARK: - List / start / stop / prune

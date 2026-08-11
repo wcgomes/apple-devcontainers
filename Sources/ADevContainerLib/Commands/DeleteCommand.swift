@@ -13,7 +13,7 @@ public enum DeleteCommand {
             runtime: runtime,
             picker: picker
         )
-        StatusPrinter.status("Deleting container \(info.id)")
+        StatusPrinter.status("Deleting container", item: info.id)
         try runtime.delete(nameOrId: info.id, force: true)
         print("Deleted \(info.id)")
     }

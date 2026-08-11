@@ -87,7 +87,7 @@ public enum FeaturesRunner {
         var orderedInput: [FeatureOrder.OrderedFeature] = []
 
         for feature in features {
-            StatusPrinter.status("Fetching feature \(feature.reference)")
+            StatusPrinter.status("Fetching feature", item: feature.reference)
             let dest = FeatureCache.directory(for: feature.reference, cacheRoot: deps.cacheRoot)
             // Always re-fetch into cache dir for correctness when using live client;
             // mock fetcher overwrites. Clear dest first for clean extract.
@@ -138,7 +138,7 @@ public enum FeaturesRunner {
             // On pure reuse we can still proceed without base USER if derived exists —
             // connection resolution will inspect the derived image. On build, fail closed below.
             if try deps.runtime.imageExists(ref: derivedImage) {
-                StatusPrinter.status("Reusing features image \(derivedImage)")
+                StatusPrinter.status("Reusing features image", item: derivedImage)
                 return FeaturesRunnerResult(
                     contributions: contributions,
                     orderedRefs: ordered.map(\.admitted.reference),
@@ -158,7 +158,7 @@ public enum FeaturesRunner {
             )
         } catch {
             if try deps.runtime.imageExists(ref: derivedImage) {
-                StatusPrinter.status("Reusing features image \(derivedImage)")
+                StatusPrinter.status("Reusing features image", item: derivedImage)
                 return FeaturesRunnerResult(
                     contributions: contributions,
                     orderedRefs: ordered.map(\.admitted.reference),
@@ -179,7 +179,7 @@ public enum FeaturesRunner {
         }
 
         if try deps.runtime.imageExists(ref: derivedImage) {
-            StatusPrinter.status("Reusing features image \(derivedImage)")
+            StatusPrinter.status("Reusing features image", item: derivedImage)
             return FeaturesRunnerResult(
                 contributions: contributions,
                 orderedRefs: ordered.map(\.admitted.reference),
@@ -192,7 +192,7 @@ public enum FeaturesRunner {
             )
         }
 
-        StatusPrinter.status("Building features image \(derivedImage)")
+        StatusPrinter.status("Building features image", item: derivedImage)
 
         let buildRoot = FeatureCache.buildContextRoot(cacheRoot: deps.cacheRoot)
         try deps.fileManager.createDirectory(atPath: buildRoot, withIntermediateDirectories: true)

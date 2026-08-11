@@ -37,7 +37,7 @@ devcontainer.json → Config resolver → [Features runner] → AppleContainerRu
 1. **Config resolver** — JSONC parse; variable substitution (`${localEnv:*}`, `${localWorkspaceFolderBasename}`, `${containerWorkspaceFolder}`, `${devcontainerId}` — latter may stay literal until create identity is known); validate supported props; hard-error unsupported (never silent ignore).
 2. **Features runner** (when `features` non-empty) — load local path and/or fetch OCI features; order; ensure `build.rosetta=false`; derived image build; swaps effective image before create. Then expand deferred `${devcontainerId}` in mounts/`containerEnv` before volume ensure + create. Detail: [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md) (`${devcontainerId}` deferred expand).
 3. **AppleContainerRuntime** — sole boundary to the external `container` CLI; subprocess invoke; parse machine-readable JSON only. Features OCI fetch is separate (embedded HTTPS); local path is disk copy.
-4. **Apple container** — create/run/exec/stop/delete/prune/inspect/build of the workspace container and related config volumes/image.
+  4. **Apple container** — create/run/exec/stop/delete/prune/inspect/build of the managed dev container and related config volumes/image.
 
 ## Workspace modes
 
@@ -68,9 +68,9 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
 
 **Config drift / forced rebuild:** `up` reuses a matching managed container. Existing managed container with a stamped config hash that differs from the current resolve → structured fail `config_hash_mismatch` (hint: `adevcontainer rebuild` with managed selection). A forced rebuild uses **`rebuild`**.
 
-**delete vs prune:** `delete` drops the workspace container only. `prune` also removes config `type=volume` mounts (by label), the clone workspace volume (`adev-*-ws`), and the config `image` reference. Neither deletes bind-mount host paths or runs global `volume`/`image` prune. Derived Features tags (`adev-{base}:{hash12}` / `adevcontainer:{hash12}`) are not removed by `prune` unless they equal the config `image` field.
+**delete vs prune:** `delete` drops the managed dev container only. `prune` also removes config `type=volume` mounts (by label), the clone workspace volume (`adev-*-ws`), and the config `image` reference. Neither deletes bind-mount host paths or runs global `volume`/`image` prune. Derived Features tags (`adev-{base}:{hash12}` / `adevcontainer:{hash12}`) are not removed by `prune` unless they equal the config `image` field.
 
-**Progress:** long ops print `==> …` progress lines on stderr and tee Apple `container` stderr (pull/create/start/stop/delete/volume create; Features: Resolving/Fetching/Building/Reusing; build.rosetta config when changing; lifecycle `==> Running …`). Successful `up`/`clone`/`start`/`rebuild` also print terminal and VS Code connection hints there unless the originating command uses `--vscode`. Lifecycle hook script stdout+stderr stream live to host stderr (still captured for failures; `--json` purity → not host stdout). Non-lifecycle `exec` remains capture-then-print. `ADEVCONTAINER_QUIET=1` silences `==> …` status lines, including both connection hints; policy warn-skips and hook script output still emit. Detail: [cli-runtime-boundary — Progress/tee](conventions/cli-runtime-boundary.md#progress--tee).
+**Progress:** StatusPrinter phases on stderr (`==> …`); internal tool tees framed `    | ` (hooks, Features build, clone populate `streamOutput`); connection hints are **info** (not `==> `) after successful `up`/`clone`/`start`/`rebuild` unless originating `--vscode`. User `exec` unframed; interactive TTY unchanged. QUIET silences phase/info only; warn/error/tool body emit. `--json` stdout pure. Full stack: [terminal-output.md](conventions/terminal-output.md); runtime tee notes: [cli-runtime-boundary — Progress/tee](conventions/cli-runtime-boundary.md#progress--tee).
 
 ## Identity
 

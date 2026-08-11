@@ -338,6 +338,48 @@ nonisolated(unsafe) let execTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(execCall.arguments.contains("echo"))
         try MiniTest.expect(!execCall.arguments.contains("-i"))
         try MiniTest.expect(!execCall.arguments.contains("-t"))
+        // User exec is capture-then-print passthrough — not internal tool framing stream.
+        try MiniTest.expect(execCall.streamStderr == nil || execCall.streamStderr == false)
+        try MiniTest.expect(execCall.teeStdoutToStderr == nil || execCall.teeStdoutToStderr == false)
+    }),
+    ("execUserOutputNotStreamFramed", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        { "image": "alpine:3.20", "remoteUser": "vscode", "workspaceFolder": "/workspaces/app" }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName,
+            state: "running",
+            labels: resolved.labels
+        )
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("USER_EXEC_MARK\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let code = try ExecCommand.run(
+            options: ExecOptions(command: ["echo", "USER_EXEC_MARK"], name: resolved.containerName),
+            runtime: runtime
+        )
+        try MiniTest.expectEqual(code, 0)
+        let execCall = mock.calls.first { $0.arguments.first == "exec" }!
+        // No streamOutput framing path for user exec.
+        try MiniTest.expect(execCall.streamStderr != true)
+        try MiniTest.expect(execCall.teeStdoutToStderr != true)
     }),
     ("execInteractiveAddsITAndUsesInteractiveRunner", {
         let workspace = try TestRepo.makeTempWorkspace(configJSON: """

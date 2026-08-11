@@ -156,6 +156,43 @@ public struct FoundationProcessRunner: StreamTeeingProcessRunning {
         final class DataBox: @unchecked Sendable {
             var value = Data()
         }
+        /// Line-buffer host display for internal tool tees; capture stays raw.
+        final class ToolDisplayFramer: @unchecked Sendable {
+            private var remainder = Data()
+            private let lock = NSLock()
+
+            func appendDisplay(_ chunk: Data) {
+                lock.lock()
+                defer { lock.unlock() }
+                remainder.append(chunk)
+                while let nl = remainder.firstIndex(of: 0x0A) {
+                    let lineData = remainder.subdata(in: remainder.startIndex..<nl)
+                    let next = remainder.index(after: nl)
+                    remainder = remainder.subdata(in: next..<remainder.endIndex)
+                    Self.writeFramedLine(lineData)
+                }
+            }
+
+            func flush() {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !remainder.isEmpty else { return }
+                let lineData = remainder
+                remainder = Data()
+                Self.writeFramedLine(lineData)
+            }
+
+            private static func writeFramedLine(_ lineData: Data) {
+                var bytes = [UInt8](lineData)
+                if bytes.last == 0x0D {
+                    bytes.removeLast()
+                }
+                let line = String(bytes: bytes, encoding: .utf8)
+                    ?? String(decoding: bytes, as: UTF8.self)
+                let framed = TerminalStyle.frameToolLine(line) + "\n"
+                try? FileHandle.standardError.write(contentsOf: Data(framed.utf8))
+            }
+        }
         let stdoutBox = DataBox()
         let stderrBox = DataBox()
         let group = DispatchGroup()
@@ -165,13 +202,15 @@ public struct FoundationProcessRunner: StreamTeeingProcessRunning {
             let handle = outPipe.fileHandleForReading
             if teeStdoutToStderr {
                 var accumulated = Data()
+                let framer = ToolDisplayFramer()
                 while true {
                     let chunk = handle.availableData
                     if chunk.isEmpty { break }
                     accumulated.append(chunk)
-                    // Host stderr: progress/hook logs must not pollute `--json` stdout.
-                    try? FileHandle.standardError.write(contentsOf: chunk)
+                    // Host stderr: framed tool lines; must not pollute `--json` stdout.
+                    framer.appendDisplay(chunk)
                 }
+                framer.flush()
                 stdoutBox.value = accumulated
             } else {
                 stdoutBox.value = handle.readDataToEndOfFile()
@@ -183,12 +222,14 @@ public struct FoundationProcessRunner: StreamTeeingProcessRunning {
             let handle = errPipe.fileHandleForReading
             if streamStderr {
                 var accumulated = Data()
+                let framer = ToolDisplayFramer()
                 while true {
                     let chunk = handle.availableData
                     if chunk.isEmpty { break }
                     accumulated.append(chunk)
-                    try? FileHandle.standardError.write(contentsOf: chunk)
+                    framer.appendDisplay(chunk)
                 }
+                framer.flush()
                 stderrBox.value = accumulated
             } else {
                 stderrBox.value = handle.readDataToEndOfFile()

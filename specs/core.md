@@ -98,7 +98,7 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 
 **Image & workspace**
 - `name` (optional; when non-empty after trim, drives the human base of deterministic container/image identity — see Deterministic identity and labels)
-- `image` (required for image-based workspaces)
+- `image` (required for image-based dev containers)
 - Implicit workspace bind: host workspace root → container workspace folder
 
 **Env & user**
@@ -189,7 +189,7 @@ The product MUST resolve a **remote connection user** for every managed create p
 2. Else config `containerUser` when non-empty after trim (local)
 3. Else image label `devcontainer.metadata` `remoteUser` when non-empty after trim (see **Image metadata users** below)
 4. Else image label `devcontainer.metadata` `containerUser` when non-empty after trim
-5. Else the **final OCI image `USER`** of the image that will run the workspace container (config base image when Features are absent; **derived** image when Features produce one), obtained from runtime image inspect
+5. Else the **final OCI image `USER`** of the image that will run the managed dev container (config base image when Features are absent; **derived** image when Features produce one), obtained from runtime image inspect
 6. Else the literal `root`
 
 Local config wins when set: steps 1–2 always beat metadata. Create process user follows **Create process user** below (explicit `containerUser`, else non-root connection user — so metadata `remoteUser` such as `vscode` becomes create `-u` when local `containerUser` is unset).
@@ -509,7 +509,7 @@ See also: [clone.md](clone.md) for volume-mode identity, workspace volume names,
 
 ### Requirement: Up lifecycle (create, start, reuse)
 
-`adevcontainer up` MUST resolve config, admit properties, and ensure a running workspace container: create if missing, start if stopped, reuse if already running with matching identity. Workspace bind MUST mount the host workspace into the container workspace folder. `up` MUST support a machine-readable JSON result on success (and structured failure otherwise).
+`adevcontainer up` MUST resolve config, admit properties, and ensure a running managed dev container: create if missing, start if stopped, reuse if already running with matching identity. Workspace bind MUST mount the host workspace into the container workspace folder. `up` MUST support a machine-readable JSON result on success (and structured failure otherwise).
 
 **Success JSON fields (required)**
 - `outcome` — success indicator consistent with reference CLI style (e.g. `"success"`)
