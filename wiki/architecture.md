@@ -74,7 +74,7 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
 
 ## Identity
 
-- **Human base:** sanitize(`devcontainer.json` `name`) when non-empty after trim; else sanitize(workspace folder basename) — **volume-mode:** git URL repo basename (not a temp host path). DNS-safe (lowercase, non-`[a-z0-9-]` → `-`, trim hyphens, base ~20 chars).
+- **Human base:** sanitize(`devcontainer.json` `name`) when non-empty after trim; else sanitize(workspace folder basename) — **volume-mode:** git URL repo basename (not a temp host path). DNS-safe: lowercase; non-`[a-z0-9-]` → `-`; **collapse consecutive hyphens** (`-{2,}` → `-`); trim leading/trailing hyphens; clip base ~20 chars. Punctuation-heavy names must not yield invalid Apple refs (e.g. `C# (.NET)` → `c-net` → Features tag `adev-c-net:{hash12}`, never `adev-c----net:…` — Apple rejects consecutive hyphens in references).
 - **Container name:** `adev-{base}-{hash12}`; empty base → `adev-{hash12}`; ≤63 chars. Apple `container create --name` is the container **id**.
   - **Bind-mode `hash12`:** workspace path + config path.
   - **Volume-mode `hash12`:** normalized git URL + config relpath (not a temp host path). Stable across reclones of the same repo/config.

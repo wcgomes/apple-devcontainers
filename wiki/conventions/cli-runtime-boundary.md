@@ -107,12 +107,12 @@ Bind-mode `up` stamps the full managed label set including `workspace_mode=bind`
 - **Human base:** `sanitize(devcontainer.json name)` if present and non-empty after trim; else mode-specific fallback:
   - **Bind (`up`):** `sanitize(workspace folder basename)`
   - **Volume (`clone`):** `sanitize(git URL repo basename)` (not the host temp checkout directory name)
-  - DNS-safe: lowercase; non-`[a-z0-9-]` → `-`; trim hyphens; clip base ~20 chars. `name` drives identity when set (not metadata-only).
+  - DNS-safe sanitize (`ContainerIdentity.sanitizeBase`): lowercase; non-`[a-z0-9-]` → `-`; **collapse consecutive hyphens** (`-{2,}` → `-`); trim leading/trailing hyphens; clip base ~20 chars. `name` drives identity when set (not metadata-only). Example: `C# (.NET)` → `c-net` (not `c----net`) so Features tags stay valid Apple references (`adev-c-net:{hash12}`); Apple rejects consecutive hyphens in refs.
 - **Container name:** `adev-{base}-{hash12}`; empty base → `adev-{hash12}`; full name ≤63 chars.
   - Bind: `hash12` = workspace path + config path.
   - Volume: `hash12` = normalized git URL + config relpath (not temp checkout path).
 - **Workspace volume (volume-mode):** `adev-{base}-{hash12}-ws`.
-- **Features derived image tag:** `adev-{base}:{hash12}` where `hash12` is the content hash of base image + features; empty base → `adevcontainer:{hash12}`. No `adevcontainer/features:` prefix and no `/features` path segment. Config `image` without a Features build is left as written.
+- **Features derived image tag:** `adev-{base}:{hash12}` where `hash12` is the content hash of base image + features; empty base → `adevcontainer:{hash12}`. No `adevcontainer/features:` prefix and no `/features` path segment. Config `image` without a Features build is left as written. Tag validity depends on sanitize collapse (above).
 
 Do not depend on Docker-style `ps --filter label=` as the primary discovery mechanism ([gaps](../domain/devcontainer-apple-gaps.md)).
 

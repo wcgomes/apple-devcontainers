@@ -2218,14 +2218,50 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(base, "my-project")
         let named = ContainerIdentity.humanBase(configName: "Cool App", workspacePath: "/Users/me/My_Project")
         try MiniTest.expectEqual(named, "cool-app")
-        // After clip to 20, re-trim so base cannot end/start with `-`.
+        // Collapse consecutive hyphens; clip ≤20; re-trim so base cannot end/start with `-`.
         let clipped = ContainerIdentity.humanBase(
             configName: "test----------------end",
             workspacePath: "/Users/me/My_Project"
         )
-        try MiniTest.expectEqual(clipped, "test")
+        try MiniTest.expectEqual(clipped, "test-end")
         try MiniTest.expect(!clipped.hasPrefix("-"))
         try MiniTest.expect(!clipped.hasSuffix("-"))
+        try MiniTest.expect(!clipped.contains("--"))
+    }),
+    ("sanitizeBaseCollapsesPunctuationHyphensForValidImageTag", {
+        // Regression: "C# (.NET)" previously → "c----net" → invalid `adev-c----net:<hash>`.
+        let csharp = ContainerIdentity.sanitizeBase("C# (.NET)")
+        try MiniTest.expectEqual(csharp, "c-net")
+        try MiniTest.expect(!csharp.contains("--"))
+        try MiniTest.expect(!csharp.hasPrefix("-"))
+        try MiniTest.expect(!csharp.hasSuffix("-"))
+        try MiniTest.expect(csharp.range(of: "^[a-z0-9-]+$", options: .regularExpression) != nil)
+
+        let tag = DerivedImageTag.compute(
+            baseImage: "mcr.microsoft.com/dotnet/sdk:8.0",
+            ordered: [],
+            nameBase: csharp
+        )
+        try MiniTest.expect(tag.hasPrefix("adev-c-net:"))
+        try MiniTest.expect(!tag.contains("--"))
+        let hashPart = String(tag.split(separator: ":").last ?? "")
+        try MiniTest.expectEqual(hashPart.count, 12)
+        try MiniTest.expect(hashPart.range(of: "^[0-9a-f]{12}$", options: .regularExpression) != nil)
+
+        // Multiple punctuation/spaces collapse to single hyphens.
+        let multi = ContainerIdentity.sanitizeBase("Foo!!!  Bar... Baz")
+        try MiniTest.expectEqual(multi, "foo-bar-baz")
+        try MiniTest.expect(!multi.contains("--"))
+
+        // Empty after sanitize still yields empty base (features fallback path).
+        let onlyPunct = ContainerIdentity.sanitizeBase("#$%^")
+        try MiniTest.expectEqual(onlyPunct, "")
+        let emptyTag = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: [],
+            nameBase: onlyPunct
+        )
+        try MiniTest.expect(emptyTag.hasPrefix("adevcontainer:"))
     }),
     ("containerPlatformDefaultArm64", {
         try MiniTest.expectEqual(
