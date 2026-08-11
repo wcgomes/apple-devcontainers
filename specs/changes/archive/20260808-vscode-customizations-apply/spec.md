@@ -23,7 +23,7 @@ Presence of a `customizations.vscode` object continues to signal VS Code-oriente
 
 **Identity**
 
-- Retained extensions and settings MUST NOT participate in create identity / config hash material. Editing only `customizations.vscode` MUST NOT by itself force container recreate via identity drift; apply idempotency (marker hash) handles re-apply inside an existing container.
+- Retained extensions and settings MUST NOT participate in create identity / config hash material. Editing only `customizations.vscode` MUST NOT by itself force a container rebuild via identity drift; apply idempotency (marker hash) handles re-apply inside an existing container.
 
 **Merge source (v1)**
 
@@ -118,7 +118,7 @@ When resolved config retains a non-empty well-formed `customizations.vscode.sett
 - And the container is not deleted or stopped solely due to that failure
 
 #### Scenario: reuse/start repairs settings on marker drift
-- Given a running managed container whose guest marker hash does not match the normalized customizations from loadable config (e.g. config settings edited on host without recreate)
+- Given a running managed container whose guest marker hash does not match the normalized customizations from loadable config (e.g. config settings edited on host without rebuilding)
 - When the user runs `start` or an `up` reuse path that loads config
 - Then the CLI attempts settings repair according to the drifted payload
 - And soft-fail policy still applies
@@ -256,7 +256,7 @@ The CLI MUST record successful application of the **normalized** customizations 
 
 1. Before apply work, the CLI SHOULD read the marker (if present) and compare to the hash of the current normalized payload from resolved/loadable config.
 2. When the marker hash **matches**, the CLI MUST skip redundant settings merge and extensions install for that payload.
-3. When the marker is **missing** or the hash **differs** (config edited without recreate), the CLI MUST treat apply as pending and run the applicable apply steps (settings per settings requirement; extensions only when the open gate is satisfied).
+3. When the marker is **missing** or the hash **differs** (config edited without rebuilding), the CLI MUST treat apply as pending and run the applicable apply steps (settings per settings requirement; extensions only when the open gate is satisfied).
 4. The CLI MUST write/update the marker to the new hash only after the apply steps required for that invocation’s pending work have completed successfully for the full normalized payload. If only settings could run (no open) and extensions remain pending, the CLI MUST NOT claim full-payload success in the marker until extensions are also successfully applied **or** the normalized payload has no extensions. (If payload has both settings and extensions: settings-only success on create-path without open leaves extensions pending — marker MUST NOT match full payload until extensions succeed on a later open, unless product chooses a split marker; v1 MUST ensure extensions still run on first successful open when not yet applied. A single marker for the full payload is acceptable if create-path settings re-merge remains safe/idempotent when extensions later complete and then the full hash is written.)
 5. Apply MUST NOT blindly re-run on every postAttach or every successful open when the marker already matches.
 6. Marker hash input MUST NOT include transitive `extensionDependencies` IDs discovered at install time — only config-listed extension IDs (normalized) and settings. Transitive installs remain side effects of applying listed IDs when apply runs.
@@ -273,7 +273,7 @@ The CLI MUST record successful application of the **normalized** customizations 
 - And does not fail solely due to skip
 
 #### Scenario: hash drift re-applies
-- Given a guest marker that does not match the current normalized payload (e.g. extension ID added in config without recreate)
+- Given a guest marker that does not match the current normalized payload (e.g. extension ID added in config without rebuilding)
 - When a path runs that can apply (settings on create/reuse/start load; extensions on open success)
 - Then the CLI attempts apply for the drifted payload per the settings and extensions requirements
 - And updates the marker only according to successful full-payload completion rules above

@@ -16,6 +16,9 @@ public enum FeatureDockerfileGenerator {
     }
 
     /// Write context: `features/<index>/…` package files + `Dockerfile`.
+    ///
+    /// - Parameter baseUser: Base image OCI `USER` from a **successful** inspect (nil/empty → restore `root`).
+    ///   Callers MUST fail closed on inspect failure before invoking this — do not pass a fabricated user.
     public static func write(
         baseImage: String,
         ordered: [FeatureOrder.OrderedFeature],
@@ -23,6 +26,7 @@ public enum FeatureDockerfileGenerator {
         contextDirectory: String,
         remoteUser: String? = nil,
         containerUser: String? = nil,
+        baseUser: String? = nil,
         fileManager: FileManager = .default
     ) throws -> BuildContext {
         try fileManager.createDirectory(atPath: contextDirectory, withIntermediateDirectories: true)
@@ -35,7 +39,8 @@ public enum FeatureDockerfileGenerator {
 
         let userInstallEnv = FeatureOptions.userInstallEnvironment(
             remoteUser: remoteUser,
-            containerUser: containerUser
+            containerUser: containerUser,
+            baseUser: baseUser
         )
 
         var lines: [String] = []
@@ -68,14 +73,24 @@ public enum FeatureDockerfileGenerator {
             lines.append("# Feature: \(feature.admitted.reference)")
             lines.append("USER root")
             lines.append("COPY \(featureDirName) /tmp/adev-feature-\(index)")
+            // Match @devcontainers/cli: chmod -R 0755 the package before install so
+            // lifecycle scripts (e.g. shell-history oncreate.sh) remain executable when
+            // install.sh copies them into /usr/local/share/… for bare-path shell hooks.
+            // (sh -lc /path/script requires +x; OCI layers often ship scripts as 0644.)
             lines.append(
-                "RUN chmod +x /tmp/adev-feature-\(index)/install.sh "
+                "RUN chmod -R 0755 /tmp/adev-feature-\(index) "
                     + "&& cd /tmp/adev-feature-\(index) "
                     + "&& \(exportPrefix)./install.sh "
                     + "&& rm -rf /tmp/adev-feature-\(index)"
             )
             lines.append("")
         }
+
+        // Restore base image default user after root install layers (empty OCI USER → root).
+        let restoreUser = RemoteUserResolution.nonEmptyTrimmed(baseUser) ?? "root"
+        lines.append("# Restore base image USER (install layers run as root)")
+        lines.append("USER \(restoreUser)")
+        lines.append("")
 
         let contents = lines.joined(separator: "\n")
         let dockerfilePath = (contextDirectory as NSString).appendingPathComponent("Dockerfile")

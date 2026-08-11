@@ -122,8 +122,12 @@ final class RebuildScenario {
         }
         if args.starts(with: ["image", "inspect"]) {
             let ref = args.last ?? ""
-            guard existingImages.contains(ref) else { return fail("missing") }
+            // Derived tags exist only when explicitly listed (Features reuse).
+            if ref.hasPrefix("adev-") || ref.hasPrefix("adevcontainer:") {
+                guard existingImages.contains(ref) else { return fail("missing") }
+            }
             if ref == RecoveryHelper.helperImageReference {
+                guard existingImages.contains(ref) else { return fail("missing") }
                 let object: [String: Any] = [
                     "configuration": [
                         "name": ref,
@@ -135,7 +139,9 @@ final class RebuildScenario {
                 ]
                 return ok(try! JSONSerialization.data(withJSONObject: [object]))
             }
-            return ok(Data())
+            // Base / config / derived (when present): Apple-shaped JSON with USER for resolution.
+            let payload = MockProcessRunner.imageInspectJSON(reference: ref, user: "vscode")
+            return ok(try! JSONSerialization.data(withJSONObject: payload))
         }
         if args.first == "start" {
             return startFails ? fail("start failed") : ok(Data())
@@ -347,7 +353,7 @@ enum RebuildOpenSupport {
 nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
     // ═══════════════════════ Section 3: Phase A (non-destructive gate) ═══════════════════════
 
-    ("rebuildSelectsSingleManagedContainerAndRecreates", {
+    ("rebuildSelectsSingleManagedContainerAndRebuilds", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20","remoteUser":"vscode"}"#)
         defer { try? FileManager.default.removeItem(at: ws) }
         let s = RebuildScenario()
@@ -754,7 +760,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(hash != "devcontainer.config_hash=oldhash", "config_hash drift-updated")
     }),
 
-    ("rebuildEqualHashStillRecreates", {
+    ("rebuildEqualHashStillRuns", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20"}"#)
         defer { try? FileManager.default.removeItem(at: ws) }
         let s = RebuildScenario()
@@ -768,8 +774,8 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         s.containers = [info]
         s.install()
         _ = try RebuildCommand.run(options: RebuildOptions(), runtime: s.runtime)
-        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "delete" }, "recreate even with equal hash")
-        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "create" }, "recreate even with equal hash")
+        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "delete" }, "rebuild deletes with equal hash")
+        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "create" }, "rebuild creates with equal hash")
     }),
 
     ("rebuildVolumePreservesWorkspaceVolumeAndGitUrl", {
@@ -785,7 +791,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         let result = rebuildResult!
         try MiniTest.expectEqual(result.workspaceVolume, "adev-repo-ws")
         try MiniTest.expectEqual(result.gitUrl, "https://github.com/example/repo.git")
-        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.starts(with: ["volume", "create"]) }, "workspace volume not recreated")
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.starts(with: ["volume", "create"]) }, "workspace volume was not created")
         try MiniTest.expect(!s.mock.calls.contains { $0.arguments.starts(with: ["volume", "delete"]) }, "workspace volume never deleted")
         let createArgs = s.mock.calls.first { $0.arguments.first == "create" }!.arguments
         try MiniTest.expect(createArgs.contains { $0.contains("adev-repo-ws") }, "create mounts existing workspace volume")
@@ -1414,6 +1420,36 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!execsRoot.contains { $0.contains("chown") }, "no chown for root remote user")
     }),
 
+    ("rebuildBindChownsConfigNamedVolumeMounts", {
+        // Bind rebuild with non-root + config volume: chown mount target even when remoteUser unchanged.
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "vscode",
+          "mounts": [
+            "source=opencode-config,target=/home/vscode/.config/opencode,type=volume"
+          ]
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "bind-vol",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path,
+                remoteUser: "vscode"
+            )
+        )
+        s.containers = [info]
+        s.install()
+        _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+        let chownScripts = s.mock.calls.compactMap { $0.arguments.last }.filter { $0.contains("chown -R") }
+        try MiniTest.expect(!chownScripts.isEmpty, "bind rebuild chowns config named volumes")
+        try MiniTest.expect(chownScripts.contains { $0.contains("/home/vscode/.config/opencode") })
+        try MiniTest.expect(!chownScripts.contains { $0.contains(ws.path) }, "must not chown host bind path")
+    }),
+
     ("rebuildHookOrderOnNewContainer", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
         {
@@ -1844,10 +1880,13 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         let guest = RecordingGuestOps()
         let restore = RebuildOpenSupport.install(launcher: launcher, resolverPath: "/usr/local/bin/code")
         defer { restore() }
-        try withRebuildCustomizationsOverrides(guest: guest) {
-            _ = try RebuildCommand.run(options: RebuildOptions(openVSCode: true), runtime: s.runtime)
+        let stderr = try withEnabledStatusStderr {
+            try withRebuildCustomizationsOverrides(guest: guest) {
+                _ = try RebuildCommand.run(options: RebuildOptions(openVSCode: true), runtime: s.runtime)
+            }
         }
         try MiniTest.expectEqual(launcher.calls.count, 1, "VS Code opened once")
+        try expectNoPostSuccessConnectionHints(stderr)
         try MiniTest.expect(guest.writes.contains { $0.contains("extensions.json") }, "extensions applied after open")
         let postAttachIdx = s.mock.calls.firstIndex { $0.arguments.last?.contains("postAttachCustom") == true }
         try MiniTest.expect(postAttachIdx != nil, "postAttach ran after open")
@@ -1929,13 +1968,18 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         )
         s.containers = [info]
         s.install()
-        let result = try RebuildCommand.run(options: RebuildOptions(), runtime: s.runtime)
+        var capturedResult: RebuildResult?
+        let stderr = try withEnabledStatusStderr {
+            capturedResult = try RebuildCommand.run(options: RebuildOptions(), runtime: s.runtime)
+        }
+        let result = capturedResult!
         let obj = result.jsonObject()
         let parsed = try JSONSerialization.jsonObject(with: result.jsonString().data(using: .utf8)!) as? [String: Any]
         try MiniTest.expect(parsed?["outcome"] as? String == "success", "json round-trip")
         try MiniTest.expect(parsed?["containerId"] as? String == s.newContainerId, "json containerId")
         try MiniTest.expect(obj["containerName"] as? String == "adev-mybase-abc123def456", "json containerName")
         try MiniTest.expect(obj["gitUrl"] == nil && obj["workspaceVolume"] == nil, "bind json omits volume fields")
+        try expectPostSuccessConnectionHints(stderr, nameOrId: "adev-mybase-abc123def456")
     }),
 
     ("rebuildVolumeResultExposesGitUrlWorkspaceVolume", {
@@ -2003,6 +2047,15 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
 
 func withCapturedStderr(_ body: () throws -> Void, capture: inout String) throws {
     try withCapturedFD(fd: 2, body: body, capture: &capture)
+}
+
+func withEnabledStatusStderr(_ body: () throws -> Void) throws -> String {
+    let previousStatusEnabled = StatusPrinter.enabled
+    defer { StatusPrinter.enabled = previousStatusEnabled }
+    StatusPrinter.enabled = true
+    var stderr = ""
+    try withCapturedStderr(body, capture: &stderr)
+    return stderr
 }
 
 func withCapturedStdout(_ body: () throws -> Void, capture: inout String) throws {

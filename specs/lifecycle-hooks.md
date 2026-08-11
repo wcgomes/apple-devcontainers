@@ -2,13 +2,13 @@
 
 ## Purpose
 
-Lifecycle hook surface for `onCreateCommand` through `postStartCommand` (string or argv forms, create-path order, reuse/start behavior, delete-on-fail). postAttach gating lives in [vscode.md](vscode.md); create-path matrices on `up` also appear in [core.md](core.md).
+Lifecycle hook surface for `onCreateCommand` through `postStartCommand` (string | argv | object-map forms, create-path order, reuse/start behavior, delete-on-fail). postAttach gating lives in [vscode.md](vscode.md); create-path matrices on `up` also appear in [core.md](core.md).
 
 ## Requirements
 
 ### Requirement: Lifecycle hook surface
 
-The CLI MUST admit and honor these lifecycle properties in addition to existing `postCreateCommand`. Each property MUST accept a **string** or **argv array of strings** (same forms as core `postCreateCommand`). Omitted properties MUST be treated as no-ops. Hooks that run MUST execute via AppleContainerRuntime **exec** into the running container (not baked into the image), using the effective remote/container user and workspace folder when set.
+The CLI MUST admit and honor these lifecycle properties in addition to existing `postCreateCommand`. Each property MUST accept a **string**, an **argv array of strings**, or an **object map** of name → string or argv array (Dev Containers named/parallel form; product runs named entries sequentially in sorted name order). Omitted properties and empty object maps MUST be treated as no-ops. Hooks that run MUST execute via AppleContainerRuntime **exec** into the running container (not baked into the image), using the **resolved remote connection user** (see [core.md](core.md) **Remote connection user resolution**) and workspace folder when set — not create-only `containerUser` when `remoteUser` differs.
 
 | Property | Role |
 |----------|------|
@@ -48,5 +48,31 @@ The CLI MUST admit and honor these lifecycle properties in addition to existing 
 - When config is resolved
 - Then both admit successfully and map to exec argv using the same shell-vs-argv rules as `postCreateCommand`
 
-See also: [core.md](core.md) **Up lifecycle** for the create/reuse/start path matrix (including postAttach and vscode customizations rows); [vscode.md](vscode.md) for **postAttachCommand policy (CLI-only)**.
+#### Scenario: Lifecycle object (named) form admits
+- Given `onCreateCommand` as an object map (e.g. `{ "shell-history": "/path/oncreate.sh" }`) with string or argv values
+- When config or feature metadata is resolved
+- Then admission succeeds; each named entry maps to a leaf shell/argv command and runs via exec (sequentially in sorted name order)
+
+### Requirement: Lifecycle hook progress and live stream
+
+When a create-path hook, restart `postStartCommand`, or running `postAttachCommand` executes, the CLI MUST:
+
+1. Emit a stderr progress status line in the existing StatusPrinter family before the hook runs: `==> Running <property>` (string/argv form), or the labeled form `==> Running <property> (<name>)` for each object-map entry.
+2. Live-tee the hook command’s **stdout and stderr** to **host stderr** while the command runs, and still capture that output for failure diagnostics (structured error text). Non-lifecycle `exec` MAY remain capture-then-print.
+3. Keep machine JSON on stdout pure when `--json` (or equivalent) is used — hook script stdout MUST NOT write to host stdout (tee to host stderr only).
+4. Treat `ADEVCONTAINER_QUIET=1` as silencing **status lines only** (`==> Running …`); hook script output MUST still emit on host stderr under QUIET.
+
+This requirement MUST NOT change hook order, admitted forms, fail/delete-on-fail policy, or postAttach gating.
+
+#### Scenario: Hook run emits status and live-tees I/O
+- Given a create-path (or restart postStart / running postAttach) hook that prints to stdout and stderr and exits 0, and quiet mode unset
+- When the CLI executes that hook
+- Then stderr includes `==> Running <property>` (or labeled form), the hook’s stdout and stderr appear live on host stderr, and with `--json` host stdout remains pure machine JSON
+
+#### Scenario: Quiet silences status not hook output
+- Given `ADEVCONTAINER_QUIET=1` and a hook that prints a recognizable line to stdout
+- When the CLI executes that hook
+- Then `==> Running …` status lines are not printed and the hook’s output still appears on host stderr
+
+See also: [core.md](core.md) **Up lifecycle** for the create/reuse/start path matrix (including postAttach and vscode customizations rows); [vscode.md](vscode.md) for **postAttachCommand policy (CLI-only)**; [features.md](features.md) **Features progress status lines** for StatusPrinter / QUIET / `--json` norms.
 

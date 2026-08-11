@@ -29,7 +29,7 @@ Each valued flag accepts `=VALUE` or two-token (`FLAG` + next array element) for
 | `--tmpfs=PATH` / two-token | `--tmpfs`, path; if value contains `:`, take path before first `:` only (Docker opts stripped) |
 | `--cpus=N` / `-c` / two-token | **No** createTokens; merge into `cpuLimit` (see memory/CPU merge) |
 | `--memory=SIZE` / `-m` / two-token | **No** createTokens; merge into `memoryLimit` (see memory/CPU merge) |
-| `--network=NAME` / two-token | `--network`, `NAME`; **named only** — reject `host`, `bridge`, `none`, empty, `container:*` (case-insensitive) |
+| `--network=NAME` / two-token | `--network`, `NAME`; **named only** — warn-skip `host`, `bridge`, `none`, `container:*` (case-insensitive); empty name remains hard-error |
 | `--rosetta` | `--rosetta` |
 | `--ssh` | `--ssh` |
 | `--read-only` | `--read-only` |
@@ -44,15 +44,22 @@ Each valued flag accepts `=VALUE` or two-token (`FLAG` + next array element) for
 
 **Do NOT allow via runArgs** (prefer first-class config properties): `-e`/`--env`, `-u`/`--user`, `-w`/`--workdir`, `-p`/`--publish`, `-v`/`--volume`, `--mount`, `--name`, `--label`/`-l`, `-i`/`-t`/`-d`, `--rm`, `--entrypoint`.
 
-**Forever reject (still hard-error)**
+**Warn-skip (do not apply; continue admission)** — known Apple-incompatible optional flags:
 
 - `--privileged` and `--privileged=…`
 - Any `--device`, `--device=…`, or `--device` + value token form
 - `--security-opt`, `--gpus`, `--ipc`, `--pid`, `--userns`, `--cgroupns`, `--hostname`, `--add-host`, `--sysctl`, `--group-add`, `--runtime` (and `=…` / two-token forms)
-- Network modes `host` / `bridge` / `none` / `container:*` / empty
-- Any other flag or bare token not consumed by the allowlist rules above
+- Network modes `host` / `bridge` / `none` / `container:*` (empty network name remains hard-error)
 
-Errors MUST name the offending `runArgs` entry and state allowlist or forever-reject policy.
+Each skipped entry MUST emit a stderr warning naming the entry and that it is ignored due to Apple container incompatibility. Skipped entries MUST NOT appear in effective runArgs or config hash material. Do **not** map `--privileged` → `--virtualization`.
+
+**Still hard-error**
+
+- First-class smuggling flags (`-e`/`-u`/`-w`/`-p`/`-v`/… listed above)
+- Any other flag or bare token not consumed by the allowlist rules above
+- Incomplete valued forms (e.g. bare `--cap-add` with no name)
+
+Errors MUST name the offending `runArgs` entry and state allowlist or first-class collision policy.
 
 #### Scenario: Allowlisted runArgs admit and map
 - Given `runArgs`: `["--init", "--cap-add=NET_ADMIN", "--cap-add", "SYS_PTRACE", "--cap-drop=MKNOD"]`
@@ -77,20 +84,20 @@ Errors MUST name the offending `runArgs` entry and state allowlist or forever-re
 - When config is validated
 - Then validation succeeds
 
-#### Scenario: Reject privileged
-- Given `runArgs` including `--privileged`
+#### Scenario: Warn-skip privileged keeps allowlisted flags
+- Given `runArgs` including `--privileged` and `--init`
 - When config is validated
-- Then the CLI fails naming `--privileged`
+- Then admission succeeds; effective runArgs contain only `--init`; stderr warns about `--privileged`
 
-#### Scenario: Reject device
-- Given `runArgs` including `--device=/dev/net/tun:/dev/net/tun`
+#### Scenario: Warn-skip device
+- Given `runArgs` including `--device=/dev/net/tun:/dev/net/tun` (optionally with allowlisted flags)
 - When config is validated
-- Then the CLI fails naming the device entry
+- Then admission succeeds; the device entry is absent from effective runArgs; stderr warns
 
-#### Scenario: Reject network=host and Docker-only modes
-- Given `runArgs` including `--network=host` (or bridge/none/container:*)
+#### Scenario: Warn-skip network=host and Docker-only modes
+- Given `runArgs` including `--network=host` (or bridge/none/container:*) plus an allowlisted flag
 - When config is validated
-- Then the CLI fails with a structured error rejecting that network mode
+- Then admission succeeds; the Docker-only network mode is absent from effective runArgs; stderr warns
 
 #### Scenario: Reject unknown flag
 - Given `runArgs` including any non-allowlisted flag (e.g. `--not-a-real-flag`)
@@ -179,7 +186,7 @@ The repository MUST provide pure JSON fixtures for lifecycle, runArgs, and hostR
 | `Tests/Fixtures/lifecycle-hooks.json` | `onCreateCommand`, `updateContentCommand`, `postCreateCommand`, `postStartCommand`; MAY include admitted `postAttachCommand` |
 | `Tests/Fixtures/runargs-host.json` | Allowlisted `runArgs` and parseable `hostRequirements` (`memory` and/or `cpus`) |
 
-Fixtures MUST NOT include forever-rejected props (no privileged/device, no features, no Compose). They SHOULD remain Apple-container-runnable for optional integration tests.
+Ordinary fixtures MUST NOT include Compose or unknown/first-class-smuggling runArgs (hard-error). Privileged/device family entries are valid warn-skip inputs (see warn-skip scenarios); keep default fixtures free of them unless exercising that path. They SHOULD remain Apple-container-runnable for optional integration tests.
 
 #### Scenario: Lifecycle / runArgs / hostRequirements fixtures admit
 - Given each lifecycle / runArgs / hostRequirements fixture file

@@ -74,15 +74,19 @@ public struct RuntimeImageInspection: Equatable, Sendable {
     public var reference: String
     public var digests: [String]
     public var platforms: [RuntimeImagePlatform]
+    /// Final OCI image `USER` when present in inspect JSON. Empty/nil means absent — never fabricated `"root"`.
+    public var user: String?
 
     public init(
         reference: String,
         digests: [String] = [],
-        platforms: [RuntimeImagePlatform] = []
+        platforms: [RuntimeImagePlatform] = [],
+        user: String? = nil
     ) {
         self.reference = reference
         self.digests = digests
         self.platforms = platforms
+        self.user = user
     }
 
     public func hasPlatform(_ platform: String) -> Bool {
@@ -533,26 +537,39 @@ public struct AppleContainerRuntime: Sendable {
     }
 
     private func extractImageLabels(_ obj: [String: Any]) -> [String: String] {
-        if let labels = obj["labels"] as? [String: String] {
+        func asStringMap(_ value: Any?) -> [String: String]? {
+            if let labels = value as? [String: String] { return labels }
+            if let labels = value as? [String: Any] {
+                let mapped = labels.compactMapValues { $0 as? String }
+                return mapped.isEmpty ? nil : mapped
+            }
+            return nil
+        }
+
+        if let labels = asStringMap(obj["labels"]) ?? asStringMap(obj["Labels"]) {
             return labels
         }
-        if let labels = obj["Labels"] as? [String: String] {
+        if let cfg = obj["configuration"] as? [String: Any],
+           let labels = asStringMap(cfg["labels"]) ?? asStringMap(cfg["Labels"]) {
             return labels
-        }
-        if let labels = obj["labels"] as? [String: Any] {
-            return labels.compactMapValues { $0 as? String }
-        }
-        if let cfg = obj["configuration"] as? [String: Any] {
-            if let labels = cfg["labels"] as? [String: String] {
-                return labels
-            }
-            if let labels = cfg["labels"] as? [String: Any] {
-                return labels.compactMapValues { $0 as? String }
-            }
         }
         if let config = obj["Config"] as? [String: Any],
-           let labels = config["Labels"] as? [String: String] {
+           let labels = asStringMap(config["Labels"]) ?? asStringMap(config["labels"]) {
             return labels
+        }
+        // Apple `container image inspect`: variants[].config.config.Labels
+        if let variants = obj["variants"] as? [[String: Any]] {
+            for variant in variants {
+                if let outer = variant["config"] as? [String: Any] {
+                    if let inner = outer["config"] as? [String: Any],
+                       let labels = asStringMap(inner["Labels"]) ?? asStringMap(inner["labels"]) {
+                        return labels
+                    }
+                    if let labels = asStringMap(outer["Labels"]) ?? asStringMap(outer["labels"]) {
+                        return labels
+                    }
+                }
+            }
         }
         return [:]
     }
@@ -646,7 +663,8 @@ public struct AppleContainerRuntime: Sendable {
         workdir: String? = nil,
         env: [String: String] = [:],
         interactive: Bool = false,
-        stdinData: Data? = nil
+        stdinData: Data? = nil,
+        streamOutput: Bool = false
     ) throws -> ProcessResult {
         var args = ["exec"]
         if let user, !user.isEmpty {
@@ -673,6 +691,19 @@ public struct AppleContainerRuntime: Sendable {
         args.append(contentsOf: command)
 
         let selected = interactive ? interactiveRunner : runner
+        // Lifecycle hooks: tee child stdout+stderr to host stderr while capturing both so
+        // long-running scripts are visible and `--json` host stdout stays pure.
+        if streamOutput, !interactive, let streaming = selected as? any StreamTeeingProcessRunning {
+            return try streaming.run(
+                executable: executablePath,
+                arguments: args,
+                environment: nil,
+                currentDirectory: nil,
+                stdinData: stdinData,
+                streamStderr: true,
+                teeStdoutToStderr: true
+            )
+        }
         return try selected.run(
             executable: executablePath,
             arguments: args,
@@ -984,11 +1015,62 @@ printf 'RECOVERY_APPLIED:%s\n' "$actual"
         let reference = (object["reference"] as? String)
             ?? ((object["configuration"] as? [String: Any])?["name"] as? String)
             ?? requestedReference
+        let user = Self.extractOCIUser(from: object)
         return RuntimeImageInspection(
             reference: reference,
             digests: digests,
-            platforms: platforms
+            platforms: platforms,
+            user: user
         )
+    }
+
+    /// Pull OCI `USER` from Apple / Docker-shaped image inspect payloads.
+    /// Returns nil when absent or whitespace-only — never fabricates `"root"`.
+    static func extractOCIUser(from object: [String: Any]) -> String? {
+        func trimmedUser(_ value: Any?) -> String? {
+            guard let s = value as? String else { return nil }
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.isEmpty ? nil : t
+        }
+
+        // Apple `container image inspect`: variants[].config.config.User
+        if let variants = object["variants"] as? [[String: Any]] {
+            for variant in variants {
+                if let outer = variant["config"] as? [String: Any] {
+                    if let inner = outer["config"] as? [String: Any],
+                       let user = trimmedUser(inner["User"] ?? inner["user"]) {
+                        return user
+                    }
+                    if let user = trimmedUser(outer["User"] ?? outer["user"]) {
+                        return user
+                    }
+                }
+                if let user = trimmedUser(variant["User"] ?? variant["user"]) {
+                    return user
+                }
+            }
+        }
+
+        // Docker-style Config.User
+        if let config = object["Config"] as? [String: Any],
+           let user = trimmedUser(config["User"] ?? config["user"]) {
+            return user
+        }
+        // Nested configuration.user / configuration.User
+        if let configuration = object["configuration"] as? [String: Any] {
+            if let user = trimmedUser(configuration["User"] ?? configuration["user"]) {
+                return user
+            }
+            if let config = configuration["config"] as? [String: Any],
+               let user = trimmedUser(config["User"] ?? config["user"]) {
+                return user
+            }
+        }
+        // Top-level
+        if let user = trimmedUser(object["User"] ?? object["user"]) {
+            return user
+        }
+        return nil
     }
 
     private func parseMounts(from object: [String: Any]) throws -> [ContainerMountInfo] {
@@ -1103,13 +1185,15 @@ printf 'RECOVERY_APPLIED:%s\n' "$actual"
 
     @discardableResult
     public func invoke(_ arguments: [String], streamStderr: Bool = false) throws -> ProcessResult {
-        if streamStderr, let foundation = runner as? FoundationProcessRunner {
-            return try foundation.run(
+        if streamStderr, let streaming = runner as? any StreamTeeingProcessRunning {
+            return try streaming.run(
                 executable: executablePath,
                 arguments: arguments,
                 environment: nil,
                 currentDirectory: nil,
-                streamStderr: true
+                stdinData: nil,
+                streamStderr: true,
+                teeStdoutToStderr: false
             )
         }
         return try runner.run(

@@ -173,7 +173,7 @@ When `features` is non-empty after admission, on a fresh create path the product
 
 **MUST NOT** depend on Rosetta being installed: Features builds rely on `build.rosetta=false` (native arm64 BuildKit).
 
-Reuse running / start stopped: MUST NOT re-fetch/rebuild features (already baked into the image on create). Config hash (including features) still drives recreate when features change.
+Reuse running / start stopped: MUST NOT re-fetch/rebuild features (already baked into the image on create). Config hash (including features) still drives a new create path when features change.
 
 #### Scenario: Create uses derived image after build
 - Given a config with `image` and one OCI feature
@@ -203,13 +203,13 @@ Reuse running / start stopped: MUST NOT re-fetch/rebuild features (already baked
 #### Scenario: Feature option change changes config identity
 - Given the same feature ref but different options object
 - When config hashes (and derived tags) are computed
-- Then the hashes/tags differ (recreate path engages; no silent wrong-feature reuse)
+- Then the hashes/tags differ (the new create path engages; no silent wrong-feature reuse)
 
 ---
 
 ### Requirement: build.rosetta consent (one-time, native arm64 BuildKit)
 
-Before Features fetch/build on a create/recreate path, the product MUST ensure Apple container BuildKit is configured with **`build.rosetta=false`** so arm64 image builds do not require Rosetta ([apple/container#1825](https://github.com/apple/container/issues/1825)).
+Before Features fetch/build on a create or rebuild path, the product MUST ensure Apple container BuildKit is configured with **`build.rosetta=false`** so arm64 image builds do not require Rosetta ([apple/container#1825](https://github.com/apple/container/issues/1825)).
 
 1. Read the **effective** value via `container system property list` (parse `[build]` / `rosetta`).
 2. If already **`false`** → proceed **silently** (no prompt, no warning, no config write).
@@ -435,12 +435,12 @@ All prior bullets (image & workspace, env & user, mounts & ports, lifecycle, run
 
 ### Requirement: Up lifecycle create image selection (MODIFIED)
 
-**Modify** **Up lifecycle (create, start, reuse)** so that on paths that create a new container (fresh create or recreate):
+**Modify** **Up lifecycle (create, start, reuse)** so that on paths that create a new container (fresh create or rebuild):
 
 - **Before create**, if resolved `features` is non-empty: ensure **build.rosetta=false** (consent), then **resolve → fetch → order → contribution merge → Dockerfile generate → `container build`** (or reuse derived tag). Create uses the **derived image** with contributions merged and **`--platform`** host-native.
 - Then start and lifecycle hooks (onCreate → updateContent → postCreate → postStart, etc.); feature-contributed hooks merge per ADDED merge requirement (installs are already in the derived image).
 - If `features` is absent or empty: create uses config `image` as today (still with default platform); Features build path is not required.
-- Reuse running / start stopped paths MUST NOT re-fetch/rebuild features unless product identity says config/features hash drift requires recreate (existing drift/recreate policy applies; features hash is part of config identity material when features present).
+- Reuse running / start stopped paths MUST NOT re-fetch/rebuild features unless product identity says config/features hash drift requires a new create path (existing drift policy applies; features hash is part of config identity material when features present).
 
 Success JSON fields remain required (`outcome`, `containerId`, `remoteUser`, `remoteWorkspaceFolder`).
 
@@ -456,7 +456,7 @@ Success JSON fields remain required (`outcome`, `containerId`, `remoteUser`, `re
 
 #### Scenario: Reuse running does not re-fetch features
 - Given a matching container already running with features identity satisfied
-- When the user runs `up` without recreate
+- When the user runs `up` without rebuilding
 - Then no feature fetch/build is required and lifecycle hooks are not re-run
 
 ---
@@ -481,7 +481,7 @@ Existing fixture rows remain required and MUST remain valid under Features-aware
 
 ### Requirement: Config hash identity includes features (MODIFIED)
 
-**Modify** deterministic identity / config hash behavior so that when `features` is present, hash material MUST include the selected feature refs, options, and ordered identity inputs. Changing features MUST change config hash so reuse and drift detection remain correct (recreate when features change).
+**Modify** deterministic identity / config hash behavior so that when `features` is present, hash material MUST include the selected feature refs, options, and ordered identity inputs. Changing features MUST change config hash so reuse and drift detection remain correct (a new create path runs when features change).
 
 #### Scenario: Features participate in identity hash
 - Given two configs identical except for a feature option value

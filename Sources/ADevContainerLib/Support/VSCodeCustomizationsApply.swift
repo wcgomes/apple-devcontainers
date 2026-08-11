@@ -591,7 +591,7 @@ public enum VSCodeCustomizationsApply {
         guard !payload.isEmpty else { return .skippedEmpty }
 
         let guest = guestOverride ?? ExecVSCodeGuestOps(runtime: runtime)
-        let user = config.effectiveUser
+        let user = config.connectionUser
 
         do {
             let home = try guest.resolveHome(containerId: containerId, user: user)
@@ -645,7 +645,7 @@ public enum VSCodeCustomizationsApply {
 
         let guest = guestOverride ?? ExecVSCodeGuestOps(runtime: runtime)
         let downloader = downloaderOverride ?? MarketplaceVSCodeVSIXDownloader()
-        let user = config.effectiveUser
+        let user = config.connectionUser
 
         do {
             let home = try guest.resolveHome(containerId: containerId, user: user)
@@ -678,12 +678,13 @@ public enum VSCodeCustomizationsApply {
             var failMessages: [String] = []
             var registryDirty = false
 
-            // BFS: config IDs first, then each package.json extensionDependencies.
-            var queue = payload.extensions
+            // BFS: config IDs first (depth 0), then each package.json extensionDependencies.
+            var queue: [(id: String, depth: Int)] = payload.extensions.map { ($0, 0) }
             var visitedBareIDs = Set<String>()
 
             while !queue.isEmpty {
-                let id = queue.removeFirst()
+                let item = queue.removeFirst()
+                let id = item.id
                 let bareKey = bareExtensionId(id).lowercased()
                 if visitedBareIDs.contains(bareKey) { continue }
                 visitedBareIDs.insert(bareKey)
@@ -702,6 +703,10 @@ public enum VSCodeCustomizationsApply {
                     }
                     installedFolder = folder
                 } else {
+                    let label = item.depth > 0
+                        ? "Installing \(id) (dependency)"
+                        : "Installing \(id)"
+                    StatusPrinter.detail(label, level: item.depth + 1)
                     do {
                         let artifact = try downloader.fetchVSIX(extensionId: id)
                         let dest = (extDir as NSString).appendingPathComponent(artifact.installFolderName)
@@ -739,7 +744,7 @@ public enum VSCodeCustomizationsApply {
                 for dep in parseExtensionDependencies(pkgText) {
                     let depKey = bareExtensionId(dep).lowercased()
                     if !visitedBareIDs.contains(depKey) {
-                        queue.append(dep)
+                        queue.append((dep, item.depth + 1))
                     }
                 }
             }

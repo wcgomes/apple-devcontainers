@@ -68,8 +68,8 @@ Assume Swift 6.x / SPM already available. Test-first: write failing tests before
 
 ## 4. Phase B — delete old, preserve volumes, create path
 
-- [x] 4.1 Write failing tests: identity preservation — delete is called exactly once for the OLD container name; new create uses the SAME name; labels come from the OLD container's label dict + updates ONLY for drift-eligible keys (never recomputed via `volumeModeLabels` from a fresh identity with the new config name), so bind labels `managed`/`workspace_mode`/`local_folder`/`config_file` and volume labels `git_url`/`workspace_volume` stay byte-identical while `config_hash` + derived labels (`workspace_folder`/`remote_user`/`config_volumes`) update; equal hash still recreates (no skip) (path: `Tests/adevcontainerTests/RebuildCommandTests.swift`)
-- [x] 4.2 Write failing tests: volume preservation — `*-ws` volume and config named volumes are NEVER deleted or recreated on rebuild (assert no `volume delete`/`volume create` on existing names; `ensureVolume` reuse status); same `*-ws` mounted on new container; no git clone / `git pull` invoked; newly declared config volume created (path: `Tests/adevcontainerTests/RebuildCommandTests.swift`)
+- [x] 4.1 Write failing tests: identity preservation — delete is called exactly once for the OLD container name; new create uses the SAME name; labels come from the OLD container's label dict + updates ONLY for drift-eligible keys (never recomputed via `volumeModeLabels` from a fresh identity with the new config name), so bind labels `managed`/`workspace_mode`/`local_folder`/`config_file` and volume labels `git_url`/`workspace_volume` stay byte-identical while `config_hash` + derived labels (`workspace_folder`/`remote_user`/`config_volumes`) update; equal hash still rebuilds (no skip) (path: `Tests/adevcontainerTests/RebuildCommandTests.swift`)
+- [x] 4.2 Write failing tests: volume preservation — `*-ws` volume and config named volumes are NEVER deleted or replaced on rebuild (assert no `volume delete`/`volume create` on existing names; `ensureVolume` reuse status); same `*-ws` mounted on new container; no git clone / `git pull` invoked; newly declared config volume created (path: `Tests/adevcontainerTests/RebuildCommandTests.swift`)
 - [x] 4.3 Write failing tests: create request parity — bind uses `CreateRequest.from` with preserved host workspace path; volume uses `CreateRequest.fromVolumeMode` with `enableSSHForward: true` only when `SSH_AUTH_SOCK` non-empty, `false` (and no failure) when absent (path: `Tests/adevcontainerTests/RebuildCommandTests.swift`)
 - [x] 4.4 Write failing tests: volume-mode post-create — `FeatureGitEnsure.ensurePresent` injects `git:1` when config lacks git/common-utils (status line when injecting; no double-add); `ensureWorkspaceWritableByRemoteUser` runs only when effective `remoteUser` differs from stamped `devcontainer.remote_user` (path: `Tests/adevcontainerTests/RebuildCommandTests.swift`)
 - [x] 4.5 Write failing tests: create-path hooks run in fresh-create order on the NEW container (onCreate → updateContent → postCreate → postStart); non-zero create-path hook → delete-on-fail of the NEW container + stderr warning that the old container was already removed; workspace/config volumes survive (path: `Tests/adevcontainerTests/RebuildCommandTests.swift`)
@@ -108,11 +108,10 @@ Assume Swift 6.x / SPM already available. Test-first: write failing tests before
 
 ## 6. Docs and final gate
 
-- [x] 6.1 [P] README: command table row for `rebuild`, quick-start note, forced-recreate + volume-preservation wording, `--vscode` gate parity, `--json` note; hash-mismatch → `rebuild` (not `--recreate`) (path: `README.md`)
-- [x] 6.2 [P] Help text: usage row + `printCommandHelp("rebuild")` consistent with README (selection, forced recreate, volume preservation, `--vscode`); no `--recreate` in usage/`up` help (path: `Sources/ADevContainerLib/Support/CommandSurface.swift`)
+- [x] 6.1 [P] README: command table row for `rebuild`, quick-start note, forced-rebuild + volume-preservation wording, `--vscode` gate parity, `--json` note; hash-mismatch → `rebuild` (path: `README.md`)
+- [x] 6.2 [P] Help text: usage row + `printCommandHelp("rebuild")` consistent with README (selection, forced rebuild, volume preservation, `--vscode`) (path: `Sources/ADevContainerLib/Support/CommandSurface.swift`)
 - [x] 6.3 Run the full unit suite; fix regressions (path: `Tests/adevcontainerTests/`)
 - [x] 6.4 Grep/regression: no path in rebuild code that deletes `*-ws` or config named volumes; no silent-nil config read left in rebuild flow; postAttach/extensions gating identical to up/clone call sites (path: `Sources/ADevContainerLib/Commands/RebuildCommand.swift`)
-- [x] 6.5 Remove obsolete `up --recreate`: delete flag from parser/`UpOptions`/`UpCommand`/help/usage; hash-mismatch fails with `config_hash_mismatch` hinting `adevcontainer rebuild` (managed selection); `--recreate` fails closed as unknown flag; tests cover mismatch hint + unknown flag (path: `Sources/ADevContainerLib/Commands/UpCommand.swift`, `Sources/ADevContainerLib/Support/CommandSurface.swift`, `Sources/adevcontainer/AdevcontainerMain.swift`, `Tests/adevcontainerTests/AllCommandTests.swift`)
 
 ## Checkpoint — docs / suite
 - [x] verify README/help describe rebuild without parity overclaim
@@ -123,8 +122,8 @@ Assume Swift 6.x / SPM already available. Test-first: write failing tests before
 
 ## 7. Contract landing
 
-- [x] 7.1 Fold the MODIFIED deltas into `specs/managed-lifecycle.md` (selection table row + `-w` gate + forced-recreate note) (path: `specs/managed-lifecycle.md`)
-- [x] 7.2 Fold the MODIFIED deltas into `specs/core.md` (recreate/drift policy sentence + create-path matrix row) (path: `specs/core.md`)
+- [x] 7.1 Fold the MODIFIED deltas into `specs/managed-lifecycle.md` (selection table row + `-w` gate + forced-rebuild note) (path: `specs/managed-lifecycle.md`)
+- [x] 7.2 Fold the MODIFIED deltas into `specs/core.md` (drift policy sentence + create-path matrix row) (path: `specs/core.md`)
 - [x] 7.3 Fold the MODIFIED deltas into `specs/clone.md` (freshness carve-out scoped to `clone`; rebuild reuse clause) (path: `specs/clone.md`)
 - [x] 7.4 Fold the MODIFIED deltas into `specs/vscode.md` (command list, postAttach policy consistency, rebuild scenarios) (path: `specs/vscode.md`)
 - [x] 7.5 Fold the MODIFIED deltas into `specs/features.md` (derived-tag reuse clause for rebuild) (path: `specs/features.md`)
@@ -242,7 +241,7 @@ The recovery phases below are appended to preserve the existing checklist. They 
 ## 13. Real Apple-container recovery E2E
 
 - [x] 13.1 Write a real-runtime E2E test gated by explicit recovery E2E prerequisites that creates a clone-origin volume workspace, preserves a sentinel file/config named volume, and records the exact workspace/config labels (path: `Tests/adevcontainerTests/AllIntegrationTests.swift`)
-- [x] 13.2 Write a real-runtime E2E test that makes a post-delete create-path hook fail after the old container is removed, asserts the failed container is cleaned, and verifies the helper image/platform, helper identity, exact `*-ws` read-write mount, and no workspace/config volume delete/recreate (path: `Tests/adevcontainerTests/AllIntegrationTests.swift`)
+- [x] 13.2 Write a real-runtime E2E test that makes a post-delete create-path hook fail after the old container is removed, asserts the failed container is cleaned, and verifies the helper image/platform, helper identity, exact `*-ws` read-write mount, and no workspace/config volume delete/replace (path: `Tests/adevcontainerTests/AllIntegrationTests.swift`)
 - [x] 13.3 Write a real-runtime non-TTY/JSON E2E test that edits the reported secure temp file, invokes the exact named retry, verifies the edited config is written before rebuild reads it, and confirms the final container sees the same bytes/hash (path: `Tests/adevcontainerTests/AllIntegrationTests.swift`)
 - [x] 13.4 Write a real-runtime E2E test for helper visibility/prune protection and post-success helper/temp cleanup, including cleanup assertions when the test aborts (path: `Tests/adevcontainerTests/AllIntegrationTests.swift`)
 - [x] 13.5 Register recovery E2E cases with the existing integration harness and skip only when explicit runtime, image, and host prerequisites are absent; never silently skip a requested recovery E2E run (path: `Tests/adevcontainerTests/main.swift`)
@@ -264,7 +263,7 @@ The recovery phases below are appended to preserve the existing checklist. They 
 
 ## Checkpoint — recovery contract
 - [x] verify no unresolved clarification markers remain in the four change artifacts
-- [x] verify no recovery path deletes/recreates/repopulates workspace or config named volumes
+- [x] verify no recovery path deletes/replaces/repopulates workspace or config named volumes
 - [x] verify archive/contract-landing authorized and completed (20260810)
 
 ---

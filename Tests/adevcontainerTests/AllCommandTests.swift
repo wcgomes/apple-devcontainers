@@ -45,6 +45,7 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
                 }
                 return nil
             },
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
             { args in
                 if args.first == "create" {
                     return ProcessResult(
@@ -74,11 +75,16 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
             result.remoteWorkspaceFolder,
             "/workspaces/\(workspace.lastPathComponent)"
         )
+        // Neither config user set + empty OCI USER → connection user `root`.
+        try MiniTest.expectEqual(result.remoteUser, "root")
         let obj = try JSONSerialization.jsonObject(with: try result.jsonData()) as! [String: Any]
         try MiniTest.expect(obj["outcome"] != nil)
         try MiniTest.expect(obj["containerId"] != nil)
-        try MiniTest.expect(obj["remoteUser"] != nil)
+        try MiniTest.expectEqual(obj["remoteUser"] as? String, "root")
         try MiniTest.expect(obj["remoteWorkspaceFolder"] != nil)
+        let createArgs = mock.calls.first { $0.arguments.first == "create" }!.arguments
+        try MiniTest.expect(!createArgs.contains("-u"), "connection root → omit create -u")
+        try MiniTest.expect(createArgs.contains("devcontainer.remote_user=root"))
     }),
     ("upReusesRunning", {
         let workspace = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
@@ -173,20 +179,125 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
             let hint = err.hint ?? ""
             try MiniTest.expect(hint.contains("adevcontainer rebuild"), "hint points to rebuild")
             try MiniTest.expect(hint.contains("--name") || hint.contains("auto"), "hint mentions managed selection")
-            try MiniTest.expect(!hint.contains("--recreate"), "hint must not mention removed --recreate")
         }
     }),
-    ("upRecreateFlagIsUnknown", {
-        try MiniTest.expectThrows({
-            _ = try CommandSurface.parseArgs(["--recreate"])
-        }) { error in
-            let err = error as! CLIError
-            try MiniTest.expectEqual(err.code, CLIErrorCode.usage)
-            try MiniTest.expect(
-                err.message.contains("Unknown option") && err.message.contains("--recreate"),
-                "unknown-flag fail-closed for removed --recreate"
-            )
+    ("upChownsNamedVolumeMountsForNonRoot", {
+        let bindDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("adev-up-bind-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: bindDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: bindDir) }
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "vscode",
+          "mounts": [
+            "source=opencode-config,target=/home/vscode/.config/opencode,type=volume",
+            "source=\(bindDir.path),target=/bound-host,type=bind"
+          ]
         }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
+                }
+                if args.starts(with: ["volume", "create"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
+            { args in
+                if args.first == "create" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("\(resolved.containerName)\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "start" || args.first == "exec" || args.first == "delete" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.remoteUser, "vscode")
+        let chownExecs = mock.calls.filter { call in
+            call.arguments.first == "exec"
+                && (call.arguments.last?.contains("chown -R") == true)
+        }
+        try MiniTest.expectEqual(chownExecs.count, 1, "exactly one named-volume chown exec")
+        let script = chownExecs[0].arguments.last ?? ""
+        try MiniTest.expect(script.contains("/home/vscode/.config/opencode"))
+        try MiniTest.expect(!script.contains("/bound-host"), "must not chown bind targets")
+        try MiniTest.expect(chownExecs[0].arguments.contains("root"))
+    }),
+    ("upSkipsNamedVolumeChownForRoot", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "root",
+          "mounts": [
+            "source=opencode-config,target=/root/.config/opencode,type=volume"
+          ]
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
+                }
+                if args.starts(with: ["volume", "create"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
+            { args in
+                if args.first == "create" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("\(resolved.containerName)\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "start" || args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        let chownExecs = mock.calls.filter { call in
+            call.arguments.first == "exec"
+                && (call.arguments.last?.contains("chown") == true)
+        }
+        try MiniTest.expect(chownExecs.isEmpty, "root connection user skips named-volume chown")
     })
 ]
 
@@ -625,7 +736,9 @@ nonisolated(unsafe) let phase1Tests: [(String, () throws -> Void)] = [
             workspacePath: ws.path, localEnv: ["HOME": "/Users/test"]
         )
         try MiniTest.expectEqual(resolved.config.remoteUser, "vscode")
+        try MiniTest.expectEqual(resolved.config.containerUser, "vscode")
         try MiniTest.expectEqual(resolved.config.effectiveUser, "vscode")
+        try MiniTest.expectEqual(resolved.config.createProcessUser, "vscode")
         try MiniTest.expectEqual(
             resolved.config.workspaceFolder,
             "/workspaces/\(ws.lastPathComponent)"
@@ -644,8 +757,268 @@ nonisolated(unsafe) let phase1Tests: [(String, () throws -> Void)] = [
         )
         let args = request.createArguments()
         try MiniTest.expect(args.contains("ENVIRONMENT=Development"))
-        try MiniTest.expect(args.contains("vscode"))
+        // Both users vscode → create -u vscode and stamp remote_user=vscode
+        try MiniTest.expect(args.contains("-u"))
+        if let i = args.firstIndex(of: "-u") {
+            try MiniTest.expectEqual(args[i + 1], "vscode")
+        }
         try MiniTest.expect(args.contains(resolved.config.workspaceFolder))
+        try MiniTest.expectEqual(resolved.labels[ContainerIdentity.labelRemoteUser], "vscode")
+    }),
+    ("remoteUserWithoutContainerUserSetsCreateU", {
+        // Apple attach uses container default user; non-root connection becomes create -u.
+        let config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            remoteUser: "alice",
+            workspaceFolder: "/workspaces/app"
+        )
+        let request = CreateRequest.from(
+            resolved: config,
+            identityName: "ctr",
+            labels: ContainerIdentity.bindModeLabels(
+                workspacePath: "/ws",
+                configPath: "/ws/.devcontainer/devcontainer.json",
+                configHash: "h",
+                workspaceFolder: config.workspaceFolder,
+                remoteUser: "alice"
+            ),
+            configHash: "h",
+            workspacePath: "/ws"
+        )
+        try MiniTest.expectEqual(request.user, "alice")
+        let args = request.createArguments()
+        try MiniTest.expect(args.contains("-u"))
+        if let i = args.firstIndex(of: "-u") {
+            try MiniTest.expectEqual(args[i + 1], "alice")
+        }
+        try MiniTest.expectEqual(
+            request.labels[ContainerIdentity.labelRemoteUser],
+            "alice"
+        )
+    }),
+    ("remoteUserAndContainerUserCreateUIsContainerUser", {
+        let config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            remoteUser: "alice",
+            containerUser: "bob",
+            workspaceFolder: "/workspaces/app"
+        )
+        let request = CreateRequest.from(
+            resolved: config,
+            identityName: "ctr",
+            labels: ContainerIdentity.bindModeLabels(
+                workspacePath: "/ws",
+                configPath: "/ws/.devcontainer/devcontainer.json",
+                configHash: "h",
+                workspaceFolder: config.workspaceFolder,
+                remoteUser: "alice"
+            ),
+            configHash: "h",
+            workspacePath: "/ws"
+        )
+        try MiniTest.expectEqual(request.user, "bob")
+        let args = request.createArguments()
+        if let i = args.firstIndex(of: "-u") {
+            try MiniTest.expectEqual(args[i + 1], "bob")
+        }
+        try MiniTest.expectEqual(
+            request.labels[ContainerIdentity.labelRemoteUser],
+            "alice"
+        )
+    }),
+    ("upCreateStampsOCIFallbackRemoteUser", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        { "image": "alpine:3.20" }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: "node"),
+            { args in
+                if args.first == "create" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("\(resolved.containerName)\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "start" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, jsonOutput: true, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.remoteUser, "node")
+        let createArgs = mock.calls.first { $0.arguments.first == "create" }!.arguments
+        // Non-root OCI connection user applied as create -u (Apple attach default user).
+        try MiniTest.expect(createArgs.contains("-u"))
+        if let i = createArgs.firstIndex(of: "-u") {
+            try MiniTest.expectEqual(createArgs[i + 1], "node")
+        }
+        try MiniTest.expect(createArgs.contains("devcontainer.remote_user=node"))
+    }),
+    ("upCreateStampsMetadataRemoteUserOverOCIRoot", {
+        // Official base image pattern: OCI USER=root + metadata remoteUser=vscode
+        // Create must -u vscode so Apple attach terminal is not root.
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        { "image": "mcr.microsoft.com/devcontainers/base:ubuntu" }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        let metaLabels = [
+            DevContainerMetadataLabel.labelKey: #"{"remoteUser":"vscode"}"#
+        ]
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: "root", labels: metaLabels),
+            { args in
+                if args.first == "create" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("\(resolved.containerName)\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "start" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, jsonOutput: true, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.remoteUser, "vscode")
+        let createArgs = mock.calls.first { $0.arguments.first == "create" }!.arguments
+        try MiniTest.expect(createArgs.contains("-u"), "metadata vscode → create -u for Apple attach")
+        if let i = createArgs.firstIndex(of: "-u") {
+            try MiniTest.expectEqual(createArgs[i + 1], "vscode")
+        }
+        try MiniTest.expect(createArgs.contains("devcontainer.remote_user=vscode"))
+    }),
+    ("upCreateFailsWhenInspectFailsAndNoConfigUsers", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.starts(with: ["image", "inspect"]) {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+                }
+                if args.first == "create" {
+                    return ProcessResult(exitCode: 0, stdout: Data("should-not\n".utf8), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: workspace.path, skipPull: true),
+                runtime: runtime,
+                localEnv: [:]
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(err.message.lowercased().contains("resolve") || err.message.lowercased().contains("inspect"))
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+    }),
+    ("execUsesStampedRemoteUserLabel", {
+        let mock = MockProcessRunner()
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelRemoteUser: "alice",
+            ContainerIdentity.labelWorkspaceFolder: "/workspaces/app"
+        ]
+        let entry = MockProcessRunner.containerListJSON(
+            id: "ctr-alice",
+            state: "running",
+            labels: labels
+        )
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data("alice\n".utf8), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let code = try ExecCommand.run(
+            options: ExecOptions(command: ["id", "-un"], name: "ctr-alice"),
+            runtime: runtime
+        )
+        try MiniTest.expectEqual(code, 0)
+        let execCall = mock.calls.first { $0.arguments.first == "exec" }!
+        try MiniTest.expect(execCall.arguments.contains("-u"))
+        if let i = execCall.arguments.firstIndex(of: "-u") {
+            try MiniTest.expectEqual(execCall.arguments[i + 1], "alice")
+        }
+    }),
+    ("execOmitsUWhenRemoteUserLabelEmpty", {
+        let mock = MockProcessRunner()
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelRemoteUser: "",
+            ContainerIdentity.labelWorkspaceFolder: "/workspaces/app"
+        ]
+        let entry = MockProcessRunner.containerListJSON(
+            id: "ctr-legacy",
+            state: "running",
+            labels: labels
+        )
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try ExecCommand.run(
+            options: ExecOptions(command: ["true"], name: "ctr-legacy"),
+            runtime: runtime
+        )
+        let execCall = mock.calls.first { $0.arguments.first == "exec" }!
+        try MiniTest.expect(!execCall.arguments.contains("-u"))
     })
 ]
 
@@ -824,7 +1197,7 @@ nonisolated(unsafe) let phase3Tests: [(String, () throws -> Void)] = [
                 if args.first == "exec" {
                     return ProcessResult(exitCode: 0, stdout: Data("ok\n".utf8), stderr: Data())
                 }
-                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                return nil
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
@@ -862,7 +1235,7 @@ nonisolated(unsafe) let phase3Tests: [(String, () throws -> Void)] = [
                 if args.first == "exec" {
                     return ProcessResult(exitCode: 7, stdout: Data(), stderr: Data("failed\n".utf8))
                 }
-                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                return nil
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
@@ -918,7 +1291,7 @@ nonisolated(unsafe) let phase3Tests: [(String, () throws -> Void)] = [
                     alive = false
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
-                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                return nil
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
@@ -1024,7 +1397,8 @@ private enum LifecycleUpSupport {
                 if args.first == "delete" {
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
-                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                // Let MockProcessRunner default image inspect / other fallthroughs apply.
+                return nil
             }
         ]
         return mock
@@ -1290,7 +1664,7 @@ nonisolated(unsafe) let phase4CommandTests: [(String, () throws -> Void)] = [
                     execCount += 1
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
-                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                return nil
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
@@ -1396,14 +1770,18 @@ private enum FeaturesUpTestSupport {
     static func mockHandler(
         createId: String = "ctr",
         onBuild: (([String]) -> ProcessResult)? = nil,
-        onExec: (([String]) -> ProcessResult)? = nil
+        onExec: (([String]) -> ProcessResult)? = nil,
+        baseUser: String? = nil
     ) -> ([String]) -> ProcessResult? {
         { args in
             if args.starts(with: ["list"]) {
                 let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
                 return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
             }
-            if args.starts(with: ["image", "inspect"]) || args.starts(with: ["image", "list"]) {
+            if let inspect = MockProcessRunner.imageInspectHandler(baseUser: baseUser)(args) {
+                return inspect
+            }
+            if args.starts(with: ["image", "list"]) {
                 return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
             }
             if args.first == "build" {
@@ -1426,7 +1804,7 @@ private enum FeaturesUpTestSupport {
                 if let onExec { return onExec(args) }
                 return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
             }
-            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            return nil
         }
     }
 }

@@ -129,8 +129,8 @@ nonisolated(unsafe) let configReaderTests: [(String, () throws -> Void)] = [
     }),
 
     ("strictBindAdmissionFailurePassesThroughItsCode", {
-        // Forever-rejected runArgs are admission failures: passthrough code, never config_not_found.
-        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20","runArgs":["--privileged"]}"#)
+        // Unknown runArgs still hard-error at admission: passthrough code, never config_not_found.
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20","runArgs":["--not-a-real-flag"]}"#)
         let configFile = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
         try MiniTest.expectThrows({
             _ = try ConfigReader.read(

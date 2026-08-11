@@ -60,7 +60,7 @@ On `clone`, the CLI MUST:
 - An explicit `workspaceFolder` in config still wins after substitution (including forms that embed `${localWorkspaceFolderBasename}`).
 
 #### Scenario: Public happy path discovers nested config
-- Given a public repository containing `.devcontainer/devcontainer.json` with a valid `image` (and no forever-rejected properties)
+- Given a public repository containing `.devcontainer/devcontainer.json` with a valid `image` (and no hard-error properties such as Compose)
 - When the user runs `adevcontainer clone <git-url>` with host git and runtime available (or mocked success)
 - Then config is discovered from `.devcontainer/devcontainer.json`, resolve succeeds, and the clone flow continues to create
 
@@ -155,10 +155,10 @@ See also: [core.md](core.md) **Deterministic identity and labels** for shared sa
 
 On `clone` create, the CLI MUST:
 
-1. **Workspace volume freshness (re-clone) — `clone` only:** If the workspace named volume already exists, `clone` MUST **delete it and recreate it empty** before mount. MUST NOT reuse a dirty existing workspace volume tree. (Config `type=volume` mounts remain list-then-create/reuse per Named volume reuse policy — only the clone workspace `*-ws` volume is delete-and-recreate.)
-2. **`rebuild` carve-out:** `rebuild` of a volume-mode managed container MUST **reuse** the existing `*-ws` volume tree with its data and MUST NOT delete, recreate, or re-populate it; MUST NOT run git re-clone or `git pull` inside it. The freshness rule applies to `clone` only.
+1. **Workspace volume freshness (re-clone) — `clone` only:** If the workspace named volume already exists, `clone` MUST **delete it and create it empty** before mount. MUST NOT reuse a dirty existing workspace volume tree. (Config `type=volume` mounts remain list-then-create/reuse per Named volume reuse policy — only the clone workspace `*-ws` volume is delete-and-create.)
+2. **`rebuild` carve-out:** `rebuild` of a volume-mode managed container MUST **reuse** the existing `*-ws` volume tree with its data and MUST NOT delete, replace, or re-populate it; MUST NOT run git re-clone or `git pull` inside it. The freshness rule applies to `clone` only.
 3. Mount that volume as the **container workspace folder** (the implicit workspace mount). MUST NOT bind-mount a durable host project directory as the workspace for clone-created containers.
-4. **Existing managed container name:** If a container with the computed managed name already exists, `clone` MUST fail with a structured error and MUST NOT silently reuse, replace, or attach to that container. (No automatic delete/recreate of an existing managed container on `clone`; use `rebuild` to force-recreate while preserving the volume.)
+4. **Existing managed container name:** If a container with the computed managed name already exists, `clone` MUST fail with a structured error and MUST NOT silently reuse, replace, or attach to that container. (No automatic delete/replacement of an existing managed container on `clone`; use `rebuild` to force-rebuild while preserving the volume.)
 5. Set labels on create:
 
 | Label | Requirement |
@@ -170,6 +170,8 @@ On `clone` create, the CLI MUST:
 | `devcontainer.local_folder` | MUST be adapted for volume mode: a `volume://…` form **or** empty/synthetic value — MUST NOT require a durable host path that outlives clone temps |
 | `devcontainer.config_file` | MUST identify the config file used (absolute-at-resolve and/or repo-relative form suitable for inspect) |
 | Config hash label (e.g. `devcontainer.config_hash`) | MUST be set per existing drift/identity policy |
+| `devcontainer.workspace_folder` | Container workspace folder |
+| `devcontainer.remote_user` | MUST be the **resolved remote connection user** (non-empty). MUST NOT be stamped empty on a successful create (same contract as bind-mode — see [core.md](core.md) **Remote connection user resolution** and **Deterministic identity and labels**) |
 | `devcontainer.config_volumes` | MUST be set on clone create when the resolved config has one or more `mounts` with `type=volume`: comma-separated list of those volume **source** names. MUST be omitted or empty when there are no config named volumes. `prune` MUST use this label (when present) to remove config named volumes for managed/volume-mode targets without re-resolving host config. |
 
 Additional existing labels MAY be set. Discovery of managed containers for `list` / `start` / extended `stop` MUST filter client-side on `devcontainer.managed=adevcontainer` after machine JSON list (Apple `container` has no label filter API).
@@ -184,15 +186,15 @@ Additional existing labels MAY be set. Discovery of managed containers for `list
 - When labels are inspected
 - Then `devcontainer.managed` is `adevcontainer`, `devcontainer.workspace_mode` is `volume`, `devcontainer.workspace_volume` matches the volume name, and `devcontainer.git_url` is present (normalized)
 
-#### Scenario: Re-clone deletes and recreates existing workspace volume
+#### Scenario: Re-clone deletes and creates a fresh workspace volume
 - Given a workspace volume name `adev-{base}-{hash12}-ws` that already exists (e.g. after a prior container-only delete) with residual files
 - When the user runs `adevcontainer clone` for the same URL/config identity
-- Then the CLI deletes that volume, recreates it empty, and mounts the fresh volume (MUST NOT mount the dirty pre-existing tree)
+- Then the CLI deletes that volume, creates it empty, and mounts the fresh volume (MUST NOT mount the dirty pre-existing tree)
 
-#### Scenario: rebuild reuses the workspace volume instead of recreating
+#### Scenario: rebuild reuses the workspace volume instead of replacing it
 - Given a volume-mode managed container whose `*-ws` volume exists with data
 - When the user runs `adevcontainer rebuild --name <that-name>`
-- Then the CLI does not delete or recreate the volume, mounts the same volume on the new container, and the data remains present (no re-clone)
+- Then the CLI does not delete or replace the volume, mounts the same volume on the new container, and the data remains present (no re-clone)
 
 #### Scenario: Existing managed container name fails closed
 - Given a container already exists with the computed clone container name
@@ -212,7 +214,7 @@ After the container is created and started (and Features have ensured in-contain
 
 **Populate steps — MUST**
 
-1. Exec in-container `git clone` of the git URL into the workspace folder (workdir = `workspaceFolder`, as `remoteUser` when set). Implementation MAY clone to a temp path on the volume and move into place when the mount is non-empty (e.g. `lost+found` only).
+1. Exec in-container `git clone` of the git URL into the workspace folder (workdir = `workspaceFolder`, as the **resolved remote connection user** when stamped/non-empty). Implementation MAY clone to a temp path on the volume and move into place when the mount is non-empty (e.g. `lost+found` only).
 2. **Verify** populate with `test -e <workspaceFolder>/.git` (or equivalent path-exists). If verification fails, populate MUST fail structured (MUST NOT treat empty volume as success).
 3. MUST NOT perform host full clone + tar-pipe populate on the happy path. (Runtime tar-pipe MAY remain as an unused utility.)
 4. The product MUST NOT implement explicit Git Credential Manager detection, install, or configuration inside the guest.
@@ -327,7 +329,7 @@ On successful `clone`, stdout machine-readable JSON MUST include at least:
 |-------|---------|
 | `outcome` | Success indicator consistent with `up` (e.g. `"success"`) |
 | `containerId` | Runtime container id |
-| `remoteUser` | Effective remote/container user (may be empty/default if unset) |
+| `remoteUser` | MUST be the **resolved remote connection user** (non-empty after successful create). MUST NOT be empty solely because config omitted both user keys when resolution yielded OCI `USER` or `root` (same contract as `up` / `rebuild`) |
 | `remoteWorkspaceFolder` | Absolute workspace path inside the container |
 | `gitUrl` | Normalized git URL used for identity/labels (userinfo stripped for `scheme://`) |
 | `workspaceVolume` | Workspace named volume name |
@@ -363,7 +365,7 @@ On `adevcontainer clone` only, after config resolve and **before** the Features 
 5. Progress on stderr MUST report e.g. `==> Ensuring git feature for volume workspace` when injecting (StatusPrinter).
 6. Prefer a small helper (e.g. `FeatureGitEnsure.ensurePresent`) under Features/.
 
-**MUST NOT** apply this inject on `up` bind-mode. Forever-rejected docker-* Features policy is unchanged. The git feature is the official OCI feature — not a docker-* id.
+**MUST NOT** apply this inject on `up` bind-mode. docker-* Features remain warn-skip (not hard-error). The git feature is the official OCI feature — not a docker-* id.
 
 Rationale: volume-mode workspaces need git inside the container for **full clone populate** and day-to-day work; probing the base image is heavy without a one-shot run API, and Feature install is idempotent enough when the base already has git.
 

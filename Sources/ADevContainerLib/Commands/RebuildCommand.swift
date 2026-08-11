@@ -1,6 +1,6 @@
 import Foundation
 
-/// `adevcontainer rebuild`: force-recreate a managed container from its current
+/// `adevcontainer rebuild`: force-rebuild a managed container from its current
 /// devcontainer.json, preserving the container identity (same name / same workspace
 /// volume). Two phases split at the delete of the old container:
 ///
@@ -112,7 +112,7 @@ public enum RebuildCommand {
 
         // A later named retry uses the retained helper and session. Validate both identities and
         // write/edit through the helper before the normal strict config read or helper delete gate.
-        // TTY (no --json): open the editor first so a retained broken config is fixed before recreate.
+        // TTY (no --json): open the editor first so a retained broken config is fixed before rebuilding.
         // Non-TTY / --json: apply the current temp bytes (operator already edited offline).
         // openRetry/apply also bounce Apple zombie helpers (list=running, exec rejected).
         if recoveryContext == nil, RecoveryHelper.isRecoveryHelper(selected) {
@@ -163,7 +163,7 @@ public enum RebuildCommand {
                     code: CLIErrorCode.configNotFound,
                     property: ContainerIdentity.labelConfigFile,
                     message: "Managed container has no readable devcontainer config",
-                    hint: "Recreate the container with 'adevcontainer up' or 'adevcontainer clone'"
+                    hint: "Run 'adevcontainer up' or 'adevcontainer clone' to restore the container"
                 )
             }
             resolvedConfig = config
@@ -206,6 +206,8 @@ public enum RebuildCommand {
 
         // Features path (rosetta consent, pull/skip-pull, fetch/build with derived-tag
         // reuse; any failure fails before delete).
+        var knownOCIUser: String?? = nil
+        var knownMetadataUsers: DevContainerMetadataLabel.ImageMetadataUsers? = nil
         if !effectiveConfig.features.isEmpty {
             if let ensureNativeArmBuildOverride {
                 try ensureNativeArmBuildOverride()
@@ -246,17 +248,37 @@ public enum RebuildCommand {
                 to: effectiveConfig
             )
             effectiveConfig.image = featuresResult.derivedImage
+            if featuresResult.didInspectBaseUser {
+                knownOCIUser = featuresResult.baseImageUser
+            }
+            knownMetadataUsers = featuresResult.metadataUsers
         } else if !options.skipPull {
             StatusPrinter.status("Pulling image \(effectiveConfig.image)")
             try? runtime.pullImage(effectiveConfig.image, platform: platform)
         }
 
+        // Expand `${devcontainerId}` with the reused create name before hash / volume ensure.
+        effectiveConfig = VariableSubstitutor.expandDevcontainerId(
+            in: effectiveConfig,
+            id: selected.name
+        )
+
         // Identity. Bind: up parity → hash from the resolved (pre-feature) config. Volume:
         // clone parity → hash from the effective (post-feature) config. Either way labels
         // change only when the underlying material actually changed.
+        // Hash before stamping OCI-resolved connection user onto effectiveConfig.
         let configHash = isVolumeMode
             ? ContainerIdentity.configHash(from: effectiveConfig.hashMaterial())
             : ContainerIdentity.configHash(from: resolvedConfig.hashMaterial())
+
+        let connectionUser = try RemoteUserResolution.resolve(
+            config: effectiveConfig,
+            imageRef: effectiveConfig.image,
+            runtime: runtime,
+            knownOCIUser: knownOCIUser,
+            knownMetadataUsers: knownMetadataUsers
+        )
+        effectiveConfig = RemoteUserResolution.applyingConnectionUser(connectionUser, to: effectiveConfig)
 
         // Label dict = COPY of the selected container's labels with only drift-eligible
         // keys updated (config_hash, workspace_folder, remote_user, config_volumes).
@@ -268,7 +290,7 @@ public enum RebuildCommand {
         var newLabels = RecoveryHelper.normalContainerLabels(labels)
         newLabels[ContainerIdentity.labelConfigHash] = configHash
         newLabels[ContainerIdentity.labelWorkspaceFolder] = effectiveConfig.workspaceFolder
-        newLabels[ContainerIdentity.labelRemoteUser] = effectiveConfig.effectiveUser ?? ""
+        newLabels[ContainerIdentity.labelRemoteUser] = connectionUser
         if configVolumeNames.isEmpty {
             newLabels.removeValue(forKey: ContainerIdentity.labelConfigVolumes)
         } else {
@@ -404,7 +426,7 @@ public enum RebuildCommand {
                 code: CLIErrorCode.runtimeFailed,
                 property: "volumes",
                 message: "Failed to ensure rebuild volumes: \(error.localizedDescription)",
-                hint: "Existing volumes were not deleted or recreated"
+                hint: "Existing volumes were preserved"
             )
         }
         StatusPrinter.status("Creating container \(selected.name)")
@@ -527,12 +549,26 @@ public enum RebuildCommand {
                 try WorkspaceOwnership.ensureWorkspaceWritableByRemoteUser(
                     containerId: id,
                     workspaceFolder: effectiveConfig.workspaceFolder,
-                    remoteUser: effectiveConfig.effectiveUser,
+                    remoteUser: effectiveConfig.connectionUser,
                     runtime: runtime
                 )
             } catch {
-                StatusPrinter.warning("Failed to chown workspace to \(effectiveConfig.effectiveUser ?? "remoteUser"): \(error.localizedDescription)")
+                StatusPrinter.warning("Failed to chown workspace to \(effectiveConfig.connectionUser ?? "remoteUser"): \(error.localizedDescription)")
             }
+        }
+
+        // Config named volumes mount root:root (bind and volume mode). Soft-fail like workspace.
+        do {
+            try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+                containerId: id,
+                mounts: effectiveConfig.mounts,
+                remoteUser: effectiveConfig.connectionUser,
+                runtime: runtime
+            )
+        } catch {
+            StatusPrinter.warning(
+                "Failed to chown named volume mounts for \(effectiveConfig.connectionUser ?? "remoteUser"): \(error.localizedDescription)"
+            )
         }
 
         // Create-path hooks (delete-on-fail of the new container).
@@ -682,6 +718,9 @@ public enum RebuildCommand {
         }
         // Bind recovery resume is only needed while the managed container is missing.
         try? BindRecoveryResume.cleanup(name: selected.name, fileManager: fileManager)
+        if !options.openVSCode {
+            StatusPrinter.connectionHint(nameOrId: result.containerName ?? result.containerId)
+        }
         return result
     }
 
@@ -754,7 +793,7 @@ public enum RebuildCommand {
         let result = RebuildResult(
             outcome: "success",
             containerId: id,
-            remoteUser: config.effectiveUser ?? "",
+            remoteUser: config.connectionUser ?? "",
             remoteWorkspaceFolder: config.workspaceFolder,
             containerName: name,
             gitUrl: isVolumeMode ? imagesLabels[ContainerIdentity.labelGitURL] : nil,
@@ -830,7 +869,7 @@ public enum RebuildCommand {
     ) -> Bool {
         let stamped = labels[ContainerIdentity.labelRemoteUser]?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let effective = config.effectiveUser?
+        let effective = config.connectionUser?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return effective != stamped
     }

@@ -38,7 +38,7 @@ public struct FeatureContributions: Equatable, Sendable {
 }
 
 public enum FeatureContributionMerge {
-    /// Collect contributions from ordered features (already privileged-rejected).
+    /// Collect contributions from ordered features (privileged/securityOpt already warn-stripped).
     public static func collect(from ordered: [FeatureOrder.OrderedFeature]) throws -> FeatureContributions {
         var result = FeatureContributions()
         for f in ordered {

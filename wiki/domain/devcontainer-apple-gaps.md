@@ -8,19 +8,21 @@ Facts that constrain the CLI. Not a full Apple container manual — only gaps th
 |------|------------------------------|--------------------------------|
 | Driver | Docker/Moby engine API | Apple `container` CLI subprocess |
 | Compose | Docker Compose common | **Unsupported** — hard reject |
-| Privileged | `--privileged` widely used | **Rejected** ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)) |
-| Devices | `--device=…` (e.g. `/dev/net/tun`) | **Rejected** ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)) |
-| Features | OCI + local path feature packages + image build | **Supported** (OCI + local path runner); forever-reject `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker`; native arm64 build (no Rosetta by default) |
+| Privileged | `--privileged` widely used | **Warn-skip** — not applied ([0003](../decisions/0003-warn-skip-apple-incompatibles.md)) |
+| Devices | `--device=…` (e.g. `/dev/net/tun`) | **Warn-skip** — not applied ([0003](../decisions/0003-warn-skip-apple-incompatibles.md)) |
+| Features | OCI + local path feature packages + image build | **Supported** (OCI + local path runner); **warn-skip** `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker` and privileged/securityOpt metadata ([0003](../decisions/0003-warn-skip-apple-incompatibles.md)); native arm64 build (no Rosetta by default) |
 | Events / rich watch APIs | Engine events often used by tools | Do not assume Docker-equivalent event stream |
 | List + label filter | `docker ps --filter label=…` | **No label filter on list** — client-side filter after JSON; prefer deterministic name + inspect; product `list` keeps `devcontainer.managed=adevcontainer` only |
 | VS Code | Dev Containers full up/rebuild + clone-in-volume + IDE-owned customizations apply | **Attach** after CLI bring-up (Apple Container support in Remote - Containers). Product `--vscode` on `up`/`start`/`clone`/`rebuild` best-effort opens via `code --folder-uri` (soft-fail). **Apple attach does not auto-install** `customizations.vscode` — CLI applies config-file settings/extensions (see below). Manual attach without flag still valid. Not full Dev Containers parity. Volume-mode via product `clone` (not extension clone-in-volume) |
-| Force-recreate | Often `up --recreate` / Dev Containers rebuild UX | **No `up --recreate`.** `up` fails on config hash mismatch (`config_hash_mismatch`); sole force-recreate is `rebuild` (managed `--name`/picker). Detail: [cli-runtime-boundary](../conventions/cli-runtime-boundary.md#up-reuse-vs-rebuild-force-recreate) |
+| Forced rebuild | Managed-container rebuild workflow | `up` fails on config hash mismatch (`config_hash_mismatch`); use `rebuild` (managed `--name`/picker). Detail: [cli-runtime-boundary](../conventions/cli-runtime-boundary.md#up-reuse-vs-rebuild-forced-rebuild) |
 | Default process | Often long-running or sleep entry | Keep-alive `--entrypoint /bin/sleep` + `infinity` for long-lived devcontainers |
 | Create identity | Name vs id often distinct | `create --name` **is** the id (`configuration.id`) |
 | Bind mounts | File or directory host source OK | **Directory sources only** — file binds rejected by runtime |
 | Workspace I/O | Often bind or named volume | **Bind:** host APFS via virtiofs. **Named volume:** `volume.img` ext4 via virtio-blk — better metadata I/O; rationale for `clone` volume-mode |
+| Named volume ownership | Engine/user mapping varies; often usable by non-root | Apple named volumes mount **root:root**. Non-root connection users get **EACCES** writing home-dir volumes (e.g. config mounts) and creating siblings under root-owned intermediate parents during postCreate/postStart. Product chowns via `WorkspaceOwnership` — see [Named volume ownership](#named-volume-ownership-rootroot) |
 | Host→guest copy | `docker cp` into bind or volume | **`container cp` into a named-volume mount can exit 0 without writing files** (silent no-op). Rootfs paths may still accept `cp`. Product clone populate avoids host→guest copy entirely (in-container `git clone`); tar-pipe utility remains if ever needed — see below |
 | Env PATH | Shell/`${PATH}` often expanded | Apple `container` does **not** expand `${PATH}` — product expands on **create and exec** (`expandEnvPathRefs`); exec-only miss breaks lifecycle (`sh -lc` needs `/bin` on PATH) |
+| Image USER / remoteUser | Docker inspect `Config.User`; metadata often on image labels | Apple image inspect: **`variants[].config.config.User`** (not top-level `Config`). Labels may carry `devcontainer.metadata` with `remoteUser`/`containerUser`. Official `mcr.microsoft.com/devcontainers/base:*` typically **OCI USER root** + metadata **`remoteUser: vscode`**. **Apple attach** ignores nameConfig `remoteUser` and uses container default user (no exec `-u`) — product create `-u` = explicit `containerUser`, else non-root connection user, else omit when root. Chain + stamp: [cli-runtime-boundary — Connection user](../conventions/cli-runtime-boundary.md#connection-user-remoteuser--containeruser). **Inspect failure ≠ root**; never hardcode `vscode`/`node` |
 
 ### Bind vs volume workspace
 
@@ -41,6 +43,12 @@ Detail: [architecture.md](../architecture.md), [cli-runtime-boundary.md](../conv
 - Live non-TTY recovery E2E is opt-in via `ADEVCONTAINER_RECOVERY_E2E=1` (default suite skips). TTY editor path is manual-only; `ADEVCONTAINER_RECOVERY_E2E_TTY=1` only surfaces skip guidance.
 - Feature material for rebuild/recovery git inject on live rebuild must use a durable host path (e.g. `~/Library/Caches`). Apple `container build` effectively drops or breaks contexts under `/var/folders` temp.
 - `--skip-pull` suppresses adevcontainer's explicit image-pull step only. Apple `container` may still auto-fetch a missing image during `create`, so the flag does not guarantee fail-if-absent or runtime-level no-fetch behavior.
+
+### Named volume ownership (root:root)
+
+Apple named volumes present as **root:root** at the mount target. Without a product fix, a non-root connection user cannot write the volume (classic symptom: EACCES on home-dir `type=volume` mounts such as opencode-config) and cannot `mkdir` siblings under intermediate parents that `mkdir -p` created as root (e.g. `/home/vscode/.local` blocks `devcontainer-features` next to a volume target under `.local/share/…`).
+
+**Product:** after start, before create-path hooks, `WorkspaceOwnership` chowns `type=volume` mount targets to the connection user (non-root). Workspace named-volume path (`adev-*-ws`) remains a separate call (`ensureWorkspaceWritableByRemoteUser`); config mounts use the same helper (`ensureNamedVolumeMountsWritableByRemoteUser`). **Never** chown bind mounts on the host; **skip** readonly volume mounts. Intermediate parents get **non-recursive** chown; walk stops before system tops (`/`, `/home`, `/Users`, `/var`, …) so nested home paths become writable for siblings without chowning `/home`. Failure: hard-fail + delete on `up`/`clone`; soft-fail warn on `rebuild`. Detail: [cli-runtime-boundary — Named volumes / ownership](../conventions/cli-runtime-boundary.md#named-volumes-ensure--reuse--ownership).
 
 ### File bind mounts
 
@@ -66,7 +74,7 @@ Rebuild recovery is **mode-split**. Shared rules: same hard post-delete trigger 
 
 Eligible only for a managed clone-origin container with complete volume-mode stamps: non-empty normalized git URL, existing workspace volume, config path contained by stamped workspace folder, managed identity. Incomplete/malformed/unknown identity fail closed.
 
-- Helper: immutable digest-pinned Alpine `linux/arm64`; digest/platform inspection + exact existing workspace-volume presence preflighted before the old-container delete gate. Never deletes/recreates/repopulates/rolls back an image.
+- Helper: immutable digest-pinned Alpine `linux/arm64`; digest/platform inspection + exact existing workspace-volume presence preflighted before the old-container delete gate. Never deletes/replaces/repopulates/rolls back an image.
 - Apple mount identity is nested: `configuration.mounts[].type.volume.name` (logical name); do not use `source` (may be `volume.img`). Require stamped volume at stamped folder, read-write. Malformed/unknown/read-only/wrong-target/bind/virtiofs fail closed.
 - After failed replacement: detach failed container and verify absence from all attachments before helper create; failed detach blocks recovery.
 - Host session: raw config private (`0700`/`0600`); edits via helper stdin → atomic same-directory write guarded by baseline hash → readback byte/hash verify. Conflicts/failed verify retain state. Raw config never in labels, JSON errors, or logs. Spec private-file = host-session only.
@@ -74,7 +82,7 @@ Eligible only for a managed clone-origin container with complete volume-mode sta
 - `RecoveryConfigSession.cleanup` fail-closed bar: path/ownership/session-id only — not on-disk metadata equality after `applyValidatedEdit` advances `lastAppliedHash`.
 - Helper/session retained for retry; crossing helper delete gate detaches/replaces helper before another edit. Cleanup only after successful final verification.
 - **Named apply after volume auto-start** (order: volume auto-start → apply/write). Helper must be **exec-ready** before exec (probe → `start` → stop+start bounce); status alone insufficient (`cannot exec: container is not running` while listed running).
-- No `container cp`, volume delete/recreate/repopulate, or image rollback (named-volume `cp` limitation still applies independently).
+- No `container cp`, volume delete/replace/repopulate, or image rollback (named-volume `cp` limitation still applies independently).
 
 #### Bind / `up` path
 
@@ -86,11 +94,13 @@ Contract + README/CLI help landed (archive `20260810-rebuild`). Remaining gaps o
 
 ### list/inspect JSON (tested shape: 1.2.x)
 
-Useful machine-JSON paths documented against Apple container **1.2.x**: `configuration.id`, `status.state`, `configuration.labels`. Full parse rules: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
+**Container** machine-JSON (list/inspect) against Apple container **1.2.x**: `configuration.id`, `status.state`, `configuration.labels`.
 
-### Features build (Rosetta / platform)
+**Image** inspect (USER / metadata for connection user + Features base USER): `variants[].config.config.User`; labels may include `devcontainer.metadata` JSON. Do not assume Docker’s top-level `Config.User`. Full parse rules: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
 
-Apple BuildKit with `build.rosetta=true` can require Rosetta even for native arm64 image builds. Product ensures `build.rosetta=false` (one-time consent) and passes `--platform linux/arm64` on Features pull/build/create. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
+### Features build (Rosetta / platform / USER)
+
+Apple BuildKit with `build.rosetta=true` can require Rosetta even for native arm64 image builds. Product ensures `build.rosetta=false` (one-time consent) and passes `--platform linux/arm64` on Features pull/build/create. Feature install runs **as root** then Dockerfile **restores base OCI USER** (`recipeVersion` **`"3"`**); install env uses base USER when config remote/container user empty. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
 
 ### VS Code attach (`--vscode` + manual)
 
@@ -113,27 +123,28 @@ After lifecycle success, `up` / `start` / `clone` / `rebuild` accept **`--vscode
 | Identity | `customizations` stay out of create identity / config hash |
 | postAttach | **Implemented:** **RUNS** config then feature postAttach only after successful `--vscode` open; **SKIP** if no flag or open soft-fails (status when any present); fail-keep; not IDE-confirmed ready |
 | postAttach sources | `start`: config from labels (bind host paths / volume in-container cat); reuse/`start`: feature hooks from image `devcontainer.metadata` |
-| nameConfigs (optional) | `…/globalStorage/ms-vscode-remote.remote-containers/nameConfigs/<containerName>.json` → `workspaceFolder` + `remoteUser` |
+| nameConfigs | Write `…/globalStorage/ms-vscode-remote.remote-containers/nameConfigs/<containerName>.json` (`workspaceFolder` + `remoteUser`) **before** `code` launch; `remoteUser` from non-empty connection-user resolution. Apple attach **ignores** nameConfig `remoteUser` for terminal user (container default) — create `-u` compensation |
 | UI gap | `remote-containers.attachToAppleContainer` attaches authority **without** folder → empty window; folder-uri avoids it |
 | `open vscode://` | May reuse window; prefer `code --new-window --folder-uri` |
 | Parity | Not full Dev Containers up/rebuild / IDE-owned apply; manual attach without `--vscode` still valid |
 
 ## Config surface implications
 
-- **Hard errors** for unsupported props/flags — never silent ignore.
+- **Hard errors** for unknown-dangerous props/flags and Compose — never silent ignore. Known optional Apple-incompatibles **warn-skip**.
 - **`forwardPorts`**: map to publish ports; do not promise IDE auto-forward behavior.
 - **`portsAttributes`**: metadata only; no IDE auto-forward.
-- **Lifecycle**: run via `container exec` (hook matrix: create-path full order on `up`/`clone`; bind start-stopped `postStart` only; bare `start` no create-path/postStart; reuse none for create-path; **postAttach implemented** — runs after successful `--vscode` open only, skip otherwise, fail-keep; `start` loads config from labels; feature postAttach from image metadata on reuse/`start`). Exec must expand `containerEnv` PATH refs (same as create) or login-shell hooks fail (`id`/`bash` not found). Not Docker entrypoint injection parity. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
-- **`runArgs`**: allowlist (`--init`, `--cap-add`/`--cap-drop`, …); privileged/tun/device and unknown flags fail closed.
+- **Lifecycle**: run via `container exec` (hook matrix: create-path full order on `up`/`clone`; bind start-stopped `postStart` only; bare `start` no create-path/postStart; reuse none for create-path; **postAttach implemented** — runs after successful `--vscode` open only, skip otherwise, fail-keep; `start` loads config from labels; feature postAttach from image metadata on reuse/`start`). Forms: string | argv | named object map (map runs sequentially sorted by name, not true parallel). Exec must expand `containerEnv` PATH refs (same as create) or login-shell hooks fail (`id`/`bash` not found). Not Docker entrypoint injection parity. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
+- **`runArgs`**: allowlist (`--init`, `--cap-add`/`--cap-drop`, …); privileged/tun/device/security family **warn-skip**; unknown and first-class smuggling flags fail closed.
 - **`hostRequirements`**: preflight — fail on memory/cpus shortfall; map requested limits to create `-m`/`-c` when host OK; warn unsupported `gpu`; fail on unparseable/unknown keys.
-- **Features**: OCI + local path fetch/load + derived image build on `up` (see [cli-runtime-boundary](../conventions/cli-runtime-boundary.md)); forever-reject `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker` and privileged/securityOpt metadata ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)).
+- **Features**: OCI + local path fetch/load + derived image build on `up` (see [cli-runtime-boundary](../conventions/cli-runtime-boundary.md)); **warn-skip** `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker` and privileged/securityOpt metadata ([0003](../decisions/0003-warn-skip-apple-incompatibles.md)). Install as root, restore base USER; `recipeVersion` `"3"`.
+- **Connection user**: local `remoteUser` → local `containerUser` → image metadata last non-empty remote/container user → OCI USER → root (chain unchanged). **Create `-u`:** explicit `containerUser` if set; else non-root connection user; else omit when root — Apple attach ignores nameConfig `remoteUser` / uses container default. Successful create always stamps non-empty `devcontainer.remote_user` (incl. `root`; empty = legacy only). Archive: [`specs/changes/archive/20260811-align-remote-user-resolution/`](../../specs/changes/archive/20260811-align-remote-user-resolution/).
 
 ## Reference config hotspots
 
 `reference/devcontainer.json` exercises several gaps at once:
 
-- Features block (ood, node, third-party) — ood forever-rejected; other OCI/local features run via Features runner
-- `runArgs` privileged + `NET_ADMIN` + tun device — rejected
+- Features block (ood, node, third-party) — ood warn-skipped; other OCI/local features run via Features runner
+- `runArgs` privileged + `NET_ADMIN` + tun device — privileged/tun warn-skipped; `NET_ADMIN` allowlisted (extra warning that caps alone ≠ device/VPN on Apple container)
 - Bind + named volume mounts — supported
 - `postCreateCommand` — supported
 - Large `forwardPorts` / `portsAttributes` — publish + metadata
@@ -141,4 +152,4 @@ After lifecycle success, `up` / `start` / `clone` / `rebuild` accept **`--vscode
 
 ## Identity workaround
 
-Because list-by-label may be weak/missing, the CLI owns **deterministic container names** (`adev-{base}-{hash12}`, human base from config `name` or workspace basename) plus managed labels (`devcontainer.managed`, `local_folder`, `config_file`, config hash, `workspace_mode` = `bind`|`volume`, `workspace_folder`, `remote_user`; volume-mode also `git_url`, `workspace_volume`, `config_volumes`) and resolves via `--name`/picker + client-side managed filter (only `up` uses `-w`). Volume identity keys off git URL + config relpath so reclones stay stable. Naming detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
+Because list-by-label may be weak/missing, the CLI owns **deterministic container names** (`adev-{base}-{hash12}`, human base from config `name` or workspace basename) plus managed labels (`devcontainer.managed`, `local_folder`, `config_file`, config hash, `workspace_mode` = `bind`|`volume`, `workspace_folder`, `remote_user` always non-empty on new creates incl. `root`; volume-mode also `git_url`, `workspace_volume`, `config_volumes`) and resolves via `--name`/picker + client-side managed filter (only `up` uses `-w`). Volume identity keys off git URL + config relpath so reclones stay stable. Naming + connection-user detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).

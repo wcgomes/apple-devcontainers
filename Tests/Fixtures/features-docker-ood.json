@@ -1,5 +1,5 @@
 {
-  "name": "Features docker-ood reject",
+  "name": "Features docker-ood warn-skip",
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
   "features": {
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}

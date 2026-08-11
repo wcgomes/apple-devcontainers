@@ -175,22 +175,16 @@ public struct FeatureMetadata: Equatable, Sendable {
         )
     }
 
-    /// Forever-reject privileged / securityOpt contributions.
-    public func rejectUnsafeContributions(featureRef: String) throws {
+    /// Warn-and-strip privileged / securityOpt contributions (feature may still install).
+    public func warnStripUnsafeContributions(featureRef: String) {
         if privileged {
-            throw CLIError(
-                code: CLIErrorCode.unsupportedFeature,
-                property: "features",
-                message: "Feature '\(featureRef)' requires privileged: true and is forever-rejected",
-                hint: "Remove this feature; privileged containers are not supported on Apple container"
+            StatusPrinter.warning(
+                "Feature '\(featureRef)' sets privileged: true; ignored (not applied on Apple container)"
             )
         }
         if !securityOpt.isEmpty {
-            throw CLIError(
-                code: CLIErrorCode.unsupportedFeature,
-                property: "features",
-                message: "Feature '\(featureRef)' requires securityOpt and is forever-rejected",
-                hint: "Remove this feature; securityOpt is not supported on Apple container"
+            StatusPrinter.warning(
+                "Feature '\(featureRef)' sets securityOpt; ignored (not applied on Apple container)"
             )
         }
     }

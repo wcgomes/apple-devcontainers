@@ -5,12 +5,17 @@ public struct SubstitutionContext: Sendable {
     public var localWorkspaceFolderBasename: String
     public var containerWorkspaceFolder: String
     public var localEnv: [String: String]
+    /// Managed container name (`adev-{base}-{hash12}` / create `--name`).
+    /// When nil, `${devcontainerId}` is left unsubstituted for a later identity-known pass
+    /// (feature mounts; clone volume-mode name differs from bind-mode resolve).
+    public var devcontainerId: String?
 
     public init(
         localWorkspaceFolder: String,
         containerWorkspaceFolder: String,
         localEnv: [String: String] = ProcessInfo.processInfo.environment,
-        localWorkspaceFolderBasename: String? = nil
+        localWorkspaceFolderBasename: String? = nil,
+        devcontainerId: String? = nil
     ) {
         let ws = (localWorkspaceFolder as NSString).standardizingPath
         self.localWorkspaceFolder = ws
@@ -21,6 +26,7 @@ public struct SubstitutionContext: Sendable {
         }
         self.containerWorkspaceFolder = containerWorkspaceFolder
         self.localEnv = localEnv
+        self.devcontainerId = devcontainerId
     }
 }
 
@@ -30,6 +36,9 @@ public enum VariableSubstitutor {
         pattern: #"\$\{([^}]+)\}"#,
         options: []
     )
+
+    /// Literal token form preserved when `devcontainerId` is not yet known.
+    public static let devcontainerIdToken = "${devcontainerId}"
 
     public static func substitute(_ input: String, context: SubstitutionContext) throws -> String {
         let ns = input as NSString
@@ -71,6 +80,46 @@ public enum VariableSubstitutor {
         return value
     }
 
+    /// Expand `${devcontainerId}` once create identity is known (idempotent if already expanded).
+    public static func expandDevcontainerId(in input: String, id: String) -> String {
+        guard input.contains(devcontainerIdToken) else { return input }
+        return input.replacingOccurrences(of: devcontainerIdToken, with: id)
+    }
+
+    /// Expand `${devcontainerId}` in mount source/target (feature + config named volumes).
+    public static func expandDevcontainerId(in mounts: [MountSpec], id: String) -> [MountSpec] {
+        guard mounts.contains(where: {
+            $0.source.contains(devcontainerIdToken) || $0.target.contains(devcontainerIdToken)
+        }) else {
+            return mounts
+        }
+        return mounts.map { mount in
+            MountSpec(
+                type: mount.type,
+                source: expandDevcontainerId(in: mount.source, id: id),
+                target: expandDevcontainerId(in: mount.target, id: id),
+                readonly: mount.readonly
+            )
+        }
+    }
+
+    /// Expand `${devcontainerId}` in mounts and containerEnv after identity is known.
+    public static func expandDevcontainerId(
+        in config: ResolvedDevContainerConfig,
+        id: String
+    ) -> ResolvedDevContainerConfig {
+        var out = config
+        out.mounts = expandDevcontainerId(in: config.mounts, id: id)
+        if config.containerEnv.values.contains(where: { $0.contains(devcontainerIdToken) }) {
+            var env = config.containerEnv
+            for (k, v) in env {
+                env[k] = expandDevcontainerId(in: v, id: id)
+            }
+            out.containerEnv = env
+        }
+        return out
+    }
+
     private static func resolve(token: String, context: SubstitutionContext) throws -> String {
         if token == "localWorkspaceFolder" {
             return context.localWorkspaceFolder
@@ -81,6 +130,14 @@ public enum VariableSubstitutor {
         if token == "containerWorkspaceFolder" {
             return context.containerWorkspaceFolder
         }
+        if token == "devcontainerId" {
+            // Expand when known; otherwise leave the token for the identity-known pass
+            // (create name differs for bind vs volume-mode / clone).
+            if let id = context.devcontainerId, !id.isEmpty {
+                return id
+            }
+            return devcontainerIdToken
+        }
         if token.hasPrefix("localEnv:") {
             let name = String(token.dropFirst("localEnv:".count))
             return context.localEnv[name] ?? ""
@@ -89,7 +146,7 @@ public enum VariableSubstitutor {
             code: CLIErrorCode.unsupportedSubstitution,
             property: token,
             message: "Unsupported substitution token '\(token)'",
-            hint: "Supported: localWorkspaceFolder, localWorkspaceFolderBasename, localEnv:VAR, containerWorkspaceFolder"
+            hint: "Supported: localWorkspaceFolder, localWorkspaceFolderBasename, localEnv:VAR, containerWorkspaceFolder, devcontainerId"
         )
     }
 }

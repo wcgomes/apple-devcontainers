@@ -1,5 +1,9 @@
 # ADR 0002: Reject docker-in-docker / ood, privileged, and tun device
 
+## Status
+
+**Superseded in part** by [0003](0003-warn-skip-apple-incompatibles.md). Optional incompatibles (docker-* features, privileged/device/security runArgs, feature privileged/securityOpt metadata) are now **warn-skip**. Compose, unknown runArgs, and first-class smuggling remain fail-closed as below.
+
 ## Context
 
 Reference team config (`reference/devcontainer.json`) uses:
@@ -9,9 +13,9 @@ Reference team config (`reference/devcontainer.json`) uses:
 
 Apple container is not Docker/Moby. Privileged mode, host device node passthrough, and docker-outside-of-docker / DinD-style features assume a different runtime security and API model. Blind `runArgs` passthrough would either fail opaquely or create unsupported security expectations.
 
-## Decision
+## Decision (original; see Status)
 
-**Policy (until explicit redesign):** hard-error — do not implement, emulate, or silently skip:
+**Policy (original until 0003):** hard-error — do not implement, emulate, or silently skip:
 
 | Rejected | Rationale |
 |----------|-----------|
@@ -23,11 +27,13 @@ Apple container is not Docker/Moby. Privileged mode, host device node passthroug
 
 Errors must be **structured and actionable** (which key/flag/feature, why unsupported, what to remove/change).
 
-Feature metadata `privileged: true` or `securityOpt` is also forever-rejected (same policy family).
+Feature metadata `privileged: true` or `securityOpt` was also forever-rejected (same policy family).
+
+**Current policy:** optional rows above → warn-skip per [0003](0003-warn-skip-apple-incompatibles.md). Compose + unknown/first-class runArgs remain hard-error.
 
 ## Consequences
 
-- Reference config must be stripped/adapted for Apple-container workflows (remove docker-* features + privileged/tun runArgs).
-- VPN-in-container / DinD-style workflows are out of product scope.
-- `runArgs` handling lives behind allowlist logic in the runtime boundary ([cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md)).
-- Revisit only via new ADR if Apple container gains safe, documented equivalents.
+- Reference config multi-platform noise (docker-* / privileged / tun) no longer blocks `up`; warnings explain skips
+- VPN-in-container / DinD-style workflows remain out of product scope (not emulated)
+- `runArgs` handling lives behind allowlist + warn-skip logic in the runtime boundary ([cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md))
+- Revisit emulation only via new ADR if Apple container gains safe, documented equivalents

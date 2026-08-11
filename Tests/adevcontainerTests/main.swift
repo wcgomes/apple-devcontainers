@@ -1,8 +1,10 @@
 import Foundation
 @testable import ADevContainerLib
 
-// Keep phase status off during the suite (stderr noise + non-deterministic output).
+// Keep progress + warning stderr off during the suite (noise + non-deterministic output).
+// onWarning still fires for assertions; product QUIET only silences progress, not warnings.
 StatusPrinter.enabled = false
+StatusPrinter.suppressWarningStderr = true
 
 // Force-link test translation units by referencing their register functions.
 let allTests: [(String, () throws -> Void)] = []
@@ -11,6 +13,7 @@ let allTests: [(String, () throws -> Void)] = []
     + substitutionTests
     + admissionTests
     + errorModelTests
+    + remoteUserResolutionTests
     + runtimeTests
     + doctorTests
     + upTests
@@ -45,11 +48,15 @@ let allTests: [(String, () throws -> Void)] = []
     + recoveryOutputTests
     + integrationTests
 
-// Optional PTY restore probe: run under a fresh controlling terminal so job-control
-// claim/restore can be verified without a developer TTY on the suite process itself.
-// Invoked by the PTY round-trip test via `script`/`python` — not part of the normal suite.
+// Optional PTY probes: run under a fresh controlling terminal so job-control
+// claim/restore (and stdin delivery) can be verified without a developer TTY on the
+// suite process itself. Invoked by PTY round-trip tests via `script`/`python` — not
+// part of the normal suite entry.
 if ProcessInfo.processInfo.environment["ADEVCONTAINER_TTY_RESTORE_PROBE"] == "1" {
     exit(InteractiveTTYRestoreProbe.run())
+}
+if ProcessInfo.processInfo.environment["ADEVCONTAINER_TTY_STDIN_PROBE"] == "1" {
+    exit(InteractiveTTYRestoreProbe.runStdinRead())
 }
 
 let code = MiniTest.runAll(allTests)

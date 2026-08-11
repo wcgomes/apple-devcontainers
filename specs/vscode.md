@@ -70,7 +70,7 @@ Unknown or misspelled variants that are not the product flag MUST continue to fa
 - Then after clone lifecycle success the CLI attempts to open a new VS Code window attached to that container at the resolved `remoteWorkspaceFolder`
 - And clone lifecycle success is unchanged by a successful open when postAttach is absent or exits 0
 
-#### Scenario: rebuild with --vscode opens after recreate
+#### Scenario: rebuild with --vscode opens after rebuild
 - Given a successful `adevcontainer rebuild` that yields a running managed container and a resolved `remoteWorkspaceFolder`
 - When the user runs `adevcontainer rebuild … --vscode` (host `code` available and launch succeeding, or mocks equivalent)
 - Then after lifecycle success the CLI attempts to open a new VS Code window on the resolved remote workspace folder
@@ -117,7 +117,11 @@ When `--vscode` is set and lifecycle has succeeded, the CLI MUST attempt to open
 
 **Optional nameConfig (MAY/SHOULD):**
 
-- The CLI MAY write a Remote - Containers nameConfig for the container (workspace folder + remote user) when low-risk and useful for attach defaults. Folder-uri open remains the **required** open path; nameConfig MUST NOT be the sole mechanism and MUST NOT cause lifecycle failure if the write fails.
+- The CLI MAY write a Remote - Containers nameConfig for the container (workspace folder + remote user) when low-risk and useful for attach defaults.
+- When the product writes nameConfig, it MUST include `workspaceFolder` and, when the resolved remote connection user is non-empty (always after successful resolution on create paths; on `start` from labels when non-empty), MUST include `remoteUser` set to that resolved connection user (from create result or stamped label — not a hardcoded name).
+- nameConfig MUST be written **before** the host `code` launch attempt on `--vscode` paths so attach defaults can observe it prior to open.
+- nameConfig write remains soft-fail: write failure MUST NOT fail lifecycle and MUST NOT block the subsequent open attempt.
+- Folder-uri open remains the **required** open path; nameConfig MUST NOT be the sole mechanism and MUST NOT cause lifecycle failure if the write fails.
 
 **Approximation (document):**
 
@@ -149,11 +153,22 @@ When `--vscode` is set and lifecycle has succeeded, the CLI MUST attempt to open
 - When `up` or `clone` succeeds with `--vscode`
 - Then the open targets `/custom/ws` (the resolved remote workspace folder), not the default `/workspaces/<basename>`
 
+#### Scenario: nameConfig written before code launch
+- Given `--vscode` on `up` / `start` / `clone` / `rebuild` with open inputs available and nameConfig enabled
+- When best-effort open runs
+- Then nameConfig is written (or soft-fail warned) **before** host `code` is invoked
+- And nameConfig `remoteUser` equals the resolved remote connection user (or stamped label on `start`)
+
+#### Scenario: nameConfig remoteUser matches stamp not hardcoded
+- Given a container stamped `devcontainer.remote_user=alice` and `start --vscode`
+- When nameConfig is written
+- Then `remoteUser` in nameConfig is `alice` and MUST NOT be a hardcoded product username
+
 ---
 
 ### Requirement: postAttachCommand policy (CLI-only)
 
-The CLI MUST parse and admit `postAttachCommand` when present (string or argv array) so configs are not rejected solely for this property. Invalid form (non-string, non-array) MUST still fail resolve with a structured error naming `postAttachCommand` (unchanged).
+The CLI MUST parse and admit `postAttachCommand` when present (string, argv array, or object map of name → string|argv — same `LifecycleCommand` forms as other hooks) so configs are not rejected solely for this property. Invalid form MUST still fail resolve with a structured error naming `postAttachCommand` (unchanged).
 
 **When postAttach RUNS**
 
@@ -171,7 +186,7 @@ When the run gate is satisfied, the CLI MUST run:
 - Config `postAttachCommand` when present, then
 - Feature-contributed postAttach commands (`featurePostAttachCommands` / equivalent merge), in the same merge/order patterns as other feature lifecycle hooks already in product (LifecycleRunner conventions: config hook then feature hooks for that stage).
 
-Each command MUST execute via existing container **exec** lifecycle machinery (same shell-vs-argv rules as `postCreateCommand` / `postStartCommand`), using effective `remoteUser` when set and the resolved workspace folder when set.
+Each command MUST execute via existing container **exec** lifecycle machinery (same string/argv/object-map rules as `postCreateCommand` / `postStartCommand`; object-map entries sequential sorted-by-name), using the **resolved remote connection user** (from config resolution on create-path, or stamped/label-aligned user on reuse/`start`) and the resolved workspace folder when set — not create-only `containerUser` when `remoteUser` differs. When `remoteUser` is `alice` and `containerUser` is `bob`, postAttach MUST use `alice`.
 
 **When postAttach is SKIPPED (status line, not executed)**
 
@@ -240,6 +255,11 @@ The gated policy MUST apply consistently on `up`, `start`, `clone`, and `rebuild
 - When the user runs `up` without or with `--vscode`
 - Then the CLI MUST NOT emit a postAttach skip status line solely for postAttach
 
+#### Scenario: postAttach runs as remote connection user not containerUser
+- Given `remoteUser` `alice`, `containerUser` `bob`, `--vscode`, and successful open
+- When postAttach runs
+- Then postAttach exec uses user `alice`
+
 ---
 
 ### Requirement: Parse and retain customizations.vscode extensions and settings
@@ -261,7 +281,7 @@ Presence of a `customizations.vscode` object continues to signal VS Code-oriente
 
 **Identity**
 
-- Retained extensions and settings MUST NOT participate in create identity / config hash material. Editing only `customizations.vscode` MUST NOT by itself force container recreate via identity drift; apply idempotency (marker hash) handles re-apply inside an existing container.
+- Retained extensions and settings MUST NOT participate in create identity / config hash material. Editing only `customizations.vscode` MUST NOT by itself force a container rebuild via identity drift; apply idempotency (marker hash) handles re-apply inside an existing container.
 
 **Merge source (v1)**
 
@@ -301,9 +321,9 @@ Presence of a `customizations.vscode` object continues to signal VS Code-oriente
 
 ### Requirement: Apply vscode settings on create-path (and repair on drift)
 
-When resolved config retains a non-empty well-formed `customizations.vscode.settings` object (or when marker drift requires re-apply of the normalized payload that includes settings), the CLI MUST attempt to merge those settings into the guest **remote Machine** settings file for the effective remote user:
+When resolved config retains a non-empty well-formed `customizations.vscode.settings` object (or when marker drift requires re-apply of the normalized payload that includes settings), the CLI MUST attempt to merge those settings into the guest **remote Machine** settings file for the **resolved remote connection user** (not create-only `containerUser` when `remoteUser` differs):
 
-- Target path concept: under the effective `remoteUser` home, `~/.vscode-server/data/Machine/settings.json` (create parent directories as needed).
+- Target path concept: under the resolved remote connection user home, `~/.vscode-server/data/Machine/settings.json` (create parent directories as needed).
 - Merge semantics: deep-merge or key-merge such that config-declared keys are written into the Machine settings object without wiping unrelated keys already present when feasible; on missing file, create a valid settings JSON object containing at least the declared keys.
 
 **When settings apply RUNS**
@@ -332,9 +352,14 @@ When resolved config retains a non-empty well-formed `customizations.vscode.sett
 #### Scenario: settings merge on fresh up create without --vscode
 - Given a valid config with well-formed non-empty `customizations.vscode.settings` and a fresh `up` create-path that completes create-path hooks successfully
 - When the user runs `up` **without** `--vscode`
-- Then the CLI attempts to merge settings into the guest Machine settings path under the effective remote user home
+- Then the CLI attempts to merge settings into the guest Machine settings path under the resolved remote connection user home
 - And `up` still reports lifecycle success when settings apply soft-fails or succeeds
 - And the managed container is not deleted solely due to settings apply failure
+
+#### Scenario: settings apply under remote connection user home
+- Given `remoteUser` `alice` and settings apply on create-path
+- When settings are merged
+- Then the guest Machine settings path is under `alice`’s home, not `bob`’s when `containerUser` is `bob`
 
 #### Scenario: settings merge on fresh clone create
 - Given a valid clone path with well-formed non-empty `customizations.vscode.settings` and successful create-path hooks
@@ -356,7 +381,7 @@ When resolved config retains a non-empty well-formed `customizations.vscode.sett
 - And the container is not deleted or stopped solely due to that failure
 
 #### Scenario: reuse/start repairs settings on marker drift
-- Given a running managed container whose guest marker hash does not match the normalized customizations from loadable config (e.g. config settings edited on host without recreate)
+- Given a running managed container whose guest marker hash does not match the normalized customizations from loadable config (e.g. config settings edited on host without rebuilding)
 - When the user runs `start` or an `up` reuse path that loads config
 - Then the CLI attempts settings repair according to the drifted payload
 - And soft-fail policy still applies
@@ -365,7 +390,7 @@ When resolved config retains a non-empty well-formed `customizations.vscode.sett
 
 ### Requirement: Apply vscode extensions after successful --vscode open
 
-When resolved config retains one or more well-formed extension IDs, the CLI MUST attempt to install any **missing** IDs into the guest remote VS Code Server extensions directory under the effective `remoteUser` home (conceptually under `~/.vscode-server/extensions` or the product-equivalent remote extensions location).
+When resolved config retains one or more well-formed extension IDs, the CLI MUST attempt to install any **missing** IDs into the guest remote VS Code Server extensions directory under the **resolved remote connection user** home (conceptually under `~/.vscode-server/extensions` or the product-equivalent remote extensions location) — not create-only `containerUser` when `remoteUser` differs.
 
 **When extensions apply RUNS**
 
@@ -427,7 +452,7 @@ That successful open is the same **CLI attach hook** approximation used for post
 #### Scenario: extensions install after successful --vscode open on up
 - Given a valid config with well-formed `customizations.vscode.extensions`, successful create-path, and no matching guest marker
 - When the user runs `up --vscode` and host `code` launch succeeds
-- Then after open success the CLI attempts to install missing extension IDs into the remote extensions directory under the effective remote user home
+- Then after open success the CLI attempts to install missing extension IDs into the remote extensions directory under the resolved remote connection user home
 - And each successfully installed ID is listed in the guest `extensions.json` registry (not folder-only)
 - And then postAttach runs per existing policy when present
 - And lifecycle success is preserved when extensions apply soft-fails (absent postAttach failure)
@@ -488,13 +513,13 @@ That successful open is the same **CLI attach hook** approximation used for post
 
 ### Requirement: Vscode customizations apply idempotency
 
-The CLI MUST record successful application of the **normalized** customizations payload (ordered **config-file** extension IDs + canonicalized settings JSON) using a guest marker file under the effective remote user home, e.g. `$HOME/.adevcontainer/vscode-customizations.applied`, whose content is a stable content hash of that normalized payload.
+The CLI MUST record successful application of the **normalized** customizations payload (ordered **config-file** extension IDs + canonicalized settings JSON) using a guest marker file under the resolved remote connection user home, e.g. `$HOME/.adevcontainer/vscode-customizations.applied`, whose content is a stable content hash of that normalized payload.
 
 **Rules**
 
 1. Before apply work, the CLI SHOULD read the marker (if present) and compare to the hash of the current normalized payload from resolved/loadable config.
 2. When the marker hash **matches**, the CLI MUST skip redundant settings merge and extensions install for that payload.
-3. When the marker is **missing** or the hash **differs** (config edited without recreate), the CLI MUST treat apply as pending and run the applicable apply steps (settings per settings requirement; extensions only when the open gate is satisfied).
+3. When the marker is **missing** or the hash **differs** (config edited without rebuilding), the CLI MUST treat apply as pending and run the applicable apply steps (settings per settings requirement; extensions only when the open gate is satisfied).
 4. The CLI MUST write/update the marker to the new hash only after the apply steps required for that invocation’s pending work have completed successfully for the full normalized payload. If only settings could run (no open) and extensions remain pending, the CLI MUST NOT claim full-payload success in the marker until extensions are also successfully applied **or** the normalized payload has no extensions. (If payload has both settings and extensions: settings-only success on create-path without open leaves extensions pending — marker MUST NOT match full payload until extensions succeed on a later open, unless product chooses a split marker; v1 MUST ensure extensions still run on first successful open when not yet applied. A single marker for the full payload is acceptable if create-path settings re-merge remains safe/idempotent when extensions later complete and then the full hash is written.)
 5. Apply MUST NOT blindly re-run on every postAttach or every successful open when the marker already matches.
 6. Marker hash input MUST NOT include transitive `extensionDependencies` IDs discovered at install time — only config-listed extension IDs (normalized) and settings. Transitive installs remain side effects of applying listed IDs when apply runs.
@@ -511,7 +536,7 @@ The CLI MUST record successful application of the **normalized** customizations 
 - And does not fail solely due to skip
 
 #### Scenario: hash drift re-applies
-- Given a guest marker that does not match the current normalized payload (e.g. extension ID added in config without recreate)
+- Given a guest marker that does not match the current normalized payload (e.g. extension ID added in config without rebuilding)
 - When a path runs that can apply (settings on create/reuse/start load; extensions on open success)
 - Then the CLI attempts apply for the drifted payload per the settings and extensions requirements
 - And updates the marker only according to successful full-payload completion rules above

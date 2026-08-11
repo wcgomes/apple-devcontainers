@@ -151,6 +151,8 @@ public enum CloneCommand {
 
         var effectiveConfig = resolved.config
         let platform = ContainerPlatform.defaultLinuxPlatform
+        var knownOCIUser: String?? = nil
+        var knownMetadataUsers: DevContainerMetadataLabel.ImageMetadataUsers? = nil
 
         // Clone-only: ensure in-container git via Features when config lacks git/common-utils.
         let gitEnsure = FeatureGitEnsure.ensurePresent(features: effectiveConfig.features)
@@ -192,12 +194,32 @@ public enum CloneCommand {
                 to: effectiveConfig
             )
             effectiveConfig.image = featuresResult.derivedImage
+            if featuresResult.didInspectBaseUser {
+                knownOCIUser = featuresResult.baseImageUser
+            }
+            knownMetadataUsers = featuresResult.metadataUsers
         } else if !options.skipPull {
             StatusPrinter.status("Pulling image \(effectiveConfig.image)")
             try? runtime.pullImage(effectiveConfig.image, platform: platform)
         }
 
+        // Expand `${devcontainerId}` with volume-mode create name (not bind-mode resolve name).
+        effectiveConfig = VariableSubstitutor.expandDevcontainerId(
+            in: effectiveConfig,
+            id: identity.containerName
+        )
+
+        // Hash from config material before stamping OCI-resolved connection user.
         let configHash = ContainerIdentity.configHash(from: effectiveConfig.hashMaterial())
+        let connectionUser = try RemoteUserResolution.resolve(
+            config: effectiveConfig,
+            imageRef: effectiveConfig.image,
+            runtime: runtime,
+            knownOCIUser: knownOCIUser,
+            knownMetadataUsers: knownMetadataUsers
+        )
+        effectiveConfig = RemoteUserResolution.applyingConnectionUser(connectionUser, to: effectiveConfig)
+
         let configVolumeNames = effectiveConfig.mounts
             .filter { $0.type == .volume }
             .map(\.source)
@@ -206,7 +228,7 @@ public enum CloneCommand {
             configHash: configHash,
             configVolumeNames: configVolumeNames,
             workspaceFolder: effectiveConfig.workspaceFolder,
-            remoteUser: effectiveConfig.effectiveUser
+            remoteUser: connectionUser
         )
 
         let request = CreateRequest.fromVolumeMode(
@@ -221,7 +243,7 @@ public enum CloneCommand {
 
         // Fresh workspace tree: volume may remain after container-only delete.
         if try runtime.volumeExists(identity.workspaceVolumeName) {
-            StatusPrinter.status("Recreating workspace volume \(identity.workspaceVolumeName)")
+            StatusPrinter.status("Replacing workspace volume \(identity.workspaceVolumeName)")
             try runtime.deleteVolume(name: identity.workspaceVolumeName)
         }
 
@@ -244,7 +266,13 @@ public enum CloneCommand {
             try ensureWorkspaceWritableByRemoteUser(
                 containerId: id,
                 workspaceFolder: effectiveConfig.workspaceFolder,
-                remoteUser: effectiveConfig.effectiveUser,
+                remoteUser: connectionUser,
+                runtime: runtime
+            )
+            try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+                containerId: id,
+                mounts: effectiveConfig.mounts,
+                remoteUser: connectionUser,
                 runtime: runtime
             )
         } catch {
@@ -261,7 +289,7 @@ public enum CloneCommand {
                 urlKind: urlKind,
                 containerId: id,
                 workspaceFolder: effectiveConfig.workspaceFolder,
-                remoteUser: effectiveConfig.effectiveUser,
+                remoteUser: connectionUser,
                 containerEnv: effectiveConfig.containerEnv,
                 credentials: credentials,
                 runtime: runtime
@@ -284,7 +312,7 @@ public enum CloneCommand {
             identity: authorIdentity,
             containerId: id,
             workspaceFolder: effectiveConfig.workspaceFolder,
-            remoteUser: effectiveConfig.effectiveUser,
+            remoteUser: connectionUser,
             runtime: runtime
         )
 
@@ -311,7 +339,7 @@ public enum CloneCommand {
         let result = CloneResult(
             outcome: "success",
             containerId: id,
-            remoteUser: effectiveConfig.effectiveUser ?? "",
+            remoteUser: connectionUser,
             remoteWorkspaceFolder: effectiveConfig.workspaceFolder,
             containerName: identity.containerName,
             gitUrl: identity.normalizedGitURL,
@@ -342,6 +370,9 @@ public enum CloneCommand {
             runtime: runtime
         )
         StatusPrinter.status("Ready")
+        if !options.openVSCode {
+            StatusPrinter.connectionHint(nameOrId: result.containerName ?? result.containerId)
+        }
         return result
     }
 

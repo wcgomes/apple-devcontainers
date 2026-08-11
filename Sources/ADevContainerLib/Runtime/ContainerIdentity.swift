@@ -15,7 +15,7 @@ public enum ContainerIdentity {
     public static let labelConfigVolumes = "devcontainer.config_volumes"
     /// Container workspace folder for exec (volume-mode).
     public static let labelWorkspaceFolder = "devcontainer.workspace_folder"
-    /// remoteUser/containerUser effective user for exec (volume-mode; may be empty).
+    /// Resolved remote connection user for exec/attach. New creates stamp non-empty; empty is legacy only.
     public static let labelRemoteUser = "devcontainer.remote_user"
     public static let workspaceModeVolume = "volume"
     public static let workspaceModeBind = "bind"
@@ -32,10 +32,12 @@ public enum ContainerIdentity {
     }
 
     /// Sanitize a human-readable name to DNS-safe base (≤20).
+    /// Non-[a-z0-9-] → `-`, collapse consecutive hyphens, trim leading/trailing hyphens, clip ≤20.
     public static func sanitizeBase(_ raw: String) -> String {
         let base = raw
             .lowercased()
             .replacingOccurrences(of: "[^a-z0-9-]", with: "-", options: .regularExpression)
+            .replacingOccurrences(of: "-{2,}", with: "-", options: .regularExpression)
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
         return String(base.prefix(20)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }

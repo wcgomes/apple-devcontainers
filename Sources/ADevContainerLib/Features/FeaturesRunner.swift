@@ -9,19 +9,33 @@ public struct FeaturesRunnerResult: Equatable, Sendable {
     public var derivedImage: String
     /// True when an existing local tag was reused (no `container build`).
     public var reusedExistingImage: Bool
+    /// Base image OCI USER from successful inspect (nil/empty when absent).
+    /// When `didInspectBaseUser`, equals the derived image final USER after restore.
+    public var baseImageUser: String?
+    /// True when `baseImageUser` came from a successful base image inspect.
+    public var didInspectBaseUser: Bool
+    /// `remoteUser` / `containerUser` from base image `devcontainer.metadata` (for connection resolution;
+    /// derived image may not carry the base label).
+    public var metadataUsers: DevContainerMetadataLabel.ImageMetadataUsers
 
     public init(
         contributions: FeatureContributions,
         orderedRefs: [String],
         packages: [FetchedFeaturePackage],
         derivedImage: String,
-        reusedExistingImage: Bool
+        reusedExistingImage: Bool,
+        baseImageUser: String? = nil,
+        didInspectBaseUser: Bool = false,
+        metadataUsers: DevContainerMetadataLabel.ImageMetadataUsers = .empty
     ) {
         self.contributions = contributions
         self.orderedRefs = orderedRefs
         self.packages = packages
         self.derivedImage = derivedImage
         self.reusedExistingImage = reusedExistingImage
+        self.baseImageUser = baseImageUser
+        self.didInspectBaseUser = didInspectBaseUser
+        self.metadataUsers = metadataUsers
     }
 }
 
@@ -92,7 +106,7 @@ public enum FeaturesRunner {
             }
             let data = try Data(contentsOf: URL(fileURLWithPath: metaPath))
             let metadata = try FeatureMetadata.parse(data: data, featureRef: feature.reference)
-            try metadata.rejectUnsafeContributions(featureRef: feature.reference)
+            metadata.warnStripUnsafeContributions(featureRef: feature.reference)
             orderedInput.append(FeatureOrder.OrderedFeature(admitted: feature, metadata: metadata))
         }
 
@@ -101,10 +115,12 @@ public enum FeaturesRunner {
         var contributions = try FeatureContributionMerge.collect(from: ordered)
 
         // Optional: merge base image metadata label when inspect is available.
+        var metadataUsers = DevContainerMetadataLabel.ImageMetadataUsers.empty
         if let labels = try? deps.runtime.imageLabels(ref: baseImage) {
-            try DevContainerMetadataLabel.rejectUnsafe(from: labels, imageRef: baseImage)
+            DevContainerMetadataLabel.warnStripUnsafe(from: labels, imageRef: baseImage)
             let labelContrib = DevContainerMetadataLabel.parseContributions(from: labels)
             contributions = unionContributions(labelContrib, contributions)
+            metadataUsers = DevContainerMetadataLabel.parseUsers(from: labels)
         }
 
         let derivedImage = DerivedImageTag.compute(
@@ -113,6 +129,55 @@ public enum FeaturesRunner {
             nameBase: nameBase
         )
 
+        // Base USER needed for Dockerfile restore and connection-user fallback after Features.
+        // Inspect before reuse/build so both paths expose baseImageUser when inspect succeeds.
+        let baseUser: String?
+        do {
+            baseUser = try deps.runtime.inspectImage(ref: baseImage).user
+        } catch let err as CLIError {
+            // On pure reuse we can still proceed without base USER if derived exists —
+            // connection resolution will inspect the derived image. On build, fail closed below.
+            if try deps.runtime.imageExists(ref: derivedImage) {
+                StatusPrinter.status("Reusing features image \(derivedImage)")
+                return FeaturesRunnerResult(
+                    contributions: contributions,
+                    orderedRefs: ordered.map(\.admitted.reference),
+                    packages: packages,
+                    derivedImage: derivedImage,
+                    reusedExistingImage: true,
+                    baseImageUser: nil,
+                    didInspectBaseUser: false,
+                    metadataUsers: metadataUsers
+                )
+            }
+            throw CLIError(
+                code: err.code,
+                property: err.property ?? "features",
+                message: "Failed to inspect base image USER for Features restore: \(err.message)",
+                hint: err.hint ?? "Image inspect must succeed before building a features-derived image"
+            )
+        } catch {
+            if try deps.runtime.imageExists(ref: derivedImage) {
+                StatusPrinter.status("Reusing features image \(derivedImage)")
+                return FeaturesRunnerResult(
+                    contributions: contributions,
+                    orderedRefs: ordered.map(\.admitted.reference),
+                    packages: packages,
+                    derivedImage: derivedImage,
+                    reusedExistingImage: true,
+                    baseImageUser: nil,
+                    didInspectBaseUser: false,
+                    metadataUsers: metadataUsers
+                )
+            }
+            throw CLIError(
+                code: CLIErrorCode.runtimeFailed,
+                property: "features",
+                message: "Failed to inspect base image USER for Features restore: \(error.localizedDescription)",
+                hint: "Image inspect must succeed before building a features-derived image"
+            )
+        }
+
         if try deps.runtime.imageExists(ref: derivedImage) {
             StatusPrinter.status("Reusing features image \(derivedImage)")
             return FeaturesRunnerResult(
@@ -120,11 +185,15 @@ public enum FeaturesRunner {
                 orderedRefs: ordered.map(\.admitted.reference),
                 packages: packages,
                 derivedImage: derivedImage,
-                reusedExistingImage: true
+                reusedExistingImage: true,
+                baseImageUser: baseUser,
+                didInspectBaseUser: true,
+                metadataUsers: metadataUsers
             )
         }
 
         StatusPrinter.status("Building features image \(derivedImage)")
+
         let buildRoot = FeatureCache.buildContextRoot(cacheRoot: deps.cacheRoot)
         try deps.fileManager.createDirectory(atPath: buildRoot, withIntermediateDirectories: true)
         let contextDirectory = (buildRoot as NSString).appendingPathComponent(
@@ -139,6 +208,7 @@ public enum FeaturesRunner {
             contextDirectory: contextDirectory,
             remoteUser: remoteUser,
             containerUser: containerUser,
+            baseUser: baseUser,
             fileManager: deps.fileManager
         )
 
@@ -154,7 +224,10 @@ public enum FeaturesRunner {
             orderedRefs: ordered.map(\.admitted.reference),
             packages: packages,
             derivedImage: derivedImage,
-            reusedExistingImage: false
+            reusedExistingImage: false,
+            baseImageUser: baseUser,
+            didInspectBaseUser: true,
+            metadataUsers: metadataUsers
         )
     }
 

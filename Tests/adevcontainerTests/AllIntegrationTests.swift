@@ -178,7 +178,30 @@ enum IntegrationSupport {
 
 nonisolated(unsafe) let integrationTests: [(String, () throws -> Void)] = [
     ("fixtureE2E_smoke", {
-        try IntegrationSupport.runFixtureE2E(fixtureFile: "smoke.json")
+        // smoke.json = base:ubuntu, no local users → metadata remoteUser=vscode.
+        try IntegrationSupport.runFixtureE2E(fixtureFile: "smoke.json", extra: { ws, runtime, _ in
+            let listed = try ManagedContainers.list(runtime: runtime)
+            let wsPath = (ws.path as NSString).standardizingPath
+            let match = listed.first {
+                ($0.labels[ContainerIdentity.labelLocalFolder] as NSString?)?.standardizingPath == wsPath
+            }
+            try MiniTest.expect(match != nil, "expected managed container for smoke workspace")
+            let name = match!.name
+            let inspected = try InspectCommand.run(name: name, runtime: runtime)
+            try MiniTest.expectEqual(inspected.remoteUser, "vscode")
+            try MiniTest.expectEqual(
+                inspected.labels[ContainerIdentity.labelRemoteUser],
+                "vscode"
+            )
+            let code = try ExecCommand.run(
+                options: ExecOptions(
+                    command: ["sh", "-lc", "test \"$(id -un)\" = vscode"],
+                    name: name
+                ),
+                runtime: runtime
+            )
+            try MiniTest.expectEqual(code, 0)
+        })
     }),
     ("fixtureE2E_envUser", {
         try IntegrationSupport.runFixtureE2E(fixtureFile: "env-user.json", extra: { ws, runtime, _ in
@@ -817,7 +840,7 @@ enum RecoveryE2ESupport {
             json: origin.failConfigJSON
         )
 
-        // Snapshot volume mutations after setup; recovery phase must not delete/recreate.
+        // Snapshot volume mutations after setup; recovery phase must not alter them.
         let setupMutationCount = recorder.volumeMutations().count
         recorder.reset()
 
@@ -891,7 +914,7 @@ enum RecoveryE2ESupport {
         )
         try MiniTest.expect(
             !recoveryMutations.contains { $0.dropFirst().first == "create" && $0.contains(wsVol) },
-            "recovery must not recreate workspace volume"
+            "recovery must not alter workspace volume"
         )
         try MiniTest.expect(!recorder.usedContainerCp(), "recovery path must not use container cp")
         _ = setupMutationCount
@@ -982,7 +1005,7 @@ enum RecoveryE2ESupport {
         )
         try MiniTest.expect(
             !retryMutations.contains { $0.dropFirst().first == "create" && $0.contains(wsVol) },
-            "retry must not recreate workspace volume"
+            "retry must not alter workspace volume"
         )
         try MiniTest.expect(!recorder.usedContainerCp(), "retry must not use container cp")
 

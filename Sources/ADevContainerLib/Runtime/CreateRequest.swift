@@ -236,21 +236,23 @@ public struct CreateRequest: Equatable, Sendable {
         workspacePath: String,
         platform: String? = ContainerPlatform.defaultLinuxPlatform
     ) -> CreateRequest {
-        let (memoryLimit, cpuLimit) = mergeMemoryCpuLimits(from: resolved)
+        let expanded = VariableSubstitutor.expandDevcontainerId(in: resolved, id: identityName)
+        let (memoryLimit, cpuLimit) = mergeMemoryCpuLimits(from: expanded)
         return CreateRequest(
             name: identityName,
-            image: resolved.image,
-            labels: labels,
+            image: expanded.image,
+            labels: labelsWithExpandedConfigVolumes(labels, mounts: expanded.mounts),
             workspaceBindHost: (workspacePath as NSString).standardizingPath,
-            workspaceBindTarget: resolved.workspaceFolder,
+            workspaceBindTarget: expanded.workspaceFolder,
             workspaceMountMode: .bind,
-            env: resolved.containerEnv,
-            user: resolved.effectiveUser,
-            workdir: resolved.workspaceFolder,
-            mounts: resolved.mounts,
-            publishPorts: resolved.forwardPorts,
-            portsAttributes: resolved.portsAttributes,
-            runArgs: resolved.runArgs,
+            env: expanded.containerEnv,
+            // Create `-u`: explicit containerUser, else non-root connection user (Apple attach default).
+            user: expanded.createProcessUser,
+            workdir: expanded.workspaceFolder,
+            mounts: expanded.mounts,
+            publishPorts: expanded.forwardPorts,
+            portsAttributes: expanded.portsAttributes,
+            runArgs: expanded.runArgs,
             memoryLimit: memoryLimit,
             cpuLimit: cpuLimit,
             platform: platform,
@@ -271,30 +273,47 @@ public struct CreateRequest: Equatable, Sendable {
         platform: String? = ContainerPlatform.defaultLinuxPlatform,
         enableSSHForward: Bool = false
     ) -> CreateRequest {
-        let (memoryLimit, cpuLimit) = mergeMemoryCpuLimits(from: resolved)
-        var runArgs = resolved.runArgs
+        let expanded = VariableSubstitutor.expandDevcontainerId(in: resolved, id: identityName)
+        let (memoryLimit, cpuLimit) = mergeMemoryCpuLimits(from: expanded)
+        var runArgs = expanded.runArgs
         if enableSSHForward, !runArgs.contains(.ssh) {
             runArgs.append(.ssh)
         }
         return CreateRequest(
             name: identityName,
-            image: resolved.image,
-            labels: labels,
+            image: expanded.image,
+            labels: labelsWithExpandedConfigVolumes(labels, mounts: expanded.mounts),
             workspaceBindHost: workspaceVolumeName,
-            workspaceBindTarget: resolved.workspaceFolder,
+            workspaceBindTarget: expanded.workspaceFolder,
             workspaceMountMode: .volume,
-            env: resolved.containerEnv,
-            user: resolved.effectiveUser,
-            workdir: resolved.workspaceFolder,
-            mounts: resolved.mounts,
-            publishPorts: resolved.forwardPorts,
-            portsAttributes: resolved.portsAttributes,
+            env: expanded.containerEnv,
+            // Create `-u`: explicit containerUser, else non-root connection user (Apple attach default).
+            user: expanded.createProcessUser,
+            workdir: expanded.workspaceFolder,
+            mounts: expanded.mounts,
+            publishPorts: expanded.forwardPorts,
+            portsAttributes: expanded.portsAttributes,
             runArgs: runArgs,
             memoryLimit: memoryLimit,
             cpuLimit: cpuLimit,
             platform: platform,
             configHash: configHash
         )
+    }
+
+    /// Stamp `devcontainer.config_volumes` from post-substitution volume mount sources.
+    private static func labelsWithExpandedConfigVolumes(
+        _ labels: [String: String],
+        mounts: [MountSpec]
+    ) -> [String: String] {
+        var out = labels
+        let volNames = mounts.filter { $0.type == .volume }.map(\.source)
+        if volNames.isEmpty {
+            out.removeValue(forKey: ContainerIdentity.labelConfigVolumes)
+        } else {
+            out[ContainerIdentity.labelConfigVolumes] = volNames.joined(separator: ",")
+        }
+        return out
     }
 
     /// hostRequirements wins when set; otherwise apply runArgs `--memory`/`--cpus`.

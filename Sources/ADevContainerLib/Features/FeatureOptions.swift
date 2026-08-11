@@ -51,13 +51,19 @@ public enum FeatureOptions {
     }
 
     /// Standard Features install contract user env (`_REMOTE_USER`, `_CONTAINER_USER`, homes).
-    /// Each side falls back to the other, then `"root"`. Homes: `/root` or `/home/<user>`.
+    /// Each side falls back to the other, then inspected base image USER, then `"root"`.
+    /// Homes: `/root` or `/home/<user>`. Never hardcodes editor usernames.
+    ///
+    /// - Parameter baseUser: Base image OCI `USER` from a **successful** inspect (nil/empty → `root`).
+    ///   Callers MUST fail closed on inspect failure before invoking with a fabricated user.
     public static func userInstallEnvironment(
         remoteUser: String?,
-        containerUser: String?
+        containerUser: String?,
+        baseUser: String? = nil
     ) -> [String: String] {
-        let remote = nonEmpty(remoteUser) ?? nonEmpty(containerUser) ?? "root"
-        let container = nonEmpty(containerUser) ?? nonEmpty(remoteUser) ?? "root"
+        let fallback = RemoteUserResolution.nonEmptyTrimmed(baseUser) ?? "root"
+        let remote = nonEmpty(remoteUser) ?? nonEmpty(containerUser) ?? fallback
+        let container = nonEmpty(containerUser) ?? nonEmpty(remoteUser) ?? fallback
         return [
             "_REMOTE_USER": remote,
             "_REMOTE_USER_HOME": defaultHome(for: remote),
@@ -67,8 +73,9 @@ public enum FeatureOptions {
     }
 
     private static func nonEmpty(_ s: String?) -> String? {
-        guard let s, !s.isEmpty else { return nil }
-        return s
+        guard let s else { return nil }
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
     }
 
     private static func defaultHome(for user: String) -> String {

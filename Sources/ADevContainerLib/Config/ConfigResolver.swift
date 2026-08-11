@@ -43,7 +43,7 @@ public enum ConfigResolver {
         let path = try configPath ?? ConfigDiscovery.discover(workspacePath: workspace, fileManager: fileManager)
         let raw = try JSONCParser.loadFile(at: path)
 
-        // Admit before deep work so forever-rejects fail fast (also re-admit after sub for mounts).
+        // Admit before deep work so hard-errors fail fast (also re-admit after sub for mounts).
         try ConfigAdmissions.admit(raw)
 
         let basename: String = {

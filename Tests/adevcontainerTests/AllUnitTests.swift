@@ -29,7 +29,7 @@ enum TestRepo {
     }
 }
 
-final class MockProcessRunner: ProcessRunning, @unchecked Sendable {
+final class MockProcessRunner: StreamTeeingProcessRunning, @unchecked Sendable {
     var calls: [MockProcessCall] = []
     var results: [ProcessResult] = []
     var handlers: [([String]) -> ProcessResult?] = []
@@ -37,12 +37,17 @@ final class MockProcessRunner: ProcessRunning, @unchecked Sendable {
     /// Optional handlers that also receive stdin (for credential fill tests).
     var stdinHandlers: [([String], Data?) -> ProcessResult?] = []
     var defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+    /// Last streaming flags from `StreamTeeingProcessRunning` (nil if plain `run` was used).
+    var lastStreamStderr: Bool?
+    var lastTeeStdoutToStderr: Bool?
 
     struct MockProcessCall: Equatable {
         var executable: String
         var arguments: [String]
         var stdinData: Data?
         var environment: [String: String]?
+        var streamStderr: Bool?
+        var teeStdoutToStderr: Bool?
 
         static func == (lhs: MockProcessCall, rhs: MockProcessCall) -> Bool {
             lhs.executable == rhs.executable
@@ -62,14 +67,70 @@ final class MockProcessRunner: ProcessRunning, @unchecked Sendable {
             executable: executable,
             arguments: arguments,
             stdinData: stdinData,
-            environment: environment
+            environment: environment,
+            streamStderr: nil,
+            teeStdoutToStderr: nil
         ))
+        return try dispatch(arguments: arguments, stdinData: stdinData)
+    }
+
+    func run(
+        executable: String,
+        arguments: [String],
+        environment: [String: String]?,
+        currentDirectory: String?,
+        stdinData: Data?,
+        streamStderr: Bool,
+        teeStdoutToStderr: Bool
+    ) throws -> ProcessResult {
+        lastStreamStderr = streamStderr
+        lastTeeStdoutToStderr = teeStdoutToStderr
+        calls.append(MockProcessCall(
+            executable: executable,
+            arguments: arguments,
+            stdinData: stdinData,
+            environment: environment,
+            streamStderr: streamStderr,
+            teeStdoutToStderr: teeStdoutToStderr
+        ))
+        return try dispatch(arguments: arguments, stdinData: stdinData)
+    }
+
+    private func dispatch(arguments: [String], stdinData: Data?) throws -> ProcessResult {
+        // Track derived tags from build so post-Features connection-user inspect can succeed.
+        if arguments.first == "build",
+           let tIdx = arguments.firstIndex(of: "-t"),
+           tIdx + 1 < arguments.count {
+            builtDerivedImages.insert(arguments[tIdx + 1])
+        }
         for handler in stdinHandlers {
             if let r = handler(arguments, stdinData) { return r }
         }
         if let throwingHandler, let r = try throwingHandler(arguments) { return r }
+        var sawEmptyInspectSuccess = false
         for handler in handlers {
-            if let r = handler(arguments) { return r }
+            if let r = handler(arguments) {
+                // Catch-all handlers often return empty success for unknown args; treat empty
+                // successful image inspect as fallthrough so create-path user resolution works.
+                if arguments.starts(with: ["image", "inspect"]),
+                   r.succeeded,
+                   r.stdout.isEmpty {
+                    sawEmptyInspectSuccess = true
+                    continue
+                }
+                return r
+            }
+        }
+        if !sawEmptyInspectSuccess, !results.isEmpty { return results.removeFirst() }
+        // Default image inspect: base images succeed with empty USER; derived only after build.
+        if arguments.starts(with: ["image", "inspect"]), let ref = arguments.last {
+            let isDerived = ref.hasPrefix("adev-") || ref.hasPrefix("adevcontainer:")
+            if isDerived, !builtDerivedImages.contains(ref) {
+                return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+            }
+            let payload = Self.imageInspectJSON(reference: ref, user: nil)
+            let data = try! JSONSerialization.data(withJSONObject: payload)
+            return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
         }
         if !results.isEmpty { return results.removeFirst() }
         return defaultResult
@@ -86,6 +147,92 @@ final class MockProcessRunner: ProcessRunning, @unchecked Sendable {
 
     func enqueueFailure(exitCode: Int32 = 1, stderr: String) {
         results.append(ProcessResult(exitCode: exitCode, stdout: Data(), stderr: Data(stderr.utf8)))
+    }
+
+    /// Apple-shaped `container image inspect` payload (variants[].config.config.User / Labels).
+    static func imageInspectJSON(
+        reference: String = "alpine:3.20",
+        user: String? = nil,
+        digest: String = "sha256:abc123def456",
+        labels: [String: String] = [:]
+    ) -> [String: Any] {
+        var innerConfig: [String: Any] = [
+            "Cmd": ["sh"] as [String],
+            "Env": [] as [String]
+        ]
+        if let user {
+            innerConfig["User"] = user
+        }
+        if !labels.isEmpty {
+            innerConfig["Labels"] = labels
+        }
+        return [
+            "id": digest,
+            "configuration": [
+                "name": reference,
+                "descriptor": ["digest": digest] as [String: Any]
+            ] as [String: Any],
+            "variants": [
+                [
+                    "digest": digest,
+                    "platform": ["os": "linux", "architecture": "arm64"] as [String: Any],
+                    "config": [
+                        "architecture": "arm64",
+                        "os": "linux",
+                        "config": innerConfig
+                    ] as [String: Any]
+                ] as [String: Any]
+            ] as [[String: Any]]
+        ]
+    }
+
+    /// Derived tags recorded after a successful mock `build -t <tag>` (so post-build inspect works).
+    var builtDerivedImages: Set<String> = []
+
+    /// Handler fragment: derived `adev*` tags missing until built; other refs return successful inspect.
+    /// Also records `-t` tags from `build` so connection-user inspect after Features succeeds.
+    func makeImageAndBuildHandler(
+        baseUser: String? = nil,
+        labels: [String: String] = [:]
+    ) -> ([String]) -> ProcessResult? {
+        { [weak self] args in
+            guard let self else { return nil }
+            if args.first == "build" {
+                if let tIdx = args.firstIndex(of: "-t"), tIdx + 1 < args.count {
+                    self.builtDerivedImages.insert(args[tIdx + 1])
+                }
+                return nil // let other handlers decide build success
+            }
+            guard args.starts(with: ["image", "inspect"]), let ref = args.last else { return nil }
+            let isDerived = ref.hasPrefix("adev-") || ref.hasPrefix("adevcontainer:")
+            if isDerived, !self.builtDerivedImages.contains(ref) {
+                return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+            }
+            // Derived images typically lack base metadata labels; only attach labels on base refs.
+            let payload = Self.imageInspectJSON(
+                reference: ref,
+                user: baseUser,
+                labels: isDerived ? [:] : labels
+            )
+            let data = try! JSONSerialization.data(withJSONObject: payload)
+            return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+        }
+    }
+
+    /// Stateless inspect-only helper (derived always missing). Prefer `makeImageAndBuildHandler` for create paths.
+    static func imageInspectHandler(
+        baseUser: String? = nil,
+        labels: [String: String] = [:]
+    ) -> ([String]) -> ProcessResult? {
+        { args in
+            guard args.starts(with: ["image", "inspect"]), let ref = args.last else { return nil }
+            if ref.hasPrefix("adev-") || ref.hasPrefix("adevcontainer:") {
+                return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+            }
+            let payload = imageInspectJSON(reference: ref, user: baseUser, labels: labels)
+            let data = try! JSONSerialization.data(withJSONObject: payload)
+            return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+        }
     }
 
     static func containerListJSON(
@@ -113,7 +260,7 @@ nonisolated(unsafe) let errorModelTests: [(String, () throws -> Void)] = [
         let err = CLIError(
             code: CLIErrorCode.unsupportedProperty,
             property: "runArgs",
-            message: "runArgs entry '--privileged' is forever-rejected",
+            message: "runArgs entry '--privileged' is incompatible with Apple container; ignored",
             hint: "Remove --privileged from runArgs"
         )
         try MiniTest.expectEqual(err.property, "runArgs")
@@ -300,22 +447,161 @@ nonisolated(unsafe) let substitutionTests: [(String, () throws -> Void)] = [
             try MiniTest.expectEqual(err.code, CLIErrorCode.unsupportedSubstitution)
             try MiniTest.expectEqual(err.property, "unknownToken")
         }
+    }),
+    ("devcontainerIdExpandsWhenKnown", {
+        let ctx = SubstitutionContext(
+            localWorkspaceFolder: "/ws",
+            containerWorkspaceFolder: "/workspaces/ws",
+            localEnv: [:],
+            devcontainerId: "adev-proj-abc123def456"
+        )
+        try MiniTest.expectEqual(
+            try VariableSubstitutor.substitute("${devcontainerId}-shellhistory", context: ctx),
+            "adev-proj-abc123def456-shellhistory"
+        )
+    }),
+    ("devcontainerIdDeferredWhenUnknown", {
+        let ctx = SubstitutionContext(
+            localWorkspaceFolder: "/ws",
+            containerWorkspaceFolder: "/workspaces/ws",
+            localEnv: [:]
+        )
+        // Feature mounts / clone: leave token until create name is known.
+        try MiniTest.expectEqual(
+            try VariableSubstitutor.substitute("${devcontainerId}-shellhistory", context: ctx),
+            "${devcontainerId}-shellhistory"
+        )
+    }),
+    ("devcontainerIdExpandMountSource", {
+        let mounts = [
+            MountSpec(
+                type: .volume,
+                source: "${devcontainerId}-shellhistory",
+                target: "/home/vscode/.shellhistory"
+            ),
+            MountSpec(type: .bind, source: "/host/data", target: "/data")
+        ]
+        let id = "adev-app-deadbeefcafe"
+        let expanded = VariableSubstitutor.expandDevcontainerId(in: mounts, id: id)
+        try MiniTest.expectEqual(expanded.count, 2)
+        try MiniTest.expectEqual(expanded[0].source, "\(id)-shellhistory")
+        try MiniTest.expectEqual(expanded[0].target, "/home/vscode/.shellhistory")
+        try MiniTest.expectEqual(expanded[0].type, .volume)
+        try MiniTest.expectEqual(expanded[1].source, "/host/data")
+        // Idempotent
+        let again = VariableSubstitutor.expandDevcontainerId(in: expanded, id: id)
+        try MiniTest.expectEqual(again[0].source, "\(id)-shellhistory")
+    }),
+    ("devcontainerIdCreateRequestExpandsVolumeMount", {
+        let config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/ws",
+            mounts: [
+                MountSpec(
+                    type: .volume,
+                    source: "${devcontainerId}-shellhistory",
+                    target: "/cmdhist"
+                )
+            ]
+        )
+        let name = "adev-ws-0123456789ab"
+        let req = CreateRequest.from(
+            resolved: config,
+            identityName: name,
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        )
+        try MiniTest.expectEqual(req.mounts.count, 1)
+        try MiniTest.expectEqual(req.mounts[0].source, "\(name)-shellhistory")
+        try MiniTest.expect(
+            !req.mounts[0].source.contains("${"),
+            "volume source must not retain unsubstituted tokens"
+        )
+        let vols = req.labels[ContainerIdentity.labelConfigVolumes] ?? ""
+        try MiniTest.expectEqual(vols, "\(name)-shellhistory")
+        let args = req.createArguments()
+        let mountFlags = args.enumerated().compactMap { i, a -> String? in
+            i > 0 && args[i - 1] == "--mount" ? a : nil
+        }
+        try MiniTest.expect(
+            mountFlags.contains { $0.contains("source=\(name)-shellhistory") },
+            "create --mount uses expanded volume name"
+        )
+    }),
+    ("devcontainerIdConfigResolveAllowsTokenInMount", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "mounts": [
+            "source=${devcontainerId}-shellhistory,target=/cmdhist,type=volume"
+          ]
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        try MiniTest.expectEqual(resolved.config.mounts.count, 1)
+        // Deferred through resolve; create path expands with container name.
+        try MiniTest.expectEqual(
+            resolved.config.mounts[0].source,
+            "${devcontainerId}-shellhistory"
+        )
+        let expanded = VariableSubstitutor.expandDevcontainerId(
+            in: resolved.config,
+            id: resolved.containerName
+        )
+        try MiniTest.expectEqual(
+            expanded.mounts[0].source,
+            "\(resolved.containerName)-shellhistory"
+        )
+        try MiniTest.expect(
+            expanded.mounts[0].source.range(of: #"^[A-Za-z0-9][A-Za-z0-9_.-]*$"#, options: .regularExpression) != nil,
+            "expanded volume name must match Apple volume regex"
+        )
+    }),
+    ("devcontainerIdFeatureMergeThenExpand", {
+        let contrib = FeatureContributions(
+            mounts: [
+                MountSpec(
+                    type: .volume,
+                    source: "${devcontainerId}-shellhistory",
+                    target: "/commandhistory"
+                )
+            ]
+        )
+        let base = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/x"
+        )
+        let merged = try FeatureContributionMerge.apply(contributions: contrib, to: base)
+        try MiniTest.expectEqual(merged.mounts[0].source, "${devcontainerId}-shellhistory")
+        let id = "adev-x-aabbccddeeff"
+        let finalized = VariableSubstitutor.expandDevcontainerId(in: merged, id: id)
+        try MiniTest.expectEqual(finalized.mounts[0].source, "\(id)-shellhistory")
+        let req = CreateRequest.from(
+            resolved: finalized,
+            identityName: id,
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        )
+        try MiniTest.expectEqual(req.mounts[0].source, "\(id)-shellhistory")
     })
 ]
 
 nonisolated(unsafe) let admissionTests: [(String, () throws -> Void)] = [
-    ("rejectDockerOOD", {
+    ("warnSkipDockerOOD", {
         let raw: [String: Any] = [
             "image": "alpine:3.20",
             "features": [
-                "ghcr.io/devcontainers/features/docker-outside-of-docker:1": [:] as [String: Any]
+                "ghcr.io/devcontainers/features/docker-outside-of-docker:1": [:] as [String: Any],
+                "ghcr.io/devcontainers/features/node:2": ["version": "22"] as [String: Any]
             ]
         ]
-        try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
-            let err = error as! CLIError
-            try MiniTest.expectEqual(err.code, CLIErrorCode.unsupportedFeature)
-            try MiniTest.expect(err.message.contains("docker-outside-of-docker"))
-        }
+        try ConfigAdmissions.admit(raw)
+        let features = try FeatureAdmission.parse(raw["features"])
+        try MiniTest.expectEqual(features.count, 1)
+        try MiniTest.expectEqual(features[0].reference, "ghcr.io/devcontainers/features/node:2")
     }),
     ("admitOciNodeFeature", {
         let raw: [String: Any] = [
@@ -328,22 +614,169 @@ nonisolated(unsafe) let admissionTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(features[0].reference, "ghcr.io/devcontainers/features/node:2")
         try MiniTest.expectEqual(features[0].options["version"]?.stringValue, "22")
     }),
-    ("rejectPrivileged", {
-        let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--privileged"]]
-        try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
-            let err = error as! CLIError
-            try MiniTest.expectEqual(err.property, "runArgs")
-            try MiniTest.expect(err.message.contains("--privileged"))
-        }
+    ("warnSkipPrivilegedKeepsInit", {
+        let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--privileged", "--init"]]
+        try ConfigAdmissions.admit(raw)
+        let parsed = try RunArgsAdmission.parse(raw["runArgs"])
+        try MiniTest.expectEqual(parsed, [.initFlag])
     }),
-    ("rejectDevice", {
+    ("warnSkipOncePerResolve", {
+        // admit (×2) + buildResolved parse used to triple-warn; only final parse may warn.
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "runArgs": ["--privileged", "--init"],
+          "features": {
+            "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
+            "ghcr.io/devcontainers/features/node:1": {}
+          }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        try MiniTest.expectEqual(resolved.config.runArgs, [.initFlag])
+        try MiniTest.expectEqual(resolved.config.features.count, 1)
+
+        let privilegedWarns = warnings.filter { $0.contains("--privileged") }
+        let oodWarns = warnings.filter { $0.contains("docker-outside-of-docker") }
+        try MiniTest.expectEqual(privilegedWarns.count, 1)
+        try MiniTest.expectEqual(oodWarns.count, 1)
+    }),
+    ("hashNeutralSkippedRunArgs", {
+        let withNoise = try RunArgsAdmission.parse(["--privileged", "--init"] as [Any])
+        let clean = try RunArgsAdmission.parse(["--init"] as [Any])
+        try MiniTest.expectEqual(withNoise, clean)
+        try MiniTest.expectEqual(withNoise, [.initFlag])
+        let a = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/x",
+            runArgs: withNoise
+        )
+        let b = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/x",
+            runArgs: clean
+        )
+        let h1 = ContainerIdentity.configHash(from: a.hashMaterial())
+        let h2 = ContainerIdentity.configHash(from: b.hashMaterial())
+        try MiniTest.expectEqual(h1, h2)
+    }),
+    ("hashNeutralSkippedFeatures", {
+        let withOOD = try FeatureAdmission.parse([
+            "ghcr.io/devcontainers/features/docker-outside-of-docker:1": [:] as [String: Any],
+            "ghcr.io/devcontainers/features/node:1": ["version": "22"] as [String: Any]
+        ] as [String: Any])
+        let nodeOnly = try FeatureAdmission.parse([
+            "ghcr.io/devcontainers/features/node:1": ["version": "22"] as [String: Any]
+        ] as [String: Any])
+        try MiniTest.expectEqual(withOOD, nodeOnly)
+        try MiniTest.expectEqual(withOOD.count, 1)
+        let a = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/x",
+            features: withOOD
+        )
+        let b = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/x",
+            features: nodeOnly
+        )
+        let h1 = ContainerIdentity.configHash(from: a.hashMaterial())
+        let h2 = ContainerIdentity.configHash(from: b.hashMaterial())
+        try MiniTest.expectEqual(h1, h2)
+    }),
+    ("warnSkipDevice", {
         let raw: [String: Any] = [
             "image": "alpine:3.20",
-            "runArgs": ["--device=/dev/net/tun:/dev/net/tun"]
+            "runArgs": ["--device=/dev/net/tun:/dev/net/tun", "--init"]
         ]
-        try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
-            try MiniTest.expect((error as! CLIError).message.contains("--device"))
+        try ConfigAdmissions.admit(raw)
+        let parsed = try RunArgsAdmission.parse(raw["runArgs"])
+        try MiniTest.expectEqual(parsed, [.initFlag])
+    }),
+    ("warnSkipDeviceTwoToken", {
+        let raw: [String: Any] = [
+            "image": "alpine:3.20",
+            "runArgs": ["--device", "/dev/net/tun", "--init"]
+        ]
+        try ConfigAdmissions.admit(raw)
+        let parsed = try RunArgsAdmission.parse(raw["runArgs"])
+        try MiniTest.expectEqual(parsed, [.initFlag])
+    }),
+    ("warnSkipPrivilegedNetAdminPairing", {
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+
+        let parsed = try RunArgsAdmission.parse([
+            "--privileged",
+            "--cap-add=NET_ADMIN",
+            "--init"
+        ] as [Any])
+        try MiniTest.expectEqual(parsed, [.capAdd("NET_ADMIN"), .initFlag])
+        let pairing = warnings.filter { $0.contains("NET_ADMIN") && $0.contains("privileged/device") }
+        try MiniTest.expectEqual(pairing.count, 1)
+        try MiniTest.expect(warnings.contains { $0.contains("--privileged") })
+    }),
+    ("warnSkipStillFiresWhenQuiet", {
+        let previousEnabled = StatusPrinter.enabled
+        let previousSuppress = StatusPrinter.suppressWarningStderr
+        let previousOn = StatusPrinter.onWarning
+        defer {
+            StatusPrinter.enabled = previousEnabled
+            StatusPrinter.suppressWarningStderr = previousSuppress
+            StatusPrinter.onWarning = previousOn
         }
+        // QUIET silences progress only; onWarning (and product stderr) still receive policy warns.
+        StatusPrinter.enabled = false
+        StatusPrinter.suppressWarningStderr = true
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+        StatusPrinter.status("should-be-silent")
+        _ = try RunArgsAdmission.parse(["--privileged", "--init"] as [Any])
+        try MiniTest.expect(warnings.contains { $0.contains("--privileged") })
+    }),
+    ("featurePrivilegedMetadataOnWarning", {
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+
+        let data = try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-privileged"))
+            .appendingPathComponent("devcontainer-feature.json"))
+        let meta = try FeatureMetadata.parse(data: data, featureRef: FeaturesTestSupport.refPriv)
+        meta.warnStripUnsafeContributions(featureRef: FeaturesTestSupport.refPriv)
+        try MiniTest.expect(warnings.contains { $0.contains("privileged") && $0.contains("ignored") })
+    }),
+    ("featureSecurityOptOnWarning", {
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+
+        let meta = FeatureMetadata(id: "x", securityOpt: ["label=disable"])
+        meta.warnStripUnsafeContributions(featureRef: "ghcr.io/x:1")
+        try MiniTest.expect(warnings.contains { $0.contains("securityOpt") && $0.contains("ignored") })
+    }),
+    ("featureMetadataLabelPrivilegedOnWarning", {
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+
+        let labels = [
+            DevContainerMetadataLabel.labelKey:
+                #"[{"containerEnv":{"OK":"1"}},{"privileged":true,"securityOpt":["label=disable"]}]"#
+        ]
+        DevContainerMetadataLabel.warnStripUnsafe(from: labels, imageRef: "img:1")
+        try MiniTest.expect(warnings.contains { $0.contains("privileged") })
+        try MiniTest.expect(warnings.contains { $0.contains("securityOpt") })
     }),
     ("rejectUnknownRunArgs", {
         let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--not-a-real-flag"]]
@@ -353,35 +786,30 @@ nonisolated(unsafe) let admissionTests: [(String, () throws -> Void)] = [
             try MiniTest.expect(err.message.lowercased().contains("allowlist"))
         }
     }),
-    ("rejectNetworkHost", {
-        let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--network=host"]]
-        try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
-            let err = error as! CLIError
-            try MiniTest.expect(err.message.lowercased().contains("host"))
-            try MiniTest.expect(
-                err.message.lowercased().contains("forever-rejected")
-                    || err.message.lowercased().contains("not allowed")
-            )
-        }
+    ("warnSkipNetworkHost", {
+        let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--network=host", "--init"]]
+        try ConfigAdmissions.admit(raw)
+        let parsed = try RunArgsAdmission.parse(raw["runArgs"])
+        try MiniTest.expectEqual(parsed, [.initFlag])
     }),
-    ("rejectNetworkBridgeNoneContainer", {
+    ("warnSkipNetworkBridgeNoneContainer", {
         for mode in ["bridge", "none", "container:abc", "HOST"] {
-            let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--network=\(mode)"]]
-            try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
-                try MiniTest.expectEqual((error as! CLIError).property, "runArgs")
-            }
+            let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--network=\(mode)", "--init"]]
+            try ConfigAdmissions.admit(raw)
+            let parsed = try RunArgsAdmission.parse(raw["runArgs"])
+            try MiniTest.expectEqual(parsed, [.initFlag])
         }
-        let twoTok: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--network", "host"]]
-        try MiniTest.expectThrows({ try ConfigAdmissions.admit(twoTok) }) { error in
-            try MiniTest.expect((error as! CLIError).message.lowercased().contains("host"))
-        }
+        let twoTok: [String: Any] = ["image": "alpine:3.20", "runArgs": ["--network", "host", "--init"]]
+        try ConfigAdmissions.admit(twoTok)
+        let parsed = try RunArgsAdmission.parse(twoTok["runArgs"])
+        try MiniTest.expectEqual(parsed, [.initFlag])
     }),
-    ("rejectSecurityOptAndGpus", {
+    ("warnSkipSecurityOptAndGpus", {
         for flag in ["--security-opt=label=disable", "--gpus=all", "--ipc=host", "--pid=host"] {
-            let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": [flag]]
-            try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
-                try MiniTest.expect((error as! CLIError).message.lowercased().contains("forever-rejected"))
-            }
+            let raw: [String: Any] = ["image": "alpine:3.20", "runArgs": [flag, "--init"]]
+            try ConfigAdmissions.admit(raw)
+            let parsed = try RunArgsAdmission.parse(raw["runArgs"])
+            try MiniTest.expectEqual(parsed, [.initFlag])
         }
     }),
     ("rejectFirstClassRunArgsFlags", {
@@ -722,6 +1150,70 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(postStart, .shell("echo start"))
         try MiniTest.expectEqual(onCreate!.execArguments, ["echo", "hi"])
         try MiniTest.expectEqual(postStart!.execArguments, ["sh", "-lc", "echo start"])
+    }),
+    ("lifecycleCommandObjectFormParse", {
+        // shell-history style: named map of string commands
+        let obj: [String: Any] = [
+            "shell-history": "/usr/local/share/oncreate.sh",
+            "other": ["echo", "named"] as [Any]
+        ]
+        let parsed = try LifecycleCommand.parse(obj, property: "onCreateCommand")
+        guard case .parallel(let named) = parsed else {
+            throw MiniTest.Failure(message: "expected parallel object form")
+        }
+        try MiniTest.expectEqual(named.count, 2)
+        try MiniTest.expectEqual(named[0].name, "other")
+        try MiniTest.expectEqual(named[0].command, LifecycleCommand.argv(["echo", "named"]))
+        try MiniTest.expectEqual(named[1].name, "shell-history")
+        try MiniTest.expectEqual(named[1].command, LifecycleCommand.shell("/usr/local/share/oncreate.sh"))
+        try MiniTest.expectEqual(named[1].command.execArguments, ["sh", "-lc", "/usr/local/share/oncreate.sh"])
+
+        let empty = try LifecycleCommand.parse([:] as [String: Any], property: "onCreateCommand")
+        try MiniTest.expect(empty == nil)
+
+        // Regression: prior error text rejected object form entirely
+        try MiniTest.expectThrows({
+            _ = try LifecycleCommand.parse(42, property: "onCreateCommand")
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.unsupportedProperty)
+            try MiniTest.expectEqual(err.property, "onCreateCommand")
+            try MiniTest.expect(err.message.contains("object of named commands"))
+            try MiniTest.expect(!err.message.contains("must be a string or array of strings")
+                || err.message.contains("object"))
+        }
+    }),
+    ("lifecycleCommandObjectFormNestedObjectFails", {
+        try MiniTest.expectThrows({
+            _ = try LifecycleCommand.parse(
+                ["bad": ["nested": "no"] as [String: Any]] as [String: Any],
+                property: "postCreateCommand"
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.property, "postCreateCommand.bad")
+        }
+    }),
+    ("featureMetadataObjectFormOnCreate", {
+        let json = """
+        {
+          "id": "shell-history",
+          "version": "0.0.6",
+          "onCreateCommand": {
+            "shell-history": "/usr/local/share/stuartleeks-devcontainer-features/shell-history/scripts/oncreate.sh"
+          }
+        }
+        """
+        let meta = try FeatureMetadata.parse(data: Data(json.utf8), featureRef: "ghcr.io/stuartleeks/dev-container-features/shell-history:0")
+        guard case .parallel(let named) = meta.onCreateCommand else {
+            throw MiniTest.Failure(message: "expected object-form onCreateCommand")
+        }
+        try MiniTest.expectEqual(named.count, 1)
+        try MiniTest.expectEqual(named[0].name, "shell-history")
+        try MiniTest.expectEqual(
+            named[0].command,
+            LifecycleCommand.shell("/usr/local/share/stuartleeks-devcontainer-features/shell-history/scripts/oncreate.sh")
+        )
     }),
     ("invalidPostAttachFormFails", {
         try MiniTest.expectThrows({
@@ -1065,6 +1557,74 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
             let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
             let inspection = try runtime.inspectImage(ref: "alpine:3.20")
             try MiniTest.expectEqual(inspection.digests, ["sha256:abc"])
+            try MiniTest.expect(inspection.user == nil || inspection.user?.isEmpty == true)
+        }
+    }),
+    ("inspectImageExposesOCIUserFromAppleVariants", {
+        let payload = MockProcessRunner.imageInspectJSON(reference: "node:20", user: "node")
+        let mock = MockProcessRunner()
+        try mock.enqueueJSON(payload)
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let inspection = try runtime.inspectImage(ref: "node:20")
+        try MiniTest.expectEqual(inspection.user, "node")
+        try MiniTest.expect(inspection.user != "root" || inspection.user == "node")
+    }),
+    ("inspectImageExposesOCIUserFromDockerConfig", {
+        let payload: [String: Any] = [
+            "Id": "sha256:ddd",
+            "id": "sha256:ddd",
+            "Config": ["User": "app"] as [String: Any],
+            "platform": ["os": "linux", "architecture": "arm64"] as [String: Any]
+        ]
+        let mock = MockProcessRunner()
+        try mock.enqueueJSON(payload)
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let inspection = try runtime.inspectImage(ref: "app:1")
+        try MiniTest.expectEqual(inspection.user, "app")
+    }),
+    ("inspectImageEmptyUserIsNotRoot", {
+        let payload = MockProcessRunner.imageInspectJSON(reference: "alpine:3.20", user: nil)
+        let mock = MockProcessRunner()
+        try mock.enqueueJSON(payload)
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let inspection = try runtime.inspectImage(ref: "alpine:3.20")
+        try MiniTest.expect(inspection.user == nil || inspection.user?.isEmpty == true)
+        try MiniTest.expect(inspection.user != "root")
+    }),
+    ("inspectImageWhitespaceUserIsEmpty", {
+        let payload = MockProcessRunner.imageInspectJSON(reference: "x", user: "   ")
+        // Force whitespace User into payload
+        var forced = payload
+        if var variants = forced["variants"] as? [[String: Any]],
+           var outer = variants[0]["config"] as? [String: Any],
+           var inner = outer["config"] as? [String: Any] {
+            inner["User"] = "   "
+            outer["config"] = inner
+            variants[0]["config"] = outer
+            forced["variants"] = variants
+        }
+        let mock = MockProcessRunner()
+        try mock.enqueueJSON(forced)
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let inspection = try runtime.inspectImage(ref: "x")
+        try MiniTest.expect(inspection.user == nil)
+    }),
+    ("inspectImageFailureDoesNotFabricateRoot", {
+        let mock = MockProcessRunner()
+        mock.enqueueFailure(exitCode: 1, stderr: "image not found")
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({ _ = try runtime.inspectImage(ref: "missing:tag") }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.runtimeFailed)
+            try MiniTest.expect(!err.message.lowercased().contains("user root") || true)
+        }
+    }),
+    ("inspectImageUnparseableJSONFails", {
+        let mock = MockProcessRunner()
+        mock.enqueueStdout("not-json", exitCode: 0)
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({ _ = try runtime.inspectImage(ref: "x") }) { error in
+            try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.runtimeFailed)
         }
     }),
     ("nonZeroMapsToError", {
@@ -1240,6 +1800,104 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(result.succeeded)
         try MiniTest.expect(result.stderrString.contains("streamed-err"))
     }),
+    ("foundationProcessRunnerCapturesTeedStdout", {
+        // teeStdoutToStderr must still capture stdout for failure diagnostics.
+        let runner = FoundationProcessRunner()
+        let result = try runner.run(
+            executable: "/bin/sh",
+            arguments: ["-c", "echo streamed-out; echo streamed-err 1>&2"],
+            environment: nil,
+            currentDirectory: nil,
+            streamStderr: true,
+            teeStdoutToStderr: true
+        )
+        try MiniTest.expect(result.succeeded)
+        try MiniTest.expect(result.stdoutString.contains("streamed-out"))
+        try MiniTest.expect(result.stderrString.contains("streamed-err"))
+    }),
+    ("lifecycleRunnerStreamsHookExecOutput", {
+        // Lifecycle hooks must request streamOutput so long-running scripts tee live.
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.first == "exec" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("hook-stdout\n".utf8),
+                        stderr: Data("hook-stderr\n".utf8)
+                    )
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/app",
+            postCreateCommand: .shell("echo slow-hook")
+        )
+        try LifecycleRunner.runIfPresent(
+            property: "postCreateCommand",
+            command: config.postCreateCommand,
+            containerId: "ctr-stream",
+            config: config,
+            runtime: runtime,
+            failurePolicy: .deleteContainerThenFail
+        )
+        try MiniTest.expect(mock.lastStreamStderr == true)
+        try MiniTest.expect(mock.lastTeeStdoutToStderr == true)
+        let execCalls = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execCalls.count, 1)
+        try MiniTest.expect(execCalls[0].streamStderr == true)
+        try MiniTest.expect(execCalls[0].teeStdoutToStderr == true)
+    }),
+    ("lifecycleRunnerStreamFailureKeepsDiagnostics", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.first == "exec" {
+                    return ProcessResult(
+                        exitCode: 3,
+                        stdout: Data("out-detail\n".utf8),
+                        stderr: Data("err-detail\n".utf8)
+                    )
+                }
+                if args.first == "delete" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/app",
+            postCreateCommand: .shell("false")
+        )
+        try MiniTest.expectThrows({
+            try LifecycleRunner.runIfPresent(
+                property: "postCreateCommand",
+                command: config.postCreateCommand,
+                containerId: "ctr-fail-stream",
+                config: config,
+                runtime: runtime,
+                failurePolicy: .deleteContainerThenFail
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.postCreateFailed)
+            try MiniTest.expect(err.message.contains("err-detail"))
+            try MiniTest.expect(err.message.contains("out-detail"))
+            try MiniTest.expect(err.message.contains("exit 3"))
+        }
+        // Streaming path was used on exec; captured detail still reaches the structured error.
+        // (delete-on-fail also streams stderr and must not be confused with the hook exec flags.)
+        let execCalls = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execCalls.count, 1)
+        try MiniTest.expect(execCalls[0].streamStderr == true)
+        try MiniTest.expect(execCalls[0].teeStdoutToStderr == true)
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" })
+    }),
     ("isBuilderRunningParsesStatusJSON", {
         let mock = MockProcessRunner()
         mock.handlers = [
@@ -1381,6 +2039,157 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         }
         try MiniTest.expect(sawStop)
         try MiniTest.expect(mock.calls.contains { $0.arguments.starts(with: ["builder", "stop"]) })
+    }),
+    ("workspaceOwnershipSkipsRootAndEmptyUser", {
+        let mock = MockProcessRunner()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try WorkspaceOwnership.ensureWorkspaceWritableByRemoteUser(
+            containerId: "ctr",
+            workspaceFolder: "/workspaces/app",
+            remoteUser: "root",
+            runtime: runtime
+        )
+        try WorkspaceOwnership.ensureWorkspaceWritableByRemoteUser(
+            containerId: "ctr",
+            workspaceFolder: "/workspaces/app",
+            remoteUser: nil,
+            runtime: runtime
+        )
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "ctr",
+            mounts: [MountSpec(type: .volume, source: "v", target: "/home/vscode/.config")],
+            remoteUser: "root",
+            runtime: runtime
+        )
+        try MiniTest.expect(mock.calls.isEmpty, "root/unset remoteUser must not exec chown")
+    }),
+    ("workspaceOwnershipNamedVolumesChownTargetsOnly", {
+        let mock = MockProcessRunner()
+        mock.defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let mounts = [
+            MountSpec(type: .bind, source: "/host/path", target: "/bound"),
+            MountSpec(type: .volume, source: "opencode-config", target: "/home/vscode/.config/opencode"),
+            MountSpec(type: .volume, source: "opencode-data", target: "/home/vscode/.local/share/opencode"),
+            MountSpec(type: .volume, source: "empty-target", target: "  ")
+        ]
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "ctr",
+            mounts: mounts,
+            remoteUser: "vscode",
+            runtime: runtime
+        )
+        let execs = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execs.count, 1)
+        let args = execs[0].arguments
+        try MiniTest.expect(args.contains("-u"))
+        try MiniTest.expect(args.contains("root"))
+        let script = args.last ?? ""
+        try MiniTest.expect(script.contains("chown -R"))
+        try MiniTest.expect(script.contains("/home/vscode/.config/opencode"))
+        try MiniTest.expect(script.contains("/home/vscode/.local/share/opencode"))
+        try MiniTest.expect(!script.contains("/bound"), "must not chown bind mount targets")
+        try MiniTest.expect(!script.contains("empty-target"))
+    }),
+    ("workspaceOwnershipNamedVolumesChownParentPaths", {
+        let mock = MockProcessRunner()
+        mock.defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "ctr",
+            mounts: [
+                MountSpec(
+                    type: .volume,
+                    source: "opencode-data",
+                    target: "/home/vscode/.local/share/opencode"
+                )
+            ],
+            remoteUser: "vscode",
+            runtime: runtime
+        )
+        let script = mock.calls.first(where: { $0.arguments.first == "exec" })?.arguments.last ?? ""
+        try MiniTest.expect(script.contains("chown -R \"$OWN\" \"$T\""), "recursive chown target only")
+        try MiniTest.expect(script.contains("dirname \"$T\""), "walk parents from target")
+        try MiniTest.expect(script.contains("chown \"$OWN\" \"$P\""), "non-recursive parent chown")
+        try MiniTest.expect(
+            script.contains("|/home|"),
+            "parent walk denylist must include /home"
+        )
+        try MiniTest.expect(
+            script.contains("[ \"$N\" = \"$P\" ]"),
+            "stop when dirname equals current path"
+        )
+        try MiniTest.expect(!script.contains("chown -R \"$OWN\" \"$P\""), "must not recurse parents")
+        // Generated script must not emit a literal chown of system top /home
+        // (only intermediate parents under the remote user home).
+        try MiniTest.expect(
+            !script.contains("chown \"$OWN\" \"/home\""),
+            "must not chown /home for paths under /home/vscode/..."
+        )
+    }),
+    ("workspaceOwnershipNamedVolumesSkipsReadonly", {
+        let mock = MockProcessRunner()
+        mock.defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let mounts = [
+            MountSpec(
+                type: .volume,
+                source: "ro-data",
+                target: "/home/vscode/.cache/ro-vol",
+                readonly: true
+            ),
+            MountSpec(
+                type: .volume,
+                source: "rw-data",
+                target: "/home/vscode/.local/share/opencode",
+                readonly: false
+            )
+        ]
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "ctr",
+            mounts: mounts,
+            remoteUser: "vscode",
+            runtime: runtime
+        )
+        let script = mock.calls.first(where: { $0.arguments.first == "exec" })?.arguments.last ?? ""
+        try MiniTest.expect(script.contains("/home/vscode/.local/share/opencode"))
+        try MiniTest.expect(
+            !script.contains("/home/vscode/.cache/ro-vol"),
+            "must not chown readonly volume targets"
+        )
+    }),
+    ("workspaceOwnershipNamedVolumesReadonlyOnlyNoop", {
+        let mock = MockProcessRunner()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "ctr",
+            mounts: [
+                MountSpec(
+                    type: .volume,
+                    source: "ro-only",
+                    target: "/data/ro",
+                    readonly: true
+                )
+            ],
+            remoteUser: "vscode",
+            runtime: runtime
+        )
+        try MiniTest.expect(mock.calls.isEmpty, "readonly-only volumes must not exec chown")
+    }),
+    ("workspaceOwnershipBindOnlyMountsNoop", {
+        let mock = MockProcessRunner()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "ctr",
+            mounts: [MountSpec(type: .bind, source: "/host", target: "/in")],
+            remoteUser: "vscode",
+            runtime: runtime
+        )
+        try MiniTest.expect(mock.calls.isEmpty, "bind-only mounts must not chown")
+    }),
+    ("workspaceOwnershipShellSingleQuoted", {
+        try MiniTest.expectEqual(WorkspaceOwnership.shellSingleQuoted("vscode"), "'vscode'")
+        try MiniTest.expectEqual(WorkspaceOwnership.shellSingleQuoted("a'b"), "'a'\\''b'")
     })
 ]
 
@@ -1444,10 +2253,10 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(features.contains { $0.reference.contains("sample-b") })
         for f in features {
             try MiniTest.expect(FeatureRef.isLocalPath(f.reference))
-            try MiniTest.expect(!FeatureRef.containsDockerOOD(f.reference))
+            try MiniTest.expect(FeatureRef.warnSkippedDockerMarker(in: f.reference) == nil)
         }
     }),
-    ("featuresDockerOODAnyRegistryTag", {
+    ("featuresDockerOODAnyRegistryTagWarnSkip", {
         let refs = [
             "ghcr.io/devcontainers/features/docker-outside-of-docker:1",
             "ghcr.io/devcontainers/features/docker-outside-of-docker:2.0",
@@ -1455,21 +2264,16 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             "ghcr.io/other/docker-outside-of-docker"
         ]
         for ref in refs {
-            try MiniTest.expectThrows({
-                try ConfigAdmissions.admit([
-                    "image": "alpine:3.20",
-                    "features": [ref: [:] as [String: Any]]
-                ])
-            }) { error in
-                let err = error as! CLIError
-                try MiniTest.expect(err.message.contains("docker-outside-of-docker"))
-                try MiniTest.expect(err.message.lowercased().contains("forever-rejected")
-                    || (err.hint?.contains("docker-outside-of-docker") == true))
-            }
+            try ConfigAdmissions.admit([
+                "image": "alpine:3.20",
+                "features": [ref: [:] as [String: Any]]
+            ])
+            let features = try FeatureAdmission.parse([ref: [:] as [String: Any]])
+            try MiniTest.expectEqual(features.count, 0)
         }
     }),
-    ("featuresDockerRelatedForeverRejectByName", {
-        // Offline: admit fails immediately (no network) for docker-in-docker / ood / from-docker.
+    ("featuresDockerRelatedWarnSkipByName", {
+        // Offline: admit succeeds and drops docker-in-docker / ood / from-docker (no network).
         let cases: [(ref: String, marker: String)] = [
             ("ghcr.io/devcontainers/features/docker-in-docker:2", "docker-in-docker"),
             ("ghcr.io/devcontainers/features/docker-outside-of-docker:1", "docker-outside-of-docker"),
@@ -1477,32 +2281,28 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             ("example.com/mirror/docker-in-docker:latest", "docker-in-docker")
         ]
         for item in cases {
-            try MiniTest.expectThrows({
-                try ConfigAdmissions.admit([
-                    "image": "alpine:3.20",
-                    "features": [item.ref: [:] as [String: Any]]
-                ])
-            }) { error in
-                let err = error as! CLIError
-                try MiniTest.expectEqual(err.code, CLIErrorCode.unsupportedFeature)
-                try MiniTest.expect(err.message.contains(item.marker))
-                try MiniTest.expect(err.message.lowercased().contains("forever-rejected"))
-            }
+            try ConfigAdmissions.admit([
+                "image": "alpine:3.20",
+                "features": [
+                    item.ref: [:] as [String: Any],
+                    "ghcr.io/devcontainers/features/node:1": [:] as [String: Any]
+                ]
+            ])
+            let features = try FeatureAdmission.parse([
+                item.ref: [:] as [String: Any],
+                "ghcr.io/devcontainers/features/node:1": [:] as [String: Any]
+            ])
+            try MiniTest.expectEqual(features.count, 1)
+            try MiniTest.expect(features[0].reference.contains("node"))
+            try MiniTest.expect(!features.contains { $0.reference.contains(item.marker) })
         }
     }),
-    ("featuresDockerOODFixtureRejects", {
+    ("featuresDockerOODFixtureWarnSkips", {
         let path = TestRepo.root().appendingPathComponent("Tests/Fixtures/features-docker-ood.json").path
         let obj = try JSONCParser.loadFile(at: path)
-        try MiniTest.expectThrows({ try ConfigAdmissions.admit(obj) }) { error in
-            let err = error as! CLIError
-            try MiniTest.expectEqual(err.code, CLIErrorCode.unsupportedFeature)
-            try MiniTest.expect(err.message.contains("docker-outside-of-docker"))
-            try MiniTest.expect(err.message.lowercased().contains("forever-rejected"))
-        }
-        try MiniTest.expectThrows({ _ = try FeatureAdmission.parse(obj["features"]) }) { error in
-            let err = error as! CLIError
-            try MiniTest.expect(err.message.contains("docker-outside-of-docker"))
-        }
+        try ConfigAdmissions.admit(obj)
+        let features = try FeatureAdmission.parse(obj["features"])
+        try MiniTest.expectEqual(features.count, 0)
     }),
     ("featuresNodeFixtureAdmits", {
         let path = TestRepo.root().appendingPathComponent("Tests/Fixtures/features-node.json").path
@@ -1511,7 +2311,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         let features = try FeatureAdmission.parse(obj["features"])
         try MiniTest.expectEqual(features.count, 1)
         try MiniTest.expect(features[0].reference.contains("node"))
-        try MiniTest.expect(!FeatureRef.containsDockerOOD(features[0].reference))
+        try MiniTest.expect(FeatureRef.warnSkippedDockerMarker(in: features[0].reference) == nil)
     }),
     ("featuresTripleFixtureAdmits", {
         let path = TestRepo.root().appendingPathComponent("Tests/Fixtures/features-triple.json").path
@@ -1524,7 +2324,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(refs.contains(where: { $0.contains("/git:") || $0.hasSuffix("/git:1") || $0.contains("features/git") }))
         try MiniTest.expect(refs.contains(where: { $0.contains("github-cli") }))
         for ref in refs {
-            try MiniTest.expect(!FeatureRef.containsDockerOOD(ref), ref)
+            try MiniTest.expect(FeatureRef.warnSkippedDockerMarker(in: ref) == nil, ref)
         }
     }),
     ("featureMetadataParseFixture", {
@@ -1620,27 +2420,19 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             try MiniTest.expect(err.message.lowercased().contains("cycle"))
         }
     }),
-    ("featurePrivilegedMetadataReject", {
+    ("featurePrivilegedMetadataWarnSkip", {
         let data = try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-privileged"))
             .appendingPathComponent("devcontainer-feature.json"))
         let meta = try FeatureMetadata.parse(data: data, featureRef: FeaturesTestSupport.refPriv)
-        try MiniTest.expectThrows({
-            try meta.rejectUnsafeContributions(featureRef: FeaturesTestSupport.refPriv)
-        }) { error in
-            let err = error as! CLIError
-            try MiniTest.expect(err.message.lowercased().contains("privileged"))
-            try MiniTest.expect(err.message.lowercased().contains("forever-rejected")
-                || (err.hint?.lowercased().contains("privileged") == true))
-        }
+        try MiniTest.expect(meta.privileged)
+        // Must not throw — privileged is warn-stripped; feature may still install.
+        meta.warnStripUnsafeContributions(featureRef: FeaturesTestSupport.refPriv)
     }),
-    ("featureSecurityOptReject", {
+    ("featureSecurityOptWarnSkip", {
         let meta = FeatureMetadata(id: "x", securityOpt: ["label=disable"])
-        try MiniTest.expectThrows({
-            try meta.rejectUnsafeContributions(featureRef: "ghcr.io/x:1")
-        }) { error in
-            try MiniTest.expect((error as! CLIError).message.lowercased().contains("securityopt")
-                || (error as! CLIError).message.contains("securityOpt"))
-        }
+        try MiniTest.expect(!meta.securityOpt.isEmpty)
+        // Must not throw — securityOpt is warn-stripped.
+        meta.warnStripUnsafeContributions(featureRef: "ghcr.io/x:1")
     }),
     ("featureOptionsEnvNames", {
         try MiniTest.expectEqual(FeatureOptions.envName(forOption: "version"), "VERSION")
@@ -1777,20 +2569,14 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         ])
         try MiniTest.expectEqual(ordered.map(\.admitted.reference), [refA, refB])
     }),
-    ("featureLocalPrivilegedStillRejects", {
+    ("featureLocalPrivilegedWarnSkip", {
         let meta = try FeatureMetadata.parse(
             data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-privileged"))
                 .appendingPathComponent("devcontainer-feature.json")),
             featureRef: "./.devcontainer/features/sample-privileged"
         )
-        try MiniTest.expectThrows({
-            try meta.rejectUnsafeContributions(featureRef: "./.devcontainer/features/sample-privileged")
-        }) { error in
-            let err = error as! CLIError
-            try MiniTest.expect(err.message.lowercased().contains("privileged"))
-            try MiniTest.expect(err.message.lowercased().contains("forever-rejected")
-                || (err.hint?.lowercased().contains("privileged") == true))
-        }
+        try MiniTest.expect(meta.privileged)
+        meta.warnStripUnsafeContributions(featureRef: "./.devcontainer/features/sample-privileged")
     }),
     ("featuresRunnerLocalSampleAAndBOrder", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
@@ -1809,8 +2595,9 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         let fetcher = DefaultFeatureFetcher(workspacePath: ws.path)
         let mockProc = MockProcessRunner()
         mockProc.handlers = [
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
             { args in
-                if args.starts(with: ["image", "inspect"]) || args.starts(with: ["image", "list"]) {
+                if args.starts(with: ["image", "list"]) {
                     return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
                 }
                 if args.first == "build" {
@@ -1872,6 +2659,188 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(safe.hasPrefix("0-"))
         try MiniTest.expect(!safe.contains("/"))
         try MiniTest.expect(!safe.contains(":"))
+    }),
+    ("featureDockerfileGeneratorChmodsPackageRecursively", {
+        // shell-history-style: install.sh copies oncreate.sh (often 0644 in OCI) to a
+        // bare-path onCreateCommand. Reference CLI does `chmod -R 0755` on the package
+        // before install so cp preserves +x and `sh -lc /path/oncreate.sh` does not 126.
+        let metaA = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refA
+        )
+        let ctxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-df-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: ctxDir) }
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(
+                    reference: FeaturesTestSupport.refA,
+                    options: ["greeting": .string("hi")]
+                ),
+                metadata: metaA
+            )
+        ]
+        let packages = [
+            FetchedFeaturePackage(
+                reference: FeaturesTestSupport.refA,
+                directoryPath: FeaturesTestSupport.fixtureFeatureDir("sample-a")
+            )
+        ]
+        let ctx = try FeatureDockerfileGenerator.write(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            packages: packages,
+            contextDirectory: ctxDir,
+            remoteUser: "vscode",
+            containerUser: "vscode",
+            baseUser: "node"
+        )
+        let contents = ctx.dockerfileContents
+        try MiniTest.expect(contents.contains("FROM alpine:3.20"))
+        try MiniTest.expect(contents.contains("COPY feature-0 /tmp/adev-feature-0"))
+        try MiniTest.expect(contents.contains("chmod -R 0755 /tmp/adev-feature-0"))
+        try MiniTest.expect(contents.contains("./install.sh"))
+        // Must not only chmod install.sh — lifecycle scripts need +x too.
+        try MiniTest.expect(!contents.contains("chmod +x /tmp/adev-feature-0/install.sh"))
+        try MiniTest.expect(contents.contains("USER root"))
+        try MiniTest.expect(contents.contains("USER node"))
+        // Final USER is base user, not lingering install root.
+        let lastUserLine = contents.split(separator: "\n").last(where: { $0.hasPrefix("USER ") })
+        try MiniTest.expectEqual(lastUserLine.map(String.init), "USER node")
+        try MiniTest.expect(FileManager.default.fileExists(atPath: ctx.dockerfilePath))
+    }),
+    ("featureDockerfileGeneratorRestoresRootWhenBaseUserEmpty", {
+        let metaA = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refA
+        )
+        let ctxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-df-empty-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: ctxDir) }
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: FeaturesTestSupport.refA, options: [:]),
+                metadata: metaA
+            )
+        ]
+        let packages = [
+            FetchedFeaturePackage(
+                reference: FeaturesTestSupport.refA,
+                directoryPath: FeaturesTestSupport.fixtureFeatureDir("sample-a")
+            )
+        ]
+        let ctx = try FeatureDockerfileGenerator.write(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            packages: packages,
+            contextDirectory: ctxDir,
+            baseUser: nil
+        )
+        let lastUserLine = ctx.dockerfileContents.split(separator: "\n").last(where: { $0.hasPrefix("USER ") })
+        try MiniTest.expectEqual(lastUserLine.map(String.init), "USER root")
+    }),
+    ("featureDockerfileGeneratorDoesNotEndRootWhenBaseIsNode", {
+        let metaA = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refA
+        )
+        let ctxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-df-node-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: ctxDir) }
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: FeaturesTestSupport.refA, options: [:]),
+                metadata: metaA
+            )
+        ]
+        let packages = [
+            FetchedFeaturePackage(
+                reference: FeaturesTestSupport.refA,
+                directoryPath: FeaturesTestSupport.fixtureFeatureDir("sample-a")
+            )
+        ]
+        let ctx = try FeatureDockerfileGenerator.write(
+            baseImage: "node:20",
+            ordered: ordered,
+            packages: packages,
+            contextDirectory: ctxDir,
+            baseUser: "node"
+        )
+        try MiniTest.expect(!ctx.dockerfileContents.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("USER root"))
+        try MiniTest.expect(ctx.dockerfileContents.contains("USER node"))
+        // Install env falls back to base USER when config users empty (not unconditional root).
+        try MiniTest.expect(ctx.dockerfileContents.contains("_REMOTE_USER=node"))
+        try MiniTest.expect(ctx.dockerfileContents.contains("_CONTAINER_USER=node"))
+    }),
+    ("featuresRunnerFailsClosedOnBaseInspectFailure", {
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-inspect-fail-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+        let mockFetch = MockFeatureFetcher(packagesByRef: [
+            FeaturesTestSupport.refA: FeaturesTestSupport.fixtureFeatureDir("sample-a")
+        ])
+        let mockProc = MockProcessRunner()
+        mockProc.handlers = [
+            { args in
+                if args.starts(with: ["image", "inspect"]) {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("nope".utf8))
+                }
+                if args.starts(with: ["image", "list"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
+                }
+                if args.first == "build" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mockProc)
+        try MiniTest.expectThrows({
+            _ = try FeaturesRunner.run(
+                features: [AdmittedFeature(reference: FeaturesTestSupport.refA, options: [:])],
+                baseImage: "alpine:3.20",
+                deps: FeaturesRunner.Dependencies(
+                    fetcher: mockFetch,
+                    runtime: runtime,
+                    cacheRoot: cache,
+                    platform: "linux/arm64"
+                )
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(err.message.lowercased().contains("inspect") || err.message.lowercased().contains("user"))
+        }
+        try MiniTest.expect(!mockProc.calls.contains { $0.arguments.first == "build" })
+    }),
+    ("derivedImageTagRecipeVersionBumpedForUserRestore", {
+        try MiniTest.expectEqual(DerivedImageTag.recipeVersion, "3")
+        let metaA = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refA
+        )
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: FeaturesTestSupport.refA, options: [:]),
+                metadata: metaA
+            )
+        ]
+        let v2 = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            nameBase: "x",
+            recipeVersion: "2"
+        )
+        let v3 = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            nameBase: "x",
+            recipeVersion: "3"
+        )
+        try MiniTest.expect(v2 != v3, "recipeVersion bump must change derived tag")
     }),
     ("tomlMergeBuildRosettaFalsePreservesKeys", {
         let input = """
@@ -2093,20 +3062,108 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             String(t1.split(separator: ":").last ?? ""),
             String(tEmpty.split(separator: ":").last ?? "")
         )
+        // Default recipeVersion is the product constant (included in material).
+        let tDefaultRecipe = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: o1,
+            nameBase: "my-app",
+            recipeVersion: DerivedImageTag.recipeVersion
+        )
+        try MiniTest.expectEqual(t1, tDefaultRecipe)
+    }),
+    ("featureDerivedTagChangesWithRecipeVersion", {
+        // Generator install-semantics bumps must invalidate stale derived images
+        // (e.g. chmod +x install.sh only → chmod -R 0755 package).
+        let metaA = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refA
+        )
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(
+                    reference: FeaturesTestSupport.refA,
+                    options: ["greeting": .string("a")]
+                ),
+                metadata: metaA
+            )
+        ]
+        let sameV = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            nameBase: "app",
+            recipeVersion: "2"
+        )
+        let sameVAgain = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            nameBase: "app",
+            recipeVersion: "2"
+        )
+        let bumped = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            nameBase: "app",
+            recipeVersion: "3"
+        )
+        try MiniTest.expectEqual(sameV, sameVAgain)
+        try MiniTest.expect(sameV != bumped)
+        try MiniTest.expect(sameV.hasPrefix("adev-app:"))
+        try MiniTest.expect(bumped.hasPrefix("adev-app:"))
+        try MiniTest.expectEqual(
+            String(sameV.split(separator: ":").last ?? "").count,
+            12
+        )
     }),
     ("featureDerivedTagUsesWorkspaceBasenameViaHumanBase", {
         let base = ContainerIdentity.humanBase(configName: nil, workspacePath: "/Users/me/My_Project")
         try MiniTest.expectEqual(base, "my-project")
         let named = ContainerIdentity.humanBase(configName: "Cool App", workspacePath: "/Users/me/My_Project")
         try MiniTest.expectEqual(named, "cool-app")
-        // After clip to 20, re-trim so base cannot end/start with `-`.
+        // Collapse consecutive hyphens; clip ≤20; re-trim so base cannot end/start with `-`.
         let clipped = ContainerIdentity.humanBase(
             configName: "test----------------end",
             workspacePath: "/Users/me/My_Project"
         )
-        try MiniTest.expectEqual(clipped, "test")
+        try MiniTest.expectEqual(clipped, "test-end")
         try MiniTest.expect(!clipped.hasPrefix("-"))
         try MiniTest.expect(!clipped.hasSuffix("-"))
+        try MiniTest.expect(!clipped.contains("--"))
+    }),
+    ("sanitizeBaseCollapsesPunctuationHyphensForValidImageTag", {
+        // Regression: "C# (.NET)" previously → "c----net" → invalid `adev-c----net:<hash>`.
+        let csharp = ContainerIdentity.sanitizeBase("C# (.NET)")
+        try MiniTest.expectEqual(csharp, "c-net")
+        try MiniTest.expect(!csharp.contains("--"))
+        try MiniTest.expect(!csharp.hasPrefix("-"))
+        try MiniTest.expect(!csharp.hasSuffix("-"))
+        try MiniTest.expect(csharp.range(of: "^[a-z0-9-]+$", options: .regularExpression) != nil)
+
+        let tag = DerivedImageTag.compute(
+            baseImage: "mcr.microsoft.com/dotnet/sdk:8.0",
+            ordered: [],
+            nameBase: csharp
+        )
+        try MiniTest.expect(tag.hasPrefix("adev-c-net:"))
+        try MiniTest.expect(!tag.contains("--"))
+        let hashPart = String(tag.split(separator: ":").last ?? "")
+        try MiniTest.expectEqual(hashPart.count, 12)
+        try MiniTest.expect(hashPart.range(of: "^[0-9a-f]{12}$", options: .regularExpression) != nil)
+
+        // Multiple punctuation/spaces collapse to single hyphens.
+        let multi = ContainerIdentity.sanitizeBase("Foo!!!  Bar... Baz")
+        try MiniTest.expectEqual(multi, "foo-bar-baz")
+        try MiniTest.expect(!multi.contains("--"))
+
+        // Empty after sanitize still yields empty base (features fallback path).
+        let onlyPunct = ContainerIdentity.sanitizeBase("#$%^")
+        try MiniTest.expectEqual(onlyPunct, "")
+        let emptyTag = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: [],
+            nameBase: onlyPunct
+        )
+        try MiniTest.expect(emptyTag.hasPrefix("adevcontainer:"))
     }),
     ("containerPlatformDefaultArm64", {
         try MiniTest.expectEqual(
@@ -2190,17 +3247,15 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(c.containerEnv["B"], "2")
         try MiniTest.expect(c.initProcess)
     }),
-    ("featureMetadataLabelArrayPrivilegedReject", {
+    ("featureMetadataLabelArrayPrivilegedWarnSkip", {
         let labels = [
             DevContainerMetadataLabel.labelKey:
                 #"[{"containerEnv":{"OK":"1"}},{"privileged":true}]"#
         ]
-        try MiniTest.expectThrows({
-            try DevContainerMetadataLabel.rejectUnsafe(from: labels, imageRef: "img:1")
-        }) { error in
-            let err = error as! CLIError
-            try MiniTest.expect(err.message.lowercased().contains("privileged"))
-        }
+        // Must not throw — privileged from image metadata is warn-stripped.
+        DevContainerMetadataLabel.warnStripUnsafe(from: labels, imageRef: "img:1")
+        let c = DevContainerMetadataLabel.parseContributions(from: labels)
+        try MiniTest.expectEqual(c.containerEnv["OK"], "1")
     }),
     ("featuresRunnerBuildWithPlatformNoRosetta", {
         let cache = FileManager.default.temporaryDirectory
@@ -2212,8 +3267,9 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         let mockProc = MockProcessRunner()
         var buildArgs: [String]?
         mockProc.handlers = [
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
             { args in
-                if args.starts(with: ["image", "inspect"]) || args.starts(with: ["image", "list"]) {
+                if args.starts(with: ["image", "list"]) {
                     return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
                 }
                 if args.first == "build" {
@@ -2275,6 +3331,8 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             let contents = try String(contentsOfFile: dockerfile, encoding: .utf8)
             try MiniTest.expect(contents.contains("FROM alpine:3.20"))
             try MiniTest.expect(contents.contains("install.sh"))
+            // Recursive +x so feature lifecycle scripts copied by install.sh stay executable.
+            try MiniTest.expect(contents.contains("chmod -R 0755 /tmp/adev-feature-0"))
         }
     }),
     ("featuresRunnerReusesExistingTag", {

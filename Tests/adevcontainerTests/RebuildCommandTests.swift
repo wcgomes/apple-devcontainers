@@ -84,9 +84,6 @@ nonisolated(unsafe) let rebuildCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(text.contains("--vscode"), "usage mentions --vscode")
         try MiniTest.expect(text.contains("--json"), "usage mentions --json")
         try MiniTest.expect(text.contains("--name"), "usage mentions --name")
-        try MiniTest.expect(!text.contains("--recreate"), "usage must not list removed --recreate")
-        let upHelp = CommandSurface.commandHelpText("up") ?? ""
-        try MiniTest.expect(!upHelp.contains("--recreate"), "up help must not list removed --recreate")
     }),
 
     ("commandHelpRebuildPresent", {
@@ -96,7 +93,7 @@ nonisolated(unsafe) let rebuildCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(help.contains("rebuild"), "help names the command")
         try MiniTest.expect(help.contains("--skip-pull"), "help lists --skip-pull")
         try MiniTest.expect(help.contains("--vscode"), "help lists --vscode")
-        try MiniTest.expect(help.contains("force"), "help describes forced recreate")
+        try MiniTest.expect(help.contains("force"), "help describes forced rebuild")
         try MiniTest.expect(help.contains("volume"), "help describes volume preservation")
     }),
 
@@ -126,7 +123,7 @@ nonisolated(unsafe) let rebuildCommandTests: [(String, () throws -> Void)] = [
 
     ("helpRebuildMatchesRebuildHelpOutput", {
         // `help rebuild` and `rebuild --help` MUST both print printCommandHelp("rebuild")
-        // content (selection, forced recreate, volume preservation, --vscode gate) —
+        // content (selection, forced rebuild, volume preservation, --vscode gate) —
         // never the main usage text.
         try MiniTest.expectEqual(CommandSurface.resolveHelpSubcommand(args: ["help", "rebuild"]), "rebuild")
         let usage = CommandSurface.usageText()
@@ -137,7 +134,7 @@ nonisolated(unsafe) let rebuildCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(help.contains("rebuild"), "help names the command")
         try MiniTest.expect(help.contains("--skip-pull"), "help lists --skip-pull")
         try MiniTest.expect(help.contains("--vscode"), "help lists --vscode")
-        try MiniTest.expect(help.contains("Force-recreate"), "help describes forced recreate")
+        try MiniTest.expect(help.contains("Force-rebuild"), "help describes forced rebuild")
         try MiniTest.expect(help.contains("volume"), "help describes volume preservation")
         try MiniTest.expect(!usage.contains("preflight"), "main usage stays the overview, not rebuild specifics")
     })

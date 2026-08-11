@@ -10,7 +10,7 @@ All host runtime interaction goes through **AppleContainerRuntime**. No other mo
 - Non-zero exit + stderr → map to structured CLI errors (command, args class, message).
 - `doctor` validates binary presence/version/runnability before `up` paths rely on it.
 - **ProcessRunner:** async-drain stdout/stderr pipes before and during `wait`, or a full pipe can deadlock the child.
-- **InteractiveProcessRunner:** after Foundation `Process` launch, put the child in the TTY foreground process group (`tcsetpgrp`) and `SIGCONT` if needed. Inherited stdio alone is insufficient — without foreground, full-screen editors (`nano`/`vi`) stop (`STAT=T`) and the parent hangs at `waitUntilExit`. Used by interactive `exec` and recovery TTY editor.
+- **InteractiveProcessRunner:** after Foundation `Process` launch, put the child in the TTY foreground process group (`tcsetpgrp`), **verify** `tcgetpgrp == childPG` (short retry), and `SIGCONT` the **process group** (`kill(-pg, SIGCONT)`), not only the leader PID. Inherited stdio alone is insufficient — without a verified foreground claim, full-screen editors (`nano`/`vi`) and `container exec -it` helpers stop on SIGTTIN (`STAT=T`); leader-only continue leaves siblings stopped so the shell looks correct but accepts no keyboard. Claim failure on an interactive TTY path emits a stderr warning (no silent fail-open). Used by interactive `exec` and recovery TTY editor.
 
 ## Apple container machine JSON (list/inspect; tested 1.2.x)
 
@@ -22,15 +22,29 @@ Parse these paths from machine JSON (not human tables). Shape documented against
 | `status.state` | Lifecycle state |
 | `configuration.labels` | Labels map |
 
+**Image inspect (connection-user / Features base USER):** Apple image JSON nests config under `variants[].config.config` (not top-level `Config`). Read **OCI USER** from `variants[].config.config.User`. Labels may include `devcontainer.metadata` (JSON array/object) with `remoteUser` / `containerUser` — official Microsoft base images often ship **OCI USER root** + metadata `remoteUser: vscode`. **Inspect failure is not root** — do not default to root or hardcode `vscode`/`node` when inspect fails; fail or leave unresolved per resolver policy. Container list/inspect still uses the table above.
+
 - `container create --name <id>` — the name **is** the id used later for inspect/exec/stop/delete.
 - **No label filter on `list`** — filter client-side after JSON list (or resolve by deterministic name/inspect).
 - Long-lived devcontainers: keep-alive via `--entrypoint /bin/sleep` + `infinity` so the process does not exit immediately.
 
 ## Config → runtime
 
-- Resolver owns JSONC + substitution (`${localEnv:*}`, `${localWorkspaceFolderBasename}`, related supported vars).
+- Resolver owns JSONC + substitution subset: `${localWorkspaceFolder}`, `${localWorkspaceFolderBasename}`, `${localEnv:*}`, `${containerWorkspaceFolder}`, `${devcontainerId}` (see below). Unknown tokens → structured error.
 - Resolver emits a runtime request DTO; runtime maps DTO → argv + env for `container`.
 - Unsupported props/flags fail in resolver or runtime admission — **fail closed**, no drop-on-floor.
+
+### `${devcontainerId}` (deferred expand)
+
+Managed create name (`adev-{base}-{hash12}` / `create --name`). Features (e.g. shell-history) and config may embed it in **volume mount `source`** (`${devcontainerId}-shellhistory`) and **`containerEnv`** values.
+
+| Phase | Behavior |
+|-------|----------|
+| Resolve (`VariableSubstitutor`) | Admit token. Expand only when `SubstitutionContext.devcontainerId` is set; otherwise **leave literal** `${devcontainerId}` (identity often unknown until after Features merge / mode-specific name). |
+| After Features merge, before volume ensure + create | `expandDevcontainerId` with create name: **`up`** → `resolved.containerName`; **`clone`** → volume identity `containerName`; **`rebuild`** → selected managed name. |
+| Safety net | `CreateRequest.from` / `fromVolumeMode` expand mounts + stamp `devcontainer.config_volumes` from post-expansion sources (idempotent if already expanded). |
+
+**Config hash:** bind-mode hash may keep the deferred token in mount material; **volume-mode** hash / `config_volumes` label use **post-expansion** sources so identity and prune see real volume names. Expand **before** `ensureVolume` so Apple names match `^[A-Za-z0-9][A-Za-z0-9_.-]*$`. Contract: [`specs/core.md`](../../specs/core.md) (Variable substitution subset).
 
 ## MountNormalizer (file → directory bind promotion)
 
@@ -56,11 +70,21 @@ Fixtures may use directory binds already (`~/.kube`); configs that still use fil
   - `--ulimit=type=soft[:hard]`
   - `--tmpfs=PATH` (if value contains `:`, path before first `:` only)
   - `--cpus`/`-c`, `--memory`/`-m` — **merge into** create `-c`/`-m` (no duplicate tokens); hostRequirements wins when set for that dimension
-  - `--network=NAME` — **named networks only** (reject host/bridge/none/container:*)
+  - `--network=NAME` — **named networks only** (host/bridge/none/container:* warn-skipped)
   - `--rosetta`, `--ssh`, `--read-only`
-- **Not via runArgs** (first-class props): `-e`/`-u`/`-w`/`-p`/`-v`/`--mount`/`--name`/`--label`/`-i`/`-t`/`-d`/`--rm`/`--entrypoint`.
-- Forever-reject: `--privileged`, `--device=…` (incl. `/dev/net/tun`), `--security-opt`, `--gpus`, `--ipc`, `--pid`, `--userns`, `--cgroupns`, `--hostname`, `--add-host`, `--sysctl`, `--group-add`, `--runtime`, Docker-only network modes, and any flag not on the allowlist. See [0002](../decisions/0002-reject-docker-ood-privileged-tun.md).
+- **Not via runArgs** (first-class props; hard-error if smuggled): `-e`/`-u`/`-w`/`-p`/`-v`/`--mount`/`--name`/`--label`/`-i`/`-t`/`-d`/`--rm`/`--entrypoint`.
+- **Warn-skip** (not applied): `--privileged`, `--device=…` (incl. `/dev/net/tun`), `--security-opt`, `--gpus`, `--ipc`, `--pid`, `--userns`, `--cgroupns`, `--hostname`, `--add-host`, `--sysctl`, `--group-add`, `--runtime`, Docker-only network modes. See [0003](../decisions/0003-warn-skip-apple-incompatibles.md).
 - Unknown or incomplete entries (e.g. bare `--cap-add` with no name) → structured error naming the entry.
+
+### Warn-skip emit once (Features + runArgs)
+
+Do **not** reintroduce triple skip-warnings on resolve. Admission parsers gate user-facing warns:
+
+- `FeatureAdmission.parse` / `RunArgsAdmission.parse` take `emitWarnings: Bool` (default `true`).
+- `ConfigAdmissions.admit` calls both with `emitWarnings: false` (skip/hard-error only; no stderr).
+- User-facing warn-skip emits **once** from `ConfigResolver.buildResolved` (default `true` on parse).
+
+**Goal:** exactly one warning per skipped item per resolve ([0003](../decisions/0003-warn-skip-apple-incompatibles.md) “warns at least once” → product emits once).
 
 ## hostRequirements preflight
 
@@ -72,6 +96,30 @@ Fixtures may use directory binds already (`~/.kube`); configs that still use fil
 - **Fail** if `hostRequirements` is present but not an object, a supported key is unparseable, or an unknown key appears inside the object.
 - Config hash includes memory/cpus when set (limits affect create identity).
 
+## Connection user (remoteUser / containerUser)
+
+Precedence for the **effective connection user** (exec, lifecycle, VS Code attach defaults) — first non-empty wins, then fall through:
+
+1. Local config `remoteUser`
+2. Local config `containerUser`
+3. Image `devcontainer.metadata` — last non-empty `remoteUser` / `containerUser` across metadata entries
+4. Final image OCI `USER` (`variants[].config.config.User`)
+5. `root` only when all of the above are empty **and** inspect succeeded with empty USER
+
+**Create `-u`** (first match wins):
+
+1. Explicit local config `containerUser` (non-empty) → `-u <containerUser>`
+2. Else resolved connection user non-empty and **not** `root` → `-u <connectionUser>` (covers local `remoteUser`, metadata, OCI USER)
+3. Else **omit** `-u` (connection user is `root` or empty; image default applies)
+
+**Why:** Apple Remote Containers attach does **not** pass exec `-u` and does **not** honor nameConfig `remoteUser` for the integrated terminal — the terminal uses the container default (create) user. Applying non-root connection user at create keeps VS Code terminal aligned with `remoteUser` / metadata `vscode` without requiring local `containerUser`. When both keys are set, create is still `containerUser` and connection remains `remoteUser`.
+
+**Stamp:** every successful create stamps non-empty `devcontainer.remote_user` to the resolved connection user (including literal `root`). Empty stamp is **legacy only** (pre-change containers); new creates never stamp empty. `exec` and `--vscode` (settings path, nameConfig `remoteUser`) read this stamp — non-empty → use it; empty legacy → omit exec `-u` / runtime default (no fabricated `vscode`/`node`).
+
+**nameConfig:** write `…/nameConfigs/<containerName>.json` (`workspaceFolder` + `remoteUser`) **before** launching `code`. Still write it for attach defaults, but **do not rely on it for terminal user** — Apple attach ignores nameConfig `remoteUser` for the shell; create `-u` is the compensation.
+
+Contract: union of `specs/<domain>.md` (core/features/vscode/managed-lifecycle); archive: [`specs/changes/archive/20260811-align-remote-user-resolution/`](../../specs/changes/archive/20260811-align-remote-user-resolution/).
+
 ## Deterministic names and labels
 
 Set on create and use for reuse/inspect/`list`:
@@ -82,13 +130,13 @@ Set on create and use for reuse/inspect/`list`:
 | Label `devcontainer.managed=adevcontainer` | Managed filter for `list` / picker / lifecycle commands |
 | Label `devcontainer.local_folder` | Bind: host path; volume-mode: `volume://…` |
 | Label `devcontainer.config_file` | Config file identity |
-| App config hash label | Stamped at create; `up` reuse requires match — mismatch → `config_hash_mismatch` (force-recreate via `rebuild` only; no `up --recreate`) |
+| App config hash label | Stamped at create; `up` reuse requires match — mismatch → `config_hash_mismatch`; use `rebuild` for a forced rebuild |
 | Label `devcontainer.workspace_mode` | `bind` on `up` create; `volume` on `clone` create |
 | Label `devcontainer.workspace_volume` | Workspace volume name (`adev-*-ws`; volume-mode) |
 | Label `devcontainer.git_url` | Normalized remote (userinfo stripped; volume-mode) |
 | Label `devcontainer.config_volumes` | Config `type=volume` names for prune |
 | Label `devcontainer.workspace_folder` | Create-time container workdir for exec (both modes) |
-| Label `devcontainer.remote_user` | Create-time effective user for exec (both modes; may be empty) |
+| Label `devcontainer.remote_user` | Resolved connection user at create (both modes); **always non-empty on new creates** (incl. `root`); empty = legacy only; consumed by `exec` / `--vscode` |
 
 Bind-mode `up` stamps the full managed label set including `workspace_mode=bind` (not volume-only).
 
@@ -97,21 +145,36 @@ Bind-mode `up` stamps the full managed label set including `workspace_mode=bind`
 - **Human base:** `sanitize(devcontainer.json name)` if present and non-empty after trim; else mode-specific fallback:
   - **Bind (`up`):** `sanitize(workspace folder basename)`
   - **Volume (`clone`):** `sanitize(git URL repo basename)` (not the host temp checkout directory name)
-  - DNS-safe: lowercase; non-`[a-z0-9-]` → `-`; trim hyphens; clip base ~20 chars. `name` drives identity when set (not metadata-only).
+  - DNS-safe sanitize (`ContainerIdentity.sanitizeBase`): lowercase; non-`[a-z0-9-]` → `-`; **collapse consecutive hyphens** (`-{2,}` → `-`); trim leading/trailing hyphens; clip base ~20 chars. `name` drives identity when set (not metadata-only). Example: `C# (.NET)` → `c-net` (not `c----net`) so Features tags stay valid Apple references (`adev-c-net:{hash12}`); Apple rejects consecutive hyphens in refs.
 - **Container name:** `adev-{base}-{hash12}`; empty base → `adev-{hash12}`; full name ≤63 chars.
   - Bind: `hash12` = workspace path + config path.
   - Volume: `hash12` = normalized git URL + config relpath (not temp checkout path).
 - **Workspace volume (volume-mode):** `adev-{base}-{hash12}-ws`.
-- **Features derived image tag:** `adev-{base}:{hash12}` where `hash12` is the content hash of base image + features; empty base → `adevcontainer:{hash12}`. No `adevcontainer/features:` prefix and no `/features` path segment. Config `image` without a Features build is left as written.
+- **Features derived image tag:** `adev-{base}:{hash12}` where `hash12` is the content hash of base image + features + **`recipeVersion`** (epoch string in `DerivedImageTag`); empty base → `adevcontainer:{hash12}`. No `adevcontainer/features:` prefix and no `/features` path segment. Config `image` without a Features build is left as written. Tag validity depends on sanitize collapse (above). **Bump `recipeVersion` whenever install-Dockerfile semantics change** so cached local derived images are not reused forever; current epoch **`"3"`** = chmod-before-install **and** install-as-root then restore base image `USER` (was `"2"` = chmod-only).
 
 Do not depend on Docker-style `ps --filter label=` as the primary discovery mechanism ([gaps](../domain/devcontainer-apple-gaps.md)).
 
-## Named volumes (ensure / reuse)
+## Named volumes (ensure / reuse / ownership)
 
-- Before create, **ensureVolume** for each config named volume: **list first**.
+- Before create, **ensureVolume** for each config named volume: **list first**. Sources must already have `${devcontainerId}` expanded (see above) — e.g. `adev-proj-abc123def456-shellhistory`, not a literal `${…}` token.
 - If the volume already exists → status “already exists — reusing” and mount it; **never fail `up`/`clone` only because a config volume exists**.
 - If missing → create, then mount.
-- **Clone workspace volume:** if `adev-*-ws` already exists → **delete + recreate** (fresh tree), then mount as the workspace root (not a host bind).
+- **Clone workspace volume:** if `adev-*-ws` already exists → **delete + create** (fresh tree), then mount as the workspace root (not a host bind).
+
+### Ownership (`WorkspaceOwnership`)
+
+Apple named volumes mount **root:root** ([gaps](../domain/devcontainer-apple-gaps.md#named-volume-ownership-rootroot)). Helper: `WorkspaceOwnership` — shared container-side chown as root after start, **before create-path hooks**.
+
+| Path | Behavior |
+|------|----------|
+| Config `type=volume` mounts | `ensureNamedVolumeMountsWritableByRemoteUser` on `up` / `clone` / `rebuild` (bind and volume mode). Targets only; skips binds, readonly volumes, empty targets, root/unset user |
+| Workspace volume (`adev-*-ws`) | Separate `ensureWorkspaceWritableByRemoteUser` on `clone` (always after start); on `rebuild` volume-mode only when effective connection user **differs** from stamped `remote_user` (data already owned otherwise) |
+| Timing | After successful start; before populate (`clone`) and before create-path hooks |
+| Failure | **`up`/`clone`:** hard-fail + delete container (clone also deletes `*-ws`). **`rebuild`:** soft-fail — warn stderr, continue |
+
+**Chown script (per target):** `mkdir -p` target → `chown -R user[:user]` target → walk `dirname` parents with **non-recursive** `chown` until a system-top denylist stop (`/`, `/home`, `/Users`, `/var`, `/usr`, `/opt`, `/tmp`, `/root`, `/etc`, `/mnt`, `/media`, `/dev`, `/proc`, `/sys`, `/run`, `/boot`, `/lib`, `/lib64`, `/bin`, `/sbin`). Makes nested home mounts writable for siblings (e.g. `/home/vscode/.local` for `devcontainer-features`) without chowning `/home`. **Never** chown bind-mount host paths.
+
+**Symptom without fix:** remoteUser EACCES writing home-dir named volumes; lifecycle `mkdir` fails under root-owned intermediate parents.
 
 ## `clone` flow (volume-mode)
 
@@ -120,17 +183,18 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 3. Resolve `devcontainer.json` from that temp tree. **workspaceFolder** default and `${localWorkspaceFolderBasename}` use the **git URL repo basename**, not the host temp checkout directory name.
 4. **Author identity (before Features/create):** host `git -C <sparse-temp> config --get user.name` / `user.email` (includeIf-aware). Env overrides: `ADEVCONTAINER_GIT_AUTHOR_NAME` / `ADEVCONTAINER_GIT_AUTHOR_EMAIL`. **Both env set** → use env, skip prompt (even on TTY). **TTY** and env incomplete: if both resolved → confirm `Use this identity? [Y/n]` (decline → collect name+email); if either missing → prompt for both (empty → fail structured, no Features/create). **Non-TTY:** no prompt; resolved/env silently when complete; incomplete → continue (warn at apply, no hang). Chosen values applied after populate (step 8).
 5. **Ensure in-container git (Features path, not apt):** after resolve + identity, before the Features gate, if no admitted feature id is `git` or `common-utils` (any registry/tag or local path), append `ghcr.io/devcontainers/features/git:1` (empty options). Status: `==> Ensuring git feature for volume workspace`. Empty features → inject then enter FeaturesRunner. Already covered → no double-add. Config hash / effective features include the inject when added. **`up` does not inject.**
-6. Ensure workspace volume (`adev-{base}-{hash12}-ws`); delete+recreate if present. Existing managed container name → fail closed (no silent reuse).
+6. Ensure workspace volume (`adev-{base}-{hash12}-ws`); delete+create if present. Existing managed container name → fail closed (no silent reuse).
 7. Create volume-mode container (workspace = named volume; labels as above) and start. Features runner runs when features non-empty after step 5.
-   - **SSH URL:** require host `SSH_AUTH_SOCK` non-empty; inject `AllowlistedRunArg.ssh` (`container create --ssh`) if not already in runArgs. Missing agent → fail structured (hint ssh-agent / HTTPS). Later push uses the same forward.
-   - **HTTPS:** no create-time auth flag; credentials applied at populate (step 8).
-8. **Populate (in-container full clone)** — happy path is **not** host full clone + tar-pipe (`copyTreeIntoContainer` may remain as unused utility). After Features ensure git:
-   - Exec in-container `git clone` of the URL into `workspaceFolder` (as `remoteUser` when set); verify `workspaceFolder/.git`.
-   - **HTTPS auth:** host `git credential fill` (protocol/host/path; GCM/osxkeychain transparent — **no product GCM-in-guest**, no mount of host `~/.git-credentials`). Optional fallbacks: `ADEVCONTAINER_GIT_TOKEN`; `gh auth token` for github.com when `gh` available. When creds exist → one-shot into guest clone via GIT_ASKPASS/env (never log secrets; redact errors) → guest `credential.helper store` + `git credential approve` once. When fill empty → anonymous in-container clone (public); auth failure → structured hint to configure host credentials or use SSH.
-   - **SSH auth:** agent already forwarded via `--ssh` from create.
-   - **Author apply:** when **both** name+email from step 4 → guest `git config --local` both; if either missing → warn once, no partial write; no synthetic defaults.
-9. Create-path lifecycle hooks (same order as fresh `up`). On start/populate/hook failure after create: delete container **and** workspace `*-ws` volume.
-10. **Always** clean config-fetch temps (success or failure). No host full-clone staging temp on the happy path.
+    - **SSH URL:** require host `SSH_AUTH_SOCK` non-empty; inject `AllowlistedRunArg.ssh` (`container create --ssh`) if not already in runArgs. Missing agent → fail structured (hint ssh-agent / HTTPS). Later push uses the same forward.
+    - **HTTPS:** no create-time auth flag; credentials applied at populate (step 8).
+8. **Ownership:** chown workspace folder + config `type=volume` targets to connection user (`WorkspaceOwnership`; hard-fail + delete container/`*-ws` on failure) — see [Named volumes / ownership](#named-volumes-ensure--reuse--ownership).
+9. **Populate (in-container full clone)** — happy path is **not** host full clone + tar-pipe (`copyTreeIntoContainer` may remain as unused utility). After Features ensure git:
+    - Exec in-container `git clone` of the URL into `workspaceFolder` (as `remoteUser` when set); verify `workspaceFolder/.git`.
+    - **HTTPS auth:** host `git credential fill` (protocol/host/path; GCM/osxkeychain transparent — **no product GCM-in-guest**, no mount of host `~/.git-credentials`). Optional fallbacks: `ADEVCONTAINER_GIT_TOKEN`; `gh auth token` for github.com when `gh` available. When creds exist → one-shot into guest clone via GIT_ASKPASS/env (never log secrets; redact errors) → guest `credential.helper store` + `git credential approve` once. When fill empty → anonymous in-container clone (public); auth failure → structured hint to configure host credentials or use SSH.
+    - **SSH auth:** agent already forwarded via `--ssh` from create.
+    - **Author apply:** when **both** name+email from step 4 → guest `git config --local` both; if either missing → warn once, no partial write; no synthetic defaults.
+  10. Create-path lifecycle hooks (same order as fresh `up`). On start/populate/hook/ownership failure after create: delete container **and** workspace `*-ws` volume.
+  11. **Always** clean config-fetch temps (success or failure). No host full-clone staging temp on the happy path.
 
 `up` remains bind-mode host workspace only (no auto git Feature). Detail: [architecture.md](../architecture.md); contract [`specs/clone.md`](../../specs/clone.md).
 
@@ -141,17 +205,16 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 - `list [--json]`: client-side filter to `devcontainer.managed=adevcontainer` only.
 - `start` / `exec` / `stop` / `delete` / `prune` / `rebuild` / `inspect`: `--name` or picker among managed; no host workspace path required.
 - `start`: runtime start of a managed container; **volume-mode runs no hooks** (bind start-stopped `postStart` stays on `up` path).
-- `exec`: user/workdir from labels `devcontainer.remote_user` / `devcontainer.workspace_folder` when set (both bind and volume create stamp these).
+- `exec`: user/workdir from labels `devcontainer.remote_user` / `devcontainer.workspace_folder` when set (both modes stamp workdir; new creates always stamp non-empty `remote_user` incl. `root`; empty label = legacy omit `-u` — see [Connection user](#connection-user-remoteuser--containeruser)).
 
-## `up` reuse vs `rebuild` (force-recreate)
+## `up` reuse vs `rebuild` (forced rebuild)
 
 | Path | Behavior |
 |------|----------|
 | `up` create | Fresh bind-mode create when no managed container for identity |
 | `up` reuse / start-stopped | Only when existing container's stamped config hash **equals** current resolve. Running → reuse (no Features re-run); stopped → start + bind `postStart` only |
-| `up` config hash mismatch | Fail closed: `config_hash_mismatch`; **does not** delete or recreate. Hint: `adevcontainer rebuild` (managed selection: `--name` or auto) |
-| `up --recreate` | **Removed** — not a flag |
-| `rebuild` | **Sole** force-recreate (landed; archive [`20260810-rebuild`](../../specs/changes/archive/20260810-rebuild/)): read current stamped config **before** any delete; hostRequirements + Features; then container-only delete old → create same name (bind) or reuse same `adev-*-ws` (volume; ensureVolume, never delete/recreate workspace volume; no re-clone). Pre-delete failure leaves old container untouched. Optional `--skip-pull` / `--vscode` / `--json`. Volume-mode rebuild: OCI features only (local-path / host DefaultFeatureFetcher unsupported — fail clean pre-delete). Hard post-delete recovery mode-split (TTY `Open the recovery editor now? [Y/n]` default Y; decline/EOF retain; named retry skips prompt; README + CLI help document UX): [gaps — Failed rebuild recovery](../domain/devcontainer-apple-gaps.md#failed-rebuild-recovery-mode-split) |
+| `up` config hash mismatch | Fail closed: `config_hash_mismatch`; **does not** delete or replace. Hint: `adevcontainer rebuild` (managed selection: `--name` or auto) |
+| `rebuild` | **Forced rebuild** (landed; archive [`20260810-rebuild`](../../specs/changes/archive/20260810-rebuild/)): read current stamped config **before** any delete; hostRequirements + Features; then container-only delete old → create same name (bind) or reuse same `adev-*-ws` (volume; ensureVolume, never delete/replace workspace volume; no re-clone). Pre-delete failure leaves old container untouched. Optional `--skip-pull` / `--vscode` / `--json`. Volume-mode rebuild: OCI features only (local-path / host DefaultFeatureFetcher unsupported — fail clean pre-delete). After start: config volume ownership always (soft-fail warn); workspace chown only if connection user ≠ stamped `remote_user` (soft-fail) — see [ownership](#named-volumes-ensure--reuse--ownership). Hard post-delete recovery mode-split (TTY `Open the recovery editor now? [Y/n]` default Y; decline/EOF retain; named retry skips prompt; README + CLI help document UX): [gaps — Failed rebuild recovery](../domain/devcontainer-apple-gaps.md#failed-rebuild-recovery-mode-split) |
 
 ## `prune` resource set
 
@@ -176,13 +239,13 @@ On `up`/`clone`/`rebuild` when `features` is non-empty after resolve (and after 
 | Step | Behavior |
 |------|----------|
 | Admit | Feature ref → options map; **OCI** (`ghcr.io/…/node:1`) and **local path** (`./…`, `../…`, absolute `/…`, `file://…` relative to workspace root); declaration key-sorted for stable ties |
-| Reject | Any ref containing `docker-outside-of-docker`, `docker-in-docker`, or `docker-from-docker` (forever, OCI or local); metadata `privileged` / `securityOpt` ([0002](../decisions/0002-reject-docker-ood-privileged-tun.md)) |
+| Warn-skip | Any ref containing `docker-outside-of-docker`, `docker-in-docker`, or `docker-from-docker` (OCI or local) — drop from admitted list with warning; metadata `privileged` / `securityOpt` warn-stripped (not applied; feature may still install) ([0003](../decisions/0003-warn-skip-apple-incompatibles.md)). Emit once per resolve — see [Warn-skip emit once](#warn-skip-emit-once-features--runargs) |
 | build.rosetta | Before fetch/build: ensure Apple BuildKit `build.rosetta=false`. Already false → silent. True/missing → one-time TTY consent (or fail); CI auto-accept via `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`. Never install Rosetta; never restore `true` after consent. Config pickup uses `restartBuilderForConfig` (stop+delete only) — **not** the restore-after-build path below |
 | Fetch / load | **Local path:** validate package (`devcontainer-feature.json` + `install.sh`) and copy into feature cache. **OCI:** embedded HTTPS client (`OCIFeatureClient`) — **not** `container image pull`, ORAS, or Node |
 | Order | `dependsOn` / `installsAfter` topo-sort (id last-segment match so `./x/sample-a` satisfies `…/sample-a:1`); cycle → structured error |
-| Build | Generate Dockerfile (`RUN` each `install.sh` as root); `container build --platform` host-native (`linux/arm64` on Apple Silicon) via `AppleContainerRuntime.build`; **no** `--rosetta` unless user opted in via `runArgs`; deterministic derived tag `adev-{base}:{hash12}` (empty base → `adevcontainer:{hash12}`; no `adevcontainer/features:` prefix); reuse when tag exists. See BuildKit builder lifecycle |
+| Build | Generate Dockerfile (`FeatureDockerfileGenerator`): per feature `COPY` package then **`RUN chmod -R 0755 /tmp/adev-feature-N && … ./install.sh` as root**; after all features, **restore base image OCI `USER`** so derived image default user matches base (ref CLI parity). Install-layer env: when local config has no `remoteUser`/`containerUser`, pass base-image USER into feature install env (not a hardcoded `vscode`/`node`). Recursive +x avoids exit **126** on bare-path lifecycle hooks copied 0644 from OCI. `container build --platform` host-native (`linux/arm64` on Apple Silicon) via `AppleContainerRuntime.build`; **no** `--rosetta` unless user opted in via `runArgs`; deterministic derived tag `adev-{base}:{hash12}` (empty base → `adevcontainer:{hash12}`; no `adevcontainer/features:` prefix); hash includes **`recipeVersion`** epoch — current **`"3"`** (chmod-before-install + root-install then restore USER); reuse when tag exists. See BuildKit builder lifecycle |
 | Merge | Feature contributions into effective config before create (`init`, `capAdd`, mounts, lifecycle hooks; `containerEnv` **config wins**). PATH refs in env expanded on create **and** exec — see PATH expansion |
-| Create | Workspace container from **derived image** with same `--platform` |
+| Create | Workspace container from **derived image** with same `--platform`. Create `-u`: explicit `containerUser`, else non-root connection user, else omit when root — see [Connection user](#connection-user-remoteuser--containeruser) |
 | Skip | Reuse-running path: no feature fetch/build |
 
 ### BuildKit builder lifecycle (Features image build)
@@ -218,17 +281,35 @@ Apple `container` does **not** expand `${PATH}` / `$PATH` in env values. Product
 
 ## Progress / tee
 
-- Progress status lines on **stderr**: `==> …` (pull, create, start, stop, delete, volume create, Features Resolving/Fetching/Building/Reusing, build.rosetta config when changing, and related long steps).
+- Progress status lines on **stderr**: `==> …` (pull, create, start, stop, delete, volume create, Features Resolving/Fetching/Building/Reusing, build.rosetta config when changing, lifecycle `==> Running <property>`, and related long steps). StatusPrinter only — not hook script I/O.
+- After successful `up`, `clone`, `start`, or `rebuild`, StatusPrinter emits two connection hints on stderr when the originating command lacks `--vscode`: terminal `adevcontainer exec -it --name <managed-name>` and VS Code `adevcontainer start --name <managed-name> --vscode`. Originating `--vscode` suppresses both; neither contaminates stdout or `--json` output.
 - Tee Apple `container` stderr onto the same stream for those operations.
-- `--json` keeps **stdout** pure JSON. `ADEVCONTAINER_QUIET=1` silences progress status lines.
+- **Lifecycle hook live stream (distinct from status):** hook child **stdout and stderr** are teed **live** to **host stderr** while still captured for failure diagnostics. Prevents long hooks looking stuck (previously capture-until-exit). Non-lifecycle `exec` stays capture-then-print (stream off by default).
+- `--json` keeps **stdout** pure JSON — hook script stdout is teed to host **stderr**, never host stdout. `ADEVCONTAINER_QUIET=1` silences `==> …` status lines, including both connection hints; policy warn-skips and hook script output still emit.
+- Under heavy dual-stream load, dual drain threads may interleave stdout/stderr bytes on host stderr.
+- **Test tip:** assert stream flags on the lifecycle `exec` call itself — delete-on-fail invoke also streams and can overwrite mock “last flag” fields.
 
 ## Lifecycle execution (hook matrix)
 
-Hooks run via runtime **exec** into the running container (effective user + workspace folder when set). String or argv-array forms. Omitted properties are no-ops. Exec env PATH expansion applies (see PATH expansion).
+Hooks run via runtime **exec** into the running container (effective user + workspace folder when set). Omitted properties and empty `{}` maps are no-ops. Nested objects rejected. Exec env PATH expansion applies (see PATH expansion). **Live I/O:** lifecycle exec enables streamOutput — child stdout+stderr teed live to host stderr (still captured for error messages); status `==> Running …` is separate StatusPrinter output. Contract: [`specs/lifecycle-hooks.md`](../../specs/lifecycle-hooks.md).
+
+### Command forms (`LifecycleCommand`)
+
+Each hook property admits **string** | **argv `string[]`** | **object map** `name → string|argv` (Dev Containers named/parallel JSON shape).
+
+| Form | Parse / run |
+|------|-------------|
+| string | shell via `sh -lc` (same as historical `postCreateCommand`) |
+| argv array | exec argv directly |
+| object map | `LifecycleCommand.parallel([NamedLifecycleCommand…])`; empty `{}` → nil; values must be string or argv (not nested objects) |
+
+**Object-map execution (product choice):** named entries run **sequentially, sorted by name** — fail-fast on first non-zero. Not true parallel (reference `@devcontainers/cli` may run named entries concurrently). Status labels use `property (name)` (e.g. `onCreateCommand (shell-history)`).
+
+**Why it matters:** third-party Features often emit map-form hooks (e.g. `ghcr.io/stuartleeks/dev-container-features/shell-history:0` → `onCreateCommand: { "shell-history": "…" }`). Admitting only string/argv rejected those Features at resolve.
 
 | Path | Hooks / apply |
 |------|----------------|
-| Fresh create (`up` bind, `clone` volume, or `rebuild` replacement) | `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand` → **settings apply** (soft-fail; not gated on `--vscode`) |
+| Fresh create (`up` bind, `clone` volume, or `rebuild` replacement) | **Named-volume ownership** (`WorkspaceOwnership`) after start, before hooks — see [ownership](#named-volumes-ensure--reuse--ownership); then `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand` → **settings apply** (soft-fail; not gated on `--vscode`) |
 | Reuse running (`up`, config hash match) | no create-path hooks; settings repair on marker drift; feature postAttach mergeable from image metadata when gated open succeeds |
 | Config hash mismatch (`up`) | fail `config_hash_mismatch`; no hooks/delete; remediate with `rebuild` |
 | Bind start-stopped (`up`, hash match) | `postStartCommand` only |
@@ -247,7 +328,7 @@ Hooks run via runtime **exec** into the running container (effective user + work
 
 ## `exec`: selection, interactive vs non-interactive
 
-- **Selection:** `--name` or interactive picker among managed only — **no `-w`/cwd** (that flag is `up`-only). Workdir/user from labels `devcontainer.workspace_folder` / `devcontainer.remote_user` when set at create (bind or volume).
+- **Selection:** `--name` or interactive picker among managed only — **no `-w`/cwd** (that flag is `up`-only). Workdir/user from labels `devcontainer.workspace_folder` / `devcontainer.remote_user` when stamped at create (bind or volume; new creates always stamp non-empty `remote_user`; empty = legacy).
 - **Interactive** (no command, or `-i` / `-t` / `-it`): **InteractiveProcessRunner** (inherit stdio **plus** child TTY foreground via `tcsetpgrp` + `SIGCONT` after launch — see Subprocess rules) + `container exec -i -t`; default command is `bash`.
 - **Non-interactive** (command exec without those flags): capture stdout/stderr pipes; do **not** pass `-i`/`-t`.
 - Feature/config `containerEnv` on exec expands `${PATH}` / `$PATH` the same as create.
