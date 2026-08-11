@@ -99,7 +99,7 @@ public enum AppleContainerConfig {
         // true or missing (treat missing as default true for BuildKit).
         try confirmDisableRosetta(options: options)
 
-        StatusPrinter.status("Configuring native arm64 builds (build.rosetta=false)")
+        StatusPrinter.status("Configuring native arm64 builds", item: "(build.rosetta=false)")
 
         try writeRosettaFalse(configPath: options.configPath, fileManager: options.fileManager)
         try restartBuilderForConfig(runtime: runtime)

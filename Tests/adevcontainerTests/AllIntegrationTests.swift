@@ -94,7 +94,7 @@ enum IntegrationSupport {
     private static func reportCleanupFailure(containerName: String, error: Error) {
         let detail: String
         if let cliError = error as? CLIError {
-            detail = "error[\(cliError.code)]: \(cliError.message)"
+            detail = "error: \(cliError.message)"
         } else {
             detail = error.localizedDescription
         }

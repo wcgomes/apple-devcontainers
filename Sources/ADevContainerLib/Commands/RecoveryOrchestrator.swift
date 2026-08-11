@@ -304,7 +304,7 @@ public enum RecoveryOrchestrator {
                         + "(sha256 \(conflictHash)); save and exit to acknowledge before retry"
                 )
             }
-            StatusPrinter.status("Opening recovery editor for \(session.tempFileURL.path)")
+            StatusPrinter.status("Opening recovery editor for", item: session.tempFileURL.path)
             let attempt = editor.edit(
                 filePath: session.tempFileURL.path,
                 isTTY: true,
@@ -470,7 +470,7 @@ public enum RecoveryOrchestrator {
 
             // Editor loop: invalid config reopens without a second open-editor prompt.
             editorLoop: while true {
-                StatusPrinter.status("Opening recovery editor for \(hostPath)")
+                StatusPrinter.status("Opening recovery editor for", item: hostPath)
                 let attempt = resolvedEditor.edit(
                     filePath: hostPath,
                     isTTY: true,

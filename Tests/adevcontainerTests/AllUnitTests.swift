@@ -265,7 +265,8 @@ nonisolated(unsafe) let errorModelTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expectEqual(err.property, "runArgs")
         try MiniTest.expect(err.formatted().contains("runArgs"))
-        try MiniTest.expect(err.formatted().contains("unsupported_property"))
+        try MiniTest.expect(err.formatted().hasPrefix("error: "))
+        try MiniTest.expect(!err.formatted().contains("error[unsupported_property]"))
         let json = err.jsonObject()
         try MiniTest.expectEqual(json["property"] as? String, "runArgs")
         try MiniTest.expectEqual(json["code"] as? String, "unsupported_property")
@@ -1889,6 +1890,9 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
             try MiniTest.expect(err.message.contains("err-detail"))
             try MiniTest.expect(err.message.contains("out-detail"))
             try MiniTest.expect(err.message.contains("exit 3"))
+            // Captured diagnostics remain raw (no tool frame prefix on the mark).
+            try MiniTest.expect(!err.message.contains("| err-detail"))
+            try MiniTest.expect(!err.message.contains("    | "))
         }
         // Streaming path was used on exec; captured detail still reaches the structured error.
         // (delete-on-fail also streams stderr and must not be confused with the hook exec flags.)
@@ -1897,6 +1901,67 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(execCalls[0].streamStderr == true)
         try MiniTest.expect(execCalls[0].teeStdoutToStderr == true)
         try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" })
+    }),
+    ("lifecycleRunnerEmitsPhaseStatusAndHonorsQuiet", {
+        let previousEnabled = StatusPrinter.enabled
+        let previousWrite = StatusPrinter.writeStderr
+        let previousPhase = StatusPrinter.hasEmittedPhase
+        let previousColor = TerminalStyle.colorOverride
+        defer {
+            StatusPrinter.enabled = previousEnabled
+            StatusPrinter.writeStderr = previousWrite
+            StatusPrinter.hasEmittedPhase = previousPhase
+            TerminalStyle.colorOverride = previousColor
+        }
+        TerminalStyle.colorOverride = false
+        StatusPrinter.resetSectionState()
+        var buffer = Data()
+        StatusPrinter.writeStderr = { buffer.append($0) }
+
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data("hook-body\n".utf8), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/app",
+            postCreateCommand: .shell("echo hook-body")
+        )
+
+        StatusPrinter.enabled = true
+        try LifecycleRunner.runIfPresent(
+            property: "postCreateCommand",
+            command: config.postCreateCommand,
+            containerId: "ctr-status",
+            config: config,
+            runtime: runtime,
+            failurePolicy: .deleteContainerThenFail
+        )
+        let loud = String(data: buffer, encoding: .utf8) ?? ""
+        try MiniTest.expect(loud.contains("==> Running postCreateCommand\n"))
+
+        buffer = Data()
+        StatusPrinter.enabled = false
+        StatusPrinter.resetSectionState()
+        try LifecycleRunner.runIfPresent(
+            property: "postCreateCommand",
+            command: config.postCreateCommand,
+            containerId: "ctr-status-q",
+            config: config,
+            runtime: runtime,
+            failurePolicy: .deleteContainerThenFail
+        )
+        let quiet = String(data: buffer, encoding: .utf8) ?? ""
+        try MiniTest.expectEqual(quiet, "")
+        // Stream flags still requested under QUIET (tool body must remain visible at runner level).
+        try MiniTest.expect(mock.lastStreamStderr == true)
+        try MiniTest.expect(mock.lastTeeStdoutToStderr == true)
     }),
     ("isBuilderRunningParsesStatusJSON", {
         let mock = MockProcessRunner()

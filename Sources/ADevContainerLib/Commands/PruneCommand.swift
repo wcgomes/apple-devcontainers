@@ -1,7 +1,7 @@
 import Foundation
 
 public enum PruneCommand {
-    /// Removes workspace container, named volumes from config labels, config image,
+    /// Removes managed dev container, named volumes from config labels, config image,
     /// and volume-mode workspace volume (`*-ws` / label) when applicable.
     ///
     /// Selection is managed-only via `--name` / picker. Volumes come from labels
@@ -40,12 +40,12 @@ public enum PruneCommand {
             image: info.image
         )
 
-        StatusPrinter.status("Pruning workspace resources")
+        StatusPrinter.status("Pruning dev container resources")
         var hardFailure = false
 
         // 1. Container (missing is OK after resolve — should exist, but treat delete failures carefully)
         if let container = target.container {
-            StatusPrinter.status("Deleting container \(container.id)")
+            StatusPrinter.status("Deleting container", item: container.id)
             do {
                 try runtime.delete(nameOrId: container.id, force: true)
                 print("Removed container \(container.id)")
@@ -54,7 +54,7 @@ public enum PruneCommand {
                 hardFailure = true
             }
         } else if let expectedName = target.expectedContainerName {
-            StatusPrinter.status("No container \(expectedName)")
+            StatusPrinter.status("No container", item: expectedName)
             print("Skipped container \(expectedName) (not found)")
         }
 
@@ -65,7 +65,7 @@ public enum PruneCommand {
         }
         var seenVolumes = Set<String>()
         for volName in volumeNames where seenVolumes.insert(volName).inserted {
-            StatusPrinter.status("Deleting volume \(volName)")
+            StatusPrinter.status("Deleting volume", item: volName)
             let exists: Bool
             do {
                 exists = try runtime.volumeExists(volName)
@@ -89,7 +89,7 @@ public enum PruneCommand {
 
         // 3. Config image
         if let image = target.image, !image.isEmpty {
-            StatusPrinter.status("Deleting image \(image)")
+            StatusPrinter.status("Deleting image", item: image)
             do {
                 try runtime.deleteImage(reference: image)
                 print("Removed image \(image)")

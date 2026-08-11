@@ -51,7 +51,7 @@ public enum FeatureInstaller {
         )
 
         for step in plan {
-            StatusPrinter.status("Installing feature \(step.reference)")
+            StatusPrinter.status("Installing feature", item: step.reference)
             try installOne(into: containerId, step: step, runtime: runtime)
         }
     }

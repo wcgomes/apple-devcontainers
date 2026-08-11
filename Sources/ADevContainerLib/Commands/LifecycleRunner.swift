@@ -53,7 +53,7 @@ public enum LifecycleRunner {
         runtime: AppleContainerRuntime,
         failurePolicy: FailurePolicy
     ) throws {
-        StatusPrinter.status("Running \(property)")
+        StatusPrinter.status("Running", item: property)
         // Stream hook logs live (teed to host stderr) so long postCreate/etc scripts do not
         // look stuck. Capture is retained for failure diagnostics; QUIET only silences status.
         let execResult = try runtime.exec(
@@ -148,13 +148,13 @@ public enum LifecycleRunner {
     /// and there is no CLI attach hook (`--vscode` absent).
     public static func emitPostAttachSkipIfNeeded(config: ResolvedDevContainerConfig) {
         guard hasPostAttach(config) else { return }
-        StatusPrinter.status("postAttach skipped (no attach hook)")
+        StatusPrinter.status("postAttach skipped", item: "(no attach hook)")
     }
 
     /// Skip when `--vscode` was set but open soft-failed/skipped and postAttach is present.
     public static func emitPostAttachSkipOpenDidNotSucceedIfNeeded(config: ResolvedDevContainerConfig) {
         guard hasPostAttach(config) else { return }
-        StatusPrinter.status("postAttach skipped (attach open did not succeed)")
+        StatusPrinter.status("postAttach skipped", item: "(attach open did not succeed)")
     }
 
     /// Run config `postAttachCommand` then feature postAttach hooks via exec.

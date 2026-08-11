@@ -139,8 +139,7 @@ public enum CloneCommand {
         }
 
         if !resolved.mountPromotions.isEmpty {
-            let warning = MountNormalizer.warningMessage(promotions: resolved.mountPromotions) + "\n"
-            FileHandle.standardError.write(Data(warning.utf8))
+            StatusPrinter.warning(MountNormalizer.warningMessage(promotions: resolved.mountPromotions))
         }
 
         // Confirm/collect author identity before Features build / image pull / create.
@@ -157,7 +156,7 @@ public enum CloneCommand {
         // Clone-only: ensure in-container git via Features when config lacks git/common-utils.
         let gitEnsure = FeatureGitEnsure.ensurePresent(features: effectiveConfig.features)
         if gitEnsure.didInject {
-            StatusPrinter.status("Ensuring git feature for volume workspace")
+            StatusPrinter.status("Ensuring git feature for volume-mode dev container")
         }
         effectiveConfig.features = gitEnsure.features
 
@@ -169,7 +168,7 @@ public enum CloneCommand {
                 try AppleContainerConfig.ensureNativeArmBuild(runtime: runtime)
             }
             if !options.skipPull {
-                StatusPrinter.status("Pulling image \(resolved.config.image)")
+                StatusPrinter.status("Pulling image", item: resolved.config.image)
                 try? runtime.pullImage(resolved.config.image, platform: platform)
             }
             let fetcher: any FeatureFetching = featuresFetcherOverride
@@ -199,7 +198,7 @@ public enum CloneCommand {
             }
             knownMetadataUsers = featuresResult.metadataUsers
         } else if !options.skipPull {
-            StatusPrinter.status("Pulling image \(effectiveConfig.image)")
+            StatusPrinter.status("Pulling image", item: effectiveConfig.image)
             try? runtime.pullImage(effectiveConfig.image, platform: platform)
         }
 
@@ -243,12 +242,12 @@ public enum CloneCommand {
 
         // Fresh workspace tree: volume may remain after container-only delete.
         if try runtime.volumeExists(identity.workspaceVolumeName) {
-            StatusPrinter.status("Replacing workspace volume \(identity.workspaceVolumeName)")
+            StatusPrinter.status("Replacing workspace volume", item: identity.workspaceVolumeName)
             try runtime.deleteVolume(name: identity.workspaceVolumeName)
         }
 
         // 6–7. Ensure volume + create with volume workspace mount
-        StatusPrinter.status("Creating container \(identity.containerName)")
+        StatusPrinter.status("Creating container", item: identity.containerName)
         let id = try runtime.create(request: request)
 
         // 8. Start
@@ -369,10 +368,8 @@ public enum CloneCommand {
             config: effectiveConfig,
             runtime: runtime
         )
+        // Connection hints: entry point after success JSON (Ready → JSON → blank → connect).
         StatusPrinter.status("Ready")
-        if !options.openVSCode {
-            StatusPrinter.connectionHint(nameOrId: result.containerName ?? result.containerId)
-        }
         return result
     }
 
@@ -509,12 +506,14 @@ public enum CloneCommand {
         }
 
         let script = inContainerCloneScript(configureHTTPSStore: httpsCreds != nil)
+        // Live-tee populate git clone like lifecycle hooks / Features build (framed tool lines).
         let result = try runtime.exec(
             nameOrId: containerId,
             command: ["sh", "-c", script],
             user: remoteUser,
             workdir: workspaceFolder,
-            env: execEnv
+            env: execEnv,
+            streamOutput: true
         )
 
         guard result.succeeded else {

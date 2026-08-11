@@ -137,13 +137,19 @@ public struct CLIError: Error, Equatable, Sendable {
 
     public var exitCode: Int32 { 1 }
 
-    public func formatted() -> String {
-        var lines: [String] = ["error[\(code)]: \(message)"]
+    /// Human presentation. When `color` is true (default: TerminalStyle policy), only the
+    /// `error: ` label is red; message body and property/hint use dim info gray.
+    /// Machine JSON still carries `code` separately — not repeated in the human head line.
+    public func formatted(color: Bool = TerminalStyle.colorEnabled) -> String {
+        var lines: [String] = [
+            TerminalStyle.styleErrorLabel(TerminalStyle.errorPrefix, color: color)
+                + TerminalStyle.styleErrorBody(message, color: color)
+        ]
         if let property {
-            lines.append("  property: \(property)")
+            lines.append(TerminalStyle.styleErrorBody("  property: \(property)", color: color))
         }
         if let hint {
-            lines.append("  hint: \(hint)")
+            lines.append(TerminalStyle.styleHint("  hint: \(hint)", color: color))
         }
         return lines.joined(separator: "\n")
     }
@@ -177,6 +183,7 @@ public struct CLIError: Error, Equatable, Sendable {
 
 /// Error rendering shared by the executable entry point and machine-output tests. JSON errors
 /// are written to the error stream by the caller; successful command JSON remains stdout-only.
+/// JSON path is always monochrome structured bytes; human path may apply TerminalStyle color.
 public enum CLIErrorOutput {
     public static func data(for error: CLIError, json: Bool) -> Data {
         if json, let encoded = try? error.jsonData() {

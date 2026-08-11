@@ -1971,6 +1971,10 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         var capturedResult: RebuildResult?
         let stderr = try withEnabledStatusStderr {
             capturedResult = try RebuildCommand.run(options: RebuildOptions(), runtime: s.runtime)
+            emitPostSuccessConnectionHintsForTest(
+                openVSCode: false,
+                nameOrId: capturedResult!.containerName ?? capturedResult!.containerId
+            )
         }
         let result = capturedResult!
         let obj = result.jsonObject()

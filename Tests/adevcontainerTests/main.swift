@@ -5,9 +5,16 @@ import Foundation
 // onWarning still fires for assertions; product QUIET only silences progress, not warnings.
 StatusPrinter.enabled = false
 StatusPrinter.suppressWarningStderr = true
+StatusPrinter.resetSectionState()
+// Default unit suite is monochrome unless a test explicitly enables color.
+TerminalStyle.colorOverride = false
 
 // Force-link test translation units by referencing their register functions.
 let allTests: [(String, () throws -> Void)] = []
+    + terminalStyleTests
+    + statusPrinterTests
+    + processRunnerFramingTests
+    + cliErrorPresentationTests
     + discoveryTests
     + parserTests
     + substitutionTests
