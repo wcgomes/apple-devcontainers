@@ -2,13 +2,13 @@
 
 ## Purpose
 
-Lifecycle hook surface for `onCreateCommand` through `postStartCommand` (string or argv forms, create-path order, reuse/start behavior, delete-on-fail). postAttach gating lives in [vscode.md](vscode.md); create-path matrices on `up` also appear in [core.md](core.md).
+Lifecycle hook surface for `onCreateCommand` through `postStartCommand` (string | argv | object-map forms, create-path order, reuse/start behavior, delete-on-fail). postAttach gating lives in [vscode.md](vscode.md); create-path matrices on `up` also appear in [core.md](core.md).
 
 ## Requirements
 
 ### Requirement: Lifecycle hook surface
 
-The CLI MUST admit and honor these lifecycle properties in addition to existing `postCreateCommand`. Each property MUST accept a **string** or **argv array of strings** (same forms as core `postCreateCommand`). Omitted properties MUST be treated as no-ops. Hooks that run MUST execute via AppleContainerRuntime **exec** into the running container (not baked into the image), using the effective remote/container user and workspace folder when set.
+The CLI MUST admit and honor these lifecycle properties in addition to existing `postCreateCommand`. Each property MUST accept a **string**, an **argv array of strings**, or an **object map** of name → string or argv array (Dev Containers named/parallel form; product runs named entries sequentially in sorted name order). Omitted properties and empty object maps MUST be treated as no-ops. Hooks that run MUST execute via AppleContainerRuntime **exec** into the running container (not baked into the image), using the effective remote/container user and workspace folder when set.
 
 | Property | Role |
 |----------|------|
@@ -47,6 +47,11 @@ The CLI MUST admit and honor these lifecycle properties in addition to existing 
 - Given `postStartCommand` as a string and `onCreateCommand` as an argv array of strings
 - When config is resolved
 - Then both admit successfully and map to exec argv using the same shell-vs-argv rules as `postCreateCommand`
+
+#### Scenario: Lifecycle object (named) form admits
+- Given `onCreateCommand` as an object map (e.g. `{ "shell-history": "/path/oncreate.sh" }`) with string or argv values
+- When config or feature metadata is resolved
+- Then admission succeeds; each named entry maps to a leaf shell/argv command and runs via exec (sequentially in sorted name order)
 
 See also: [core.md](core.md) **Up lifecycle** for the create/reuse/start path matrix (including postAttach and vscode customizations rows); [vscode.md](vscode.md) for **postAttachCommand policy (CLI-only)**.
 

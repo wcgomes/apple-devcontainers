@@ -30,7 +30,7 @@ Error messages MUST name the feature key (when applicable) and indicate supporte
 
 Omitted `features` MUST NOT fail validation solely for absence.
 
-**Hash material (v1):** local path refs participate via the path string (and options); content changes under the same path MAY NOT invalidate the derived tag until the path or options change — acceptable for v1.
+**Hash material (v1):** local path refs participate via the path string (and options); content changes under the same path MAY NOT invalidate the derived tag until the path or options change — acceptable for v1. Derived-tag material also includes product `recipeVersion` (install Dockerfile semantics epoch); path/content under a fixed local path still does not auto-invalidate without a path/options/`recipeVersion` change.
 
 #### Scenario: OCI feature ref with options admits
 - Given a config with `"features": { "ghcr.io/devcontainers/features/node:1": { "version": "lts" } }` and a valid `image`
@@ -169,8 +169,8 @@ When `features` is non-empty after admission, on a fresh create path the product
 3. **Pull** the config base image with **`--platform`** set to the host-native Linux platform:
    - `linux/arm64` when the host is arm64 / aarch64 (product default on Apple Silicon)
    - `linux/amd64` only when the host is x86_64
-4. **Build** a derived image with Apple `container build` from a **generated Dockerfile** that `FROM`s the base image and `RUN`s each feature `install.sh` **as root** (options / `_REMOTE_USER` / `_CONTAINER_USER` env). Build argv MUST include the same host-native **`--platform`**.
-5. **Tag** a deterministic local image as `adev-{base}:{hash12}`, where `base` is the same human base as container identity and `hash12` is a 12-character content hash of base image + features (unchanged material). If `base` is empty → `adevcontainer:{hash12}`. MUST NOT use an `adevcontainer/features:` prefix or a `/features` path segment. **Reuse** when that tag already exists locally (skip rebuild).
+4. **Build** a derived image with Apple `container build` from a **generated Dockerfile** that `FROM`s the base image and, per feature, `COPY`s the package then `RUN`s recursive `chmod -R 0755` on the package directory **before** `./install.sh` **as root** (options / `_REMOTE_USER` / `_CONTAINER_USER` env) so scripts `install.sh` copies into bare-path lifecycle hooks remain executable (ref CLI parity; avoids exit 126). Build argv MUST include the same host-native **`--platform`**.
+5. **Tag** a deterministic local image as `adev-{base}:{hash12}`, where `base` is the same human base as container identity and `hash12` is a 12-character content hash of base image + features + a product **`recipeVersion`** constant (install Dockerfile semantics epoch). If `base` is empty → `adevcontainer:{hash12}`. MUST NOT use an `adevcontainer/features:` prefix or a `/features` path segment. **Reuse** when that tag already exists locally (skip rebuild). When generator install-layer semantics change (e.g. chmod recipe), the product MUST bump `recipeVersion` so existing tags miss and rebuild.
 6. **Create** the workspace container **from the derived image** (not the raw config `image`) with the same **`--platform`**. Contributions that affect create flags (`init`, `capAdd`, env, mounts) MUST be merged **before** create.
 7. **Start** the container, then run lifecycle hooks (onCreate → …) as today.
 
@@ -184,7 +184,7 @@ Reuse running / start stopped: MUST NOT re-fetch/rebuild features (already baked
 
 **Rebuild reuse clause**
 
-On `rebuild`, the same derived-tag identity material applies: when the rebuilt config's base image + features material is **unchanged**, the existing derived tag `adev-{base}:{hash12}` MUST be reused (no `container build`), making the unchanged config cheap; when the material **changed**, the derived image MUST be built before the old container is deleted (pre-delete ordering gate). Feature option changes alter the material and MUST produce a different derived tag, engaging the build path.
+On `rebuild`, the same derived-tag identity material applies: when the rebuilt config's base image + features + `recipeVersion` material is **unchanged**, the existing derived tag `adev-{base}:{hash12}` MUST be reused (no `container build`), making the unchanged config cheap; when the material **changed**, the derived image MUST be built before the old container is deleted (pre-delete ordering gate). Feature option changes and product `recipeVersion` bumps alter the material and MUST produce a different derived tag, engaging the build path.
 
 #### Scenario: Create uses derived image after build
 - Given a config with `image` and one OCI feature
@@ -220,6 +220,16 @@ On `rebuild`, the same derived-tag identity material applies: when the rebuilt c
 - Given the same feature ref but different options object
 - When config hashes (and derived tags) are computed
 - Then the hashes/tags differ (`up` hash-mismatch / `rebuild` build path; no silent wrong-feature reuse)
+
+#### Scenario: recipeVersion change changes derived tag
+- Given the same base image + feature refs/options
+- When derived tags are computed with different product `recipeVersion` values
+- Then the tags differ (stale images built under the prior install recipe are not reused)
+
+#### Scenario: same recipeVersion keeps derived tag stable
+- Given the same base image + feature refs/options + `recipeVersion`
+- When derived tags are computed twice
+- Then the tags are identical
 
 #### Scenario: rebuild with unchanged features material reuses derived tag
 - Given a managed container created from a config with OCI features and an existing derived tag `adev-{base}:{hash12}` for the same material
@@ -284,7 +294,7 @@ After features are resolved (and before create for flag contributions; lifecycle
 | `capAdd` | Each capability mapped via the existing **cap-add allowlist path**; disallowed names fail closed with structured error |
 | `containerEnv` | Merged into effective env; **config `containerEnv` wins** on key conflict |
 | mounts | Bind and volume only; sources normalized with **MountNormalizer** for file→dir promotion; incompatible mount types fail structured |
-| lifecycle hooks contributed by features | Appended/merged into the create-path exec order after start (installs already in derived image); same string/argv forms and failure/delete-on-fail policy as config hooks for create-path failures |
+| lifecycle hooks contributed by features | Appended/merged into the create-path exec order after start (installs already in derived image); same string/argv/object-map forms and failure/delete-on-fail policy as config hooks for create-path failures |
 
 Privileged / `securityOpt` contributions are warn-stripped and not applied to create (see warn-skip requirement); other contributions still merge.
 

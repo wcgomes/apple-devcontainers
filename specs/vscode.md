@@ -153,7 +153,7 @@ When `--vscode` is set and lifecycle has succeeded, the CLI MUST attempt to open
 
 ### Requirement: postAttachCommand policy (CLI-only)
 
-The CLI MUST parse and admit `postAttachCommand` when present (string or argv array) so configs are not rejected solely for this property. Invalid form (non-string, non-array) MUST still fail resolve with a structured error naming `postAttachCommand` (unchanged).
+The CLI MUST parse and admit `postAttachCommand` when present (string, argv array, or object map of name → string|argv — same `LifecycleCommand` forms as other hooks) so configs are not rejected solely for this property. Invalid form MUST still fail resolve with a structured error naming `postAttachCommand` (unchanged).
 
 **When postAttach RUNS**
 
@@ -171,7 +171,7 @@ When the run gate is satisfied, the CLI MUST run:
 - Config `postAttachCommand` when present, then
 - Feature-contributed postAttach commands (`featurePostAttachCommands` / equivalent merge), in the same merge/order patterns as other feature lifecycle hooks already in product (LifecycleRunner conventions: config hook then feature hooks for that stage).
 
-Each command MUST execute via existing container **exec** lifecycle machinery (same shell-vs-argv rules as `postCreateCommand` / `postStartCommand`), using effective `remoteUser` when set and the resolved workspace folder when set.
+Each command MUST execute via existing container **exec** lifecycle machinery (same string/argv/object-map rules as `postCreateCommand` / `postStartCommand`; object-map entries sequential sorted-by-name), using effective `remoteUser` when set and the resolved workspace folder when set.
 
 **When postAttach is SKIPPED (status line, not executed)**
 

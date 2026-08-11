@@ -251,6 +251,12 @@ public enum RebuildCommand {
             try? runtime.pullImage(effectiveConfig.image, platform: platform)
         }
 
+        // Expand `${devcontainerId}` with the reused create name before hash / volume ensure.
+        effectiveConfig = VariableSubstitutor.expandDevcontainerId(
+            in: effectiveConfig,
+            id: selected.name
+        )
+
         // Identity. Bind: up parity → hash from the resolved (pre-feature) config. Volume:
         // clone parity → hash from the effective (post-feature) config. Either way labels
         // change only when the underlying material actually changed.

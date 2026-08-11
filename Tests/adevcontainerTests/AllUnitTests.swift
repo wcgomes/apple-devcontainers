@@ -300,6 +300,145 @@ nonisolated(unsafe) let substitutionTests: [(String, () throws -> Void)] = [
             try MiniTest.expectEqual(err.code, CLIErrorCode.unsupportedSubstitution)
             try MiniTest.expectEqual(err.property, "unknownToken")
         }
+    }),
+    ("devcontainerIdExpandsWhenKnown", {
+        let ctx = SubstitutionContext(
+            localWorkspaceFolder: "/ws",
+            containerWorkspaceFolder: "/workspaces/ws",
+            localEnv: [:],
+            devcontainerId: "adev-proj-abc123def456"
+        )
+        try MiniTest.expectEqual(
+            try VariableSubstitutor.substitute("${devcontainerId}-shellhistory", context: ctx),
+            "adev-proj-abc123def456-shellhistory"
+        )
+    }),
+    ("devcontainerIdDeferredWhenUnknown", {
+        let ctx = SubstitutionContext(
+            localWorkspaceFolder: "/ws",
+            containerWorkspaceFolder: "/workspaces/ws",
+            localEnv: [:]
+        )
+        // Feature mounts / clone: leave token until create name is known.
+        try MiniTest.expectEqual(
+            try VariableSubstitutor.substitute("${devcontainerId}-shellhistory", context: ctx),
+            "${devcontainerId}-shellhistory"
+        )
+    }),
+    ("devcontainerIdExpandMountSource", {
+        let mounts = [
+            MountSpec(
+                type: .volume,
+                source: "${devcontainerId}-shellhistory",
+                target: "/home/vscode/.shellhistory"
+            ),
+            MountSpec(type: .bind, source: "/host/data", target: "/data")
+        ]
+        let id = "adev-app-deadbeefcafe"
+        let expanded = VariableSubstitutor.expandDevcontainerId(in: mounts, id: id)
+        try MiniTest.expectEqual(expanded.count, 2)
+        try MiniTest.expectEqual(expanded[0].source, "\(id)-shellhistory")
+        try MiniTest.expectEqual(expanded[0].target, "/home/vscode/.shellhistory")
+        try MiniTest.expectEqual(expanded[0].type, .volume)
+        try MiniTest.expectEqual(expanded[1].source, "/host/data")
+        // Idempotent
+        let again = VariableSubstitutor.expandDevcontainerId(in: expanded, id: id)
+        try MiniTest.expectEqual(again[0].source, "\(id)-shellhistory")
+    }),
+    ("devcontainerIdCreateRequestExpandsVolumeMount", {
+        let config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/ws",
+            mounts: [
+                MountSpec(
+                    type: .volume,
+                    source: "${devcontainerId}-shellhistory",
+                    target: "/cmdhist"
+                )
+            ]
+        )
+        let name = "adev-ws-0123456789ab"
+        let req = CreateRequest.from(
+            resolved: config,
+            identityName: name,
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        )
+        try MiniTest.expectEqual(req.mounts.count, 1)
+        try MiniTest.expectEqual(req.mounts[0].source, "\(name)-shellhistory")
+        try MiniTest.expect(
+            !req.mounts[0].source.contains("${"),
+            "volume source must not retain unsubstituted tokens"
+        )
+        let vols = req.labels[ContainerIdentity.labelConfigVolumes] ?? ""
+        try MiniTest.expectEqual(vols, "\(name)-shellhistory")
+        let args = req.createArguments()
+        let mountFlags = args.enumerated().compactMap { i, a -> String? in
+            i > 0 && args[i - 1] == "--mount" ? a : nil
+        }
+        try MiniTest.expect(
+            mountFlags.contains { $0.contains("source=\(name)-shellhistory") },
+            "create --mount uses expanded volume name"
+        )
+    }),
+    ("devcontainerIdConfigResolveAllowsTokenInMount", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "mounts": [
+            "source=${devcontainerId}-shellhistory,target=/cmdhist,type=volume"
+          ]
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        try MiniTest.expectEqual(resolved.config.mounts.count, 1)
+        // Deferred through resolve; create path expands with container name.
+        try MiniTest.expectEqual(
+            resolved.config.mounts[0].source,
+            "${devcontainerId}-shellhistory"
+        )
+        let expanded = VariableSubstitutor.expandDevcontainerId(
+            in: resolved.config,
+            id: resolved.containerName
+        )
+        try MiniTest.expectEqual(
+            expanded.mounts[0].source,
+            "\(resolved.containerName)-shellhistory"
+        )
+        try MiniTest.expect(
+            expanded.mounts[0].source.range(of: #"^[A-Za-z0-9][A-Za-z0-9_.-]*$"#, options: .regularExpression) != nil,
+            "expanded volume name must match Apple volume regex"
+        )
+    }),
+    ("devcontainerIdFeatureMergeThenExpand", {
+        let contrib = FeatureContributions(
+            mounts: [
+                MountSpec(
+                    type: .volume,
+                    source: "${devcontainerId}-shellhistory",
+                    target: "/commandhistory"
+                )
+            ]
+        )
+        let base = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/x"
+        )
+        let merged = try FeatureContributionMerge.apply(contributions: contrib, to: base)
+        try MiniTest.expectEqual(merged.mounts[0].source, "${devcontainerId}-shellhistory")
+        let id = "adev-x-aabbccddeeff"
+        let finalized = VariableSubstitutor.expandDevcontainerId(in: merged, id: id)
+        try MiniTest.expectEqual(finalized.mounts[0].source, "\(id)-shellhistory")
+        let req = CreateRequest.from(
+            resolved: finalized,
+            identityName: id,
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        )
+        try MiniTest.expectEqual(req.mounts[0].source, "\(id)-shellhistory")
     })
 ]
 
@@ -864,6 +1003,70 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(postStart, .shell("echo start"))
         try MiniTest.expectEqual(onCreate!.execArguments, ["echo", "hi"])
         try MiniTest.expectEqual(postStart!.execArguments, ["sh", "-lc", "echo start"])
+    }),
+    ("lifecycleCommandObjectFormParse", {
+        // shell-history style: named map of string commands
+        let obj: [String: Any] = [
+            "shell-history": "/usr/local/share/oncreate.sh",
+            "other": ["echo", "named"] as [Any]
+        ]
+        let parsed = try LifecycleCommand.parse(obj, property: "onCreateCommand")
+        guard case .parallel(let named) = parsed else {
+            throw MiniTest.Failure(message: "expected parallel object form")
+        }
+        try MiniTest.expectEqual(named.count, 2)
+        try MiniTest.expectEqual(named[0].name, "other")
+        try MiniTest.expectEqual(named[0].command, LifecycleCommand.argv(["echo", "named"]))
+        try MiniTest.expectEqual(named[1].name, "shell-history")
+        try MiniTest.expectEqual(named[1].command, LifecycleCommand.shell("/usr/local/share/oncreate.sh"))
+        try MiniTest.expectEqual(named[1].command.execArguments, ["sh", "-lc", "/usr/local/share/oncreate.sh"])
+
+        let empty = try LifecycleCommand.parse([:] as [String: Any], property: "onCreateCommand")
+        try MiniTest.expect(empty == nil)
+
+        // Regression: prior error text rejected object form entirely
+        try MiniTest.expectThrows({
+            _ = try LifecycleCommand.parse(42, property: "onCreateCommand")
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.unsupportedProperty)
+            try MiniTest.expectEqual(err.property, "onCreateCommand")
+            try MiniTest.expect(err.message.contains("object of named commands"))
+            try MiniTest.expect(!err.message.contains("must be a string or array of strings")
+                || err.message.contains("object"))
+        }
+    }),
+    ("lifecycleCommandObjectFormNestedObjectFails", {
+        try MiniTest.expectThrows({
+            _ = try LifecycleCommand.parse(
+                ["bad": ["nested": "no"] as [String: Any]] as [String: Any],
+                property: "postCreateCommand"
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.property, "postCreateCommand.bad")
+        }
+    }),
+    ("featureMetadataObjectFormOnCreate", {
+        let json = """
+        {
+          "id": "shell-history",
+          "version": "0.0.6",
+          "onCreateCommand": {
+            "shell-history": "/usr/local/share/stuartleeks-devcontainer-features/shell-history/scripts/oncreate.sh"
+          }
+        }
+        """
+        let meta = try FeatureMetadata.parse(data: Data(json.utf8), featureRef: "ghcr.io/stuartleeks/dev-container-features/shell-history:0")
+        guard case .parallel(let named) = meta.onCreateCommand else {
+            throw MiniTest.Failure(message: "expected object-form onCreateCommand")
+        }
+        try MiniTest.expectEqual(named.count, 1)
+        try MiniTest.expectEqual(named[0].name, "shell-history")
+        try MiniTest.expectEqual(
+            named[0].command,
+            LifecycleCommand.shell("/usr/local/share/stuartleeks-devcontainer-features/shell-history/scripts/oncreate.sh")
+        )
     }),
     ("invalidPostAttachFormFails", {
         try MiniTest.expectThrows({
@@ -1992,6 +2195,50 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!safe.contains("/"))
         try MiniTest.expect(!safe.contains(":"))
     }),
+    ("featureDockerfileGeneratorChmodsPackageRecursively", {
+        // shell-history-style: install.sh copies oncreate.sh (often 0644 in OCI) to a
+        // bare-path onCreateCommand. Reference CLI does `chmod -R 0755` on the package
+        // before install so cp preserves +x and `sh -lc /path/oncreate.sh` does not 126.
+        let metaA = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refA
+        )
+        let ctxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-df-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: ctxDir) }
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(
+                    reference: FeaturesTestSupport.refA,
+                    options: ["greeting": .string("hi")]
+                ),
+                metadata: metaA
+            )
+        ]
+        let packages = [
+            FetchedFeaturePackage(
+                reference: FeaturesTestSupport.refA,
+                directoryPath: FeaturesTestSupport.fixtureFeatureDir("sample-a")
+            )
+        ]
+        let ctx = try FeatureDockerfileGenerator.write(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            packages: packages,
+            contextDirectory: ctxDir,
+            remoteUser: "vscode",
+            containerUser: "vscode"
+        )
+        let contents = ctx.dockerfileContents
+        try MiniTest.expect(contents.contains("FROM alpine:3.20"))
+        try MiniTest.expect(contents.contains("COPY feature-0 /tmp/adev-feature-0"))
+        try MiniTest.expect(contents.contains("chmod -R 0755 /tmp/adev-feature-0"))
+        try MiniTest.expect(contents.contains("./install.sh"))
+        // Must not only chmod install.sh — lifecycle scripts need +x too.
+        try MiniTest.expect(!contents.contains("chmod +x /tmp/adev-feature-0/install.sh"))
+        try MiniTest.expect(FileManager.default.fileExists(atPath: ctx.dockerfilePath))
+    }),
     ("tomlMergeBuildRosettaFalsePreservesKeys", {
         let input = """
         # header
@@ -2212,6 +2459,58 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             String(t1.split(separator: ":").last ?? ""),
             String(tEmpty.split(separator: ":").last ?? "")
         )
+        // Default recipeVersion is the product constant (included in material).
+        let tDefaultRecipe = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: o1,
+            nameBase: "my-app",
+            recipeVersion: DerivedImageTag.recipeVersion
+        )
+        try MiniTest.expectEqual(t1, tDefaultRecipe)
+    }),
+    ("featureDerivedTagChangesWithRecipeVersion", {
+        // Generator install-semantics bumps must invalidate stale derived images
+        // (e.g. chmod +x install.sh only → chmod -R 0755 package).
+        let metaA = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refA
+        )
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(
+                    reference: FeaturesTestSupport.refA,
+                    options: ["greeting": .string("a")]
+                ),
+                metadata: metaA
+            )
+        ]
+        let sameV = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            nameBase: "app",
+            recipeVersion: "2"
+        )
+        let sameVAgain = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            nameBase: "app",
+            recipeVersion: "2"
+        )
+        let bumped = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            nameBase: "app",
+            recipeVersion: "3"
+        )
+        try MiniTest.expectEqual(sameV, sameVAgain)
+        try MiniTest.expect(sameV != bumped)
+        try MiniTest.expect(sameV.hasPrefix("adev-app:"))
+        try MiniTest.expect(bumped.hasPrefix("adev-app:"))
+        try MiniTest.expectEqual(
+            String(sameV.split(separator: ":").last ?? "").count,
+            12
+        )
     }),
     ("featureDerivedTagUsesWorkspaceBasenameViaHumanBase", {
         let base = ContainerIdentity.humanBase(configName: nil, workspacePath: "/Users/me/My_Project")
@@ -2428,6 +2727,8 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             let contents = try String(contentsOfFile: dockerfile, encoding: .utf8)
             try MiniTest.expect(contents.contains("FROM alpine:3.20"))
             try MiniTest.expect(contents.contains("install.sh"))
+            // Recursive +x so feature lifecycle scripts copied by install.sh stay executable.
+            try MiniTest.expect(contents.contains("chmod -R 0755 /tmp/adev-feature-0"))
         }
     }),
     ("featuresRunnerReusesExistingTag", {

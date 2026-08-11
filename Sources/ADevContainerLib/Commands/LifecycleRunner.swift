@@ -10,6 +10,7 @@ public enum LifecycleRunner {
     }
 
     /// Run a single lifecycle command if present. No-op when `command` is nil.
+    /// Object-form (`.parallel`) runs each named command sequentially in sorted name order.
     public static func runIfPresent(
         property: String,
         command: LifecycleCommand?,
@@ -20,6 +21,38 @@ public enum LifecycleRunner {
     ) throws {
         guard let command else { return }
 
+        switch command {
+        case .shell, .argv:
+            try runLeaf(
+                property: property,
+                command: command,
+                containerId: containerId,
+                config: config,
+                runtime: runtime,
+                failurePolicy: failurePolicy
+            )
+        case .parallel(let named):
+            for entry in named {
+                try runLeaf(
+                    property: "\(property) (\(entry.name))",
+                    command: entry.command,
+                    containerId: containerId,
+                    config: config,
+                    runtime: runtime,
+                    failurePolicy: failurePolicy
+                )
+            }
+        }
+    }
+
+    private static func runLeaf(
+        property: String,
+        command: LifecycleCommand,
+        containerId: String,
+        config: ResolvedDevContainerConfig,
+        runtime: AppleContainerRuntime,
+        failurePolicy: FailurePolicy
+    ) throws {
         StatusPrinter.status("Running \(property)")
         let execResult = try runtime.exec(
             nameOrId: containerId,
@@ -185,9 +218,9 @@ public enum LifecycleRunner {
             execResult.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
         ].filter { !$0.isEmpty }.joined(separator: " | ")
 
-        // Map feature-labeled properties back to base code family.
+        // Map feature-labeled / named-object properties back to base code family.
         let baseProperty: String
-        if let range = property.range(of: " (feature") {
+        if let range = property.range(of: " (") {
             baseProperty = String(property[..<range.lowerBound])
         } else {
             baseProperty = property

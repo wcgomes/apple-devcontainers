@@ -149,6 +149,12 @@ public enum UpCommand {
             try? runtime.pullImage(effectiveConfig.image, platform: platform)
         }
 
+        // Expand `${devcontainerId}` in feature/config mounts before volume ensure + create.
+        effectiveConfig = VariableSubstitutor.expandDevcontainerId(
+            in: effectiveConfig,
+            id: resolved.containerName
+        )
+
         let request = CreateRequest.from(
             resolved: effectiveConfig,
             identityName: resolved.containerName,

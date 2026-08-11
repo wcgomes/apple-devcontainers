@@ -1,9 +1,22 @@
 import Foundation
 
-/// Lifecycle command as string or argv array.
+/// One entry in a lifecycle object-map (name → leaf command).
+public struct NamedLifecycleCommand: Equatable, Sendable {
+    public var name: String
+    public var command: LifecycleCommand
+
+    public init(name: String, command: LifecycleCommand) {
+        self.name = name
+        self.command = command
+    }
+}
+
+/// Lifecycle command as string, argv array, or named object map (Dev Containers forms).
 public enum LifecycleCommand: Equatable, Sendable {
     case shell(String)
     case argv([String])
+    /// Object form: name → string or argv. Spec runs in parallel; product runs sequentially in sorted name order.
+    case parallel([NamedLifecycleCommand])
 
     public static func parse(_ value: Any?, property: String) throws -> LifecycleCommand? {
         guard let value else { return nil }
@@ -11,24 +24,31 @@ public enum LifecycleCommand: Equatable, Sendable {
             return .shell(s)
         }
         if let arr = value as? [Any] {
-            let parts = try arr.map { item -> String in
-                guard let s = item as? String else {
-                    throw CLIError(
-                        code: CLIErrorCode.unsupportedProperty,
-                        property: property,
-                        message: "\(property) array entries must be strings"
-                    )
-                }
-                return s
+            return try parseArgv(arr, property: property)
+        }
+        if let dict = value as? [String: Any] {
+            if dict.isEmpty { return nil }
+            var named: [NamedLifecycleCommand] = []
+            for key in dict.keys.sorted() {
+                let leaf = try parseLeaf(dict[key]!, property: "\(property).\(key)")
+                named.append(NamedLifecycleCommand(name: key, command: leaf))
             }
-            guard !parts.isEmpty else {
-                throw CLIError(
-                    code: CLIErrorCode.unsupportedProperty,
-                    property: property,
-                    message: "\(property) array must not be empty"
-                )
-            }
-            return .argv(parts)
+            return .parallel(named)
+        }
+        throw CLIError(
+            code: CLIErrorCode.unsupportedProperty,
+            property: property,
+            message: "\(property) must be a string, array of strings, or object of named commands"
+        )
+    }
+
+    /// Leaf forms only (string or argv) — used for object-map values (no nested objects).
+    private static func parseLeaf(_ value: Any, property: String) throws -> LifecycleCommand {
+        if let s = value as? String {
+            return .shell(s)
+        }
+        if let arr = value as? [Any] {
+            return try parseArgv(arr, property: property)
         }
         throw CLIError(
             code: CLIErrorCode.unsupportedProperty,
@@ -37,13 +57,36 @@ public enum LifecycleCommand: Equatable, Sendable {
         )
     }
 
-    /// Arguments for `container exec` after container id.
+    private static func parseArgv(_ arr: [Any], property: String) throws -> LifecycleCommand {
+        let parts = try arr.map { item -> String in
+            guard let s = item as? String else {
+                throw CLIError(
+                    code: CLIErrorCode.unsupportedProperty,
+                    property: property,
+                    message: "\(property) array entries must be strings"
+                )
+            }
+            return s
+        }
+        guard !parts.isEmpty else {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: property,
+                message: "\(property) array must not be empty"
+            )
+        }
+        return .argv(parts)
+    }
+
+    /// Arguments for `container exec` after container id. Only valid for leaf forms (shell/argv).
     public var execArguments: [String] {
         switch self {
         case .shell(let cmd):
             return ["sh", "-lc", cmd]
         case .argv(let args):
             return args
+        case .parallel:
+            return []
         }
     }
 
@@ -52,6 +95,12 @@ public enum LifecycleCommand: Equatable, Sendable {
         switch self {
         case .shell(let s): return s
         case .argv(let a): return a
+        case .parallel(let named):
+            var d: [String: Any] = [:]
+            for entry in named {
+                d[entry.name] = entry.command.hashEncoding
+            }
+            return d
         }
     }
 }

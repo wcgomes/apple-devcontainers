@@ -34,8 +34,8 @@ swift run adevcontainerTests
 devcontainer.json → Config resolver → [Features runner] → AppleContainerRuntime → /usr/local/bin/container
 ```
 
-1. **Config resolver** — JSONC parse; variable substitution (`${localEnv:*}`, `${localWorkspaceFolderBasename}`); validate supported props; hard-error unsupported (never silent ignore).
-2. **Features runner** (when `features` non-empty) — load local path and/or fetch OCI features; order; ensure `build.rosetta=false`; derived image build; swaps effective image before create. Detail: [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md).
+1. **Config resolver** — JSONC parse; variable substitution (`${localEnv:*}`, `${localWorkspaceFolderBasename}`, `${containerWorkspaceFolder}`, `${devcontainerId}` — latter may stay literal until create identity is known); validate supported props; hard-error unsupported (never silent ignore).
+2. **Features runner** (when `features` non-empty) — load local path and/or fetch OCI features; order; ensure `build.rosetta=false`; derived image build; swaps effective image before create. Then expand deferred `${devcontainerId}` in mounts/`containerEnv` before volume ensure + create. Detail: [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md) (`${devcontainerId}` deferred expand).
 3. **AppleContainerRuntime** — sole boundary to the external `container` CLI; subprocess invoke; parse machine-readable JSON only. Features OCI fetch is separate (embedded HTTPS); local path is disk copy.
 4. **Apple container** — create/run/exec/stop/delete/prune/inspect/build of the workspace container and related config volumes/image.
 
@@ -79,7 +79,7 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
   - **Bind-mode `hash12`:** workspace path + config path.
   - **Volume-mode `hash12`:** normalized git URL + config relpath (not a temp host path). Stable across reclones of the same repo/config.
 - **Workspace volume (volume-mode):** `adev-{base}-{hash12}-ws`.
-- **Features derived tag** (when Features build runs): `adev-{base}:{hash12}` (content hash of base image + features); empty base → `adevcontainer:{hash12}`. No `adevcontainer/features:` prefix. Plain config `image` (no Features) is unchanged.
+- **Features derived tag** (when Features build runs): `adev-{base}:{hash12}` (content hash of base image + features + `recipeVersion` epoch in `DerivedImageTag`; bump epoch on install-Dockerfile semantic changes — see [cli-runtime-boundary](conventions/cli-runtime-boundary.md)); empty base → `adevcontainer:{hash12}`. No `adevcontainer/features:` prefix. Plain config `image` (no Features) is unchanged.
 - **Labels (managed set):** stamped on create for both modes — `devcontainer.managed=adevcontainer`, `devcontainer.local_folder` (bind: host path; volume: `volume://…`), `devcontainer.config_file`, app config hash, `devcontainer.workspace_mode` (`bind` on `up`, `volume` on `clone`), `devcontainer.workspace_folder`, `devcontainer.remote_user` (may be empty), `devcontainer.config_volumes` when applicable. Volume-mode also `devcontainer.git_url` (userinfo stripped), `devcontainer.workspace_volume`.
 - **Config hash on `up`:** reuse/start-stopped only when stamped hash matches current resolve; mismatch → `config_hash_mismatch` (force-recreate = `rebuild` only; no `up --recreate`). See [cli-runtime-boundary](conventions/cli-runtime-boundary.md#up-reuse-vs-rebuild-force-recreate).
 - Enables find/reuse without Docker-style label filter APIs (list has no label filter — client-side filter; `list` keeps only managed). See [gaps](domain/devcontainer-apple-gaps.md).
@@ -88,7 +88,7 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
 
 - `forwardPorts` → publish ports on the Apple container (IDE auto-forward not guaranteed).
 - `portsAttributes` stored/surfaced as metadata where useful.
-- Lifecycle hooks run via `container exec` (not baked into image). Matrix:
+- Lifecycle hooks run via `container exec` (not baked into image). Each hook admits **string** | **argv** | **object map** `name → string|argv` (empty `{}` no-op); map entries run **sequentially sorted by name** (not true parallel — product choice vs reference CLI). Detail: [cli-runtime-boundary — Lifecycle](conventions/cli-runtime-boundary.md#lifecycle-execution-hook-matrix). Contract: [`specs/lifecycle-hooks.md`](../specs/lifecycle-hooks.md). Matrix:
 
   | Path | Hooks |
   |------|--------|

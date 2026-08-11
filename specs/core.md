@@ -64,13 +64,26 @@ After parse, the resolver MUST apply this substitution subset anywhere string va
 | `${localWorkspaceFolderBasename}` | Basename of the workspace root |
 | `${localEnv:VAR}` | Value of host environment variable `VAR` (empty string if unset, unless a default form is later specified) |
 | `${containerWorkspaceFolder}` | Resolved container workspace folder path (after `workspaceFolder` resolution) |
+| `${devcontainerId}` | Managed container name used at create (`adev-{base}-{hash12}` / create `--name`). Same identity for bind-mode `up` and volume-mode `clone`/`rebuild` (reused name). |
 
 Unsupported substitution tokens MUST cause a structured error naming the token. Substitution MUST run before runtime admission and mount/port mapping.
+
+**`${devcontainerId}` lifecycle — MUST**
+
+- Feature metadata mounts (and config mounts) MAY embed `${devcontainerId}` in volume `source` (e.g. shell-history `source=${devcontainerId}-shellhistory`).
+- When the create name is not yet known at config resolve (common for feature mounts; clone volume-mode name differs from bind-mode path identity), the token MAY remain unsubstituted through resolve.
+- Before named-volume ensure and `container create`, the CLI MUST expand `${devcontainerId}` to the create `--name` value so Apple volume names match `^[A-Za-z0-9][A-Za-z0-9_.-]*$`.
+- Volume-mode config hash / `devcontainer.config_volumes` labels MUST use post-expansion mount sources so identity stays stable and prune sees real volume names.
 
 #### Scenario: localEnv in mount source
 - Given `containerEnv` or a mount `source` containing `${localEnv:HOME}/.kube/config` and `HOME` is set on the host
 - When config is resolved
 - Then the token is replaced with the host value
+
+#### Scenario: devcontainerId in feature volume mount source
+- Given a feature mount `source=${devcontainerId}-shellhistory` (type volume) and create name `adev-proj-abc123def456`
+- When the container is created
+- Then the volume name is `adev-proj-abc123def456-shellhistory` and volume create succeeds
 
 #### Scenario: Unknown substitution token
 - Given a string value containing `${unknownToken}`
@@ -99,8 +112,8 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - `portsAttributes` — retained and surfaced as metadata only (no IDE auto-forward semantics promised)
 
 **Lifecycle**
-- `postCreateCommand` — string or argv array; executed via runtime exec on fresh create after `updateContentCommand`; non-zero exit MUST fail `up`
-- `onCreateCommand`, `updateContentCommand`, `postStartCommand`, `postAttachCommand` — policy per lifecycle hook surface and postAttachCommand policy requirements
+- `postCreateCommand` — string, argv array, or object map (name → string|argv; map runs sequentially sorted by name); executed via runtime exec on fresh create after `updateContentCommand`; non-zero exit MUST fail `up`
+- `onCreateCommand`, `updateContentCommand`, `postStartCommand`, `postAttachCommand` — same command forms; policy per lifecycle hook surface and postAttachCommand policy requirements
 
 **runArgs + hostRequirements**
 - `runArgs` — allowlisted subset only; mapped on create

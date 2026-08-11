@@ -120,6 +120,8 @@ Fresh create (`up`, `clone`, or `rebuild` after the tree exists / volume reused)
 
 `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand`
 
+Each hook property admits a **string**, an **argv array**, or an **object map** of name → string|argv (Dev Containers named form). Named map entries run **sequentially, sorted by name** (not true parallel). Empty `{}` is a no-op. Feature-contributed hooks use the same forms.
+
 | Path | Hooks |
 |------|--------|
 | Fresh create (`up` / `clone` / `rebuild`) | full order; container deleted if any fail (`rebuild`: new container only; volumes preserved) |
@@ -170,6 +172,7 @@ Top-level `features` map (ref → options) on **`up` / `clone` / `rebuild`**. Bu
 - **Local path** — `./…`, `../…`, absolute, or `file://…` (relative to **workspace root**; needs `devcontainer-feature.json` + `install.sh`)
 - **Volume-mode `rebuild`** fetches OCI features only: the host fetcher (`DefaultFeatureFetcher`) and local-path feature refs inside the workspace volume are unsupported there and fail cleanly before the old container is deleted (bind-mode `rebuild` keeps `up` behavior)
 - **Derived-tag reuse** on `rebuild`: unchanged base image + features material reuses `adev-{base}:{hash12}` (no `container build`)
+- **`${devcontainerId}`** in feature/config volume mount sources and `containerEnv` expands to the managed create name before volume ensure (e.g. shell-history `source=${devcontainerId}-shellhistory`)
 - **Warn-skip:** docker-* feature refs and privileged/securityOpt metadata — see table above / [ADR 0003](wiki/decisions/0003-warn-skip-apple-incompatibles.md)
 - **Rosetta / BuildKit:** if prompted once to set `build.rosetta=false`, accept — or set `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1` for CI
 

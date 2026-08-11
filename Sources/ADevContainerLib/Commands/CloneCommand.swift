@@ -197,6 +197,12 @@ public enum CloneCommand {
             try? runtime.pullImage(effectiveConfig.image, platform: platform)
         }
 
+        // Expand `${devcontainerId}` with volume-mode create name (not bind-mode resolve name).
+        effectiveConfig = VariableSubstitutor.expandDevcontainerId(
+            in: effectiveConfig,
+            id: identity.containerName
+        )
+
         let configHash = ContainerIdentity.configHash(from: effectiveConfig.hashMaterial())
         let configVolumeNames = effectiveConfig.mounts
             .filter { $0.type == .volume }

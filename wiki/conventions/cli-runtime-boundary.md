@@ -28,9 +28,21 @@ Parse these paths from machine JSON (not human tables). Shape documented against
 
 ## Config → runtime
 
-- Resolver owns JSONC + substitution (`${localEnv:*}`, `${localWorkspaceFolderBasename}`, related supported vars).
+- Resolver owns JSONC + substitution subset: `${localWorkspaceFolder}`, `${localWorkspaceFolderBasename}`, `${localEnv:*}`, `${containerWorkspaceFolder}`, `${devcontainerId}` (see below). Unknown tokens → structured error.
 - Resolver emits a runtime request DTO; runtime maps DTO → argv + env for `container`.
 - Unsupported props/flags fail in resolver or runtime admission — **fail closed**, no drop-on-floor.
+
+### `${devcontainerId}` (deferred expand)
+
+Managed create name (`adev-{base}-{hash12}` / `create --name`). Features (e.g. shell-history) and config may embed it in **volume mount `source`** (`${devcontainerId}-shellhistory`) and **`containerEnv`** values.
+
+| Phase | Behavior |
+|-------|----------|
+| Resolve (`VariableSubstitutor`) | Admit token. Expand only when `SubstitutionContext.devcontainerId` is set; otherwise **leave literal** `${devcontainerId}` (identity often unknown until after Features merge / mode-specific name). |
+| After Features merge, before volume ensure + create | `expandDevcontainerId` with create name: **`up`** → `resolved.containerName`; **`clone`** → volume identity `containerName`; **`rebuild`** → selected managed name. |
+| Safety net | `CreateRequest.from` / `fromVolumeMode` expand mounts + stamp `devcontainer.config_volumes` from post-expansion sources (idempotent if already expanded). |
+
+**Config hash:** bind-mode hash may keep the deferred token in mount material; **volume-mode** hash / `config_volumes` label use **post-expansion** sources so identity and prune see real volume names. Expand **before** `ensureVolume` so Apple names match `^[A-Za-z0-9][A-Za-z0-9_.-]*$`. Contract: [`specs/core.md`](../../specs/core.md) (Variable substitution subset).
 
 ## MountNormalizer (file → directory bind promotion)
 
@@ -112,13 +124,13 @@ Bind-mode `up` stamps the full managed label set including `workspace_mode=bind`
   - Bind: `hash12` = workspace path + config path.
   - Volume: `hash12` = normalized git URL + config relpath (not temp checkout path).
 - **Workspace volume (volume-mode):** `adev-{base}-{hash12}-ws`.
-- **Features derived image tag:** `adev-{base}:{hash12}` where `hash12` is the content hash of base image + features; empty base → `adevcontainer:{hash12}`. No `adevcontainer/features:` prefix and no `/features` path segment. Config `image` without a Features build is left as written. Tag validity depends on sanitize collapse (above).
+- **Features derived image tag:** `adev-{base}:{hash12}` where `hash12` is the content hash of base image + features + **`recipeVersion`** (epoch string in `DerivedImageTag`); empty base → `adevcontainer:{hash12}`. No `adevcontainer/features:` prefix and no `/features` path segment. Config `image` without a Features build is left as written. Tag validity depends on sanitize collapse (above). **Bump `recipeVersion` whenever install-Dockerfile semantics change** so cached local derived images are not reused forever; current epoch **`"2"`** pairs with `chmod -R 0755` package before `install.sh` (generic install-layer change, not feature-specific).
 
 Do not depend on Docker-style `ps --filter label=` as the primary discovery mechanism ([gaps](../domain/devcontainer-apple-gaps.md)).
 
 ## Named volumes (ensure / reuse)
 
-- Before create, **ensureVolume** for each config named volume: **list first**.
+- Before create, **ensureVolume** for each config named volume: **list first**. Sources must already have `${devcontainerId}` expanded (see above) — e.g. `adev-proj-abc123def456-shellhistory`, not a literal `${…}` token.
 - If the volume already exists → status “already exists — reusing” and mount it; **never fail `up`/`clone` only because a config volume exists**.
 - If missing → create, then mount.
 - **Clone workspace volume:** if `adev-*-ws` already exists → **delete + recreate** (fresh tree), then mount as the workspace root (not a host bind).
@@ -190,7 +202,7 @@ On `up`/`clone`/`rebuild` when `features` is non-empty after resolve (and after 
 | build.rosetta | Before fetch/build: ensure Apple BuildKit `build.rosetta=false`. Already false → silent. True/missing → one-time TTY consent (or fail); CI auto-accept via `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`. Never install Rosetta; never restore `true` after consent. Config pickup uses `restartBuilderForConfig` (stop+delete only) — **not** the restore-after-build path below |
 | Fetch / load | **Local path:** validate package (`devcontainer-feature.json` + `install.sh`) and copy into feature cache. **OCI:** embedded HTTPS client (`OCIFeatureClient`) — **not** `container image pull`, ORAS, or Node |
 | Order | `dependsOn` / `installsAfter` topo-sort (id last-segment match so `./x/sample-a` satisfies `…/sample-a:1`); cycle → structured error |
-| Build | Generate Dockerfile (`RUN` each `install.sh` as root); `container build --platform` host-native (`linux/arm64` on Apple Silicon) via `AppleContainerRuntime.build`; **no** `--rosetta` unless user opted in via `runArgs`; deterministic derived tag `adev-{base}:{hash12}` (empty base → `adevcontainer:{hash12}`; no `adevcontainer/features:` prefix); reuse when tag exists. See BuildKit builder lifecycle |
+| Build | Generate Dockerfile (`FeatureDockerfileGenerator`): per feature `COPY` package then **`RUN chmod -R 0755 /tmp/adev-feature-N && … ./install.sh`** as root — ref CLI parity (`@devcontainers/cli`); recursive +x so scripts `install.sh` copies to bare-path lifecycle hooks (e.g. shell-history `oncreate.sh`, often 0644 in OCI) stay executable and avoid exit **126** Permission denied; `container build --platform` host-native (`linux/arm64` on Apple Silicon) via `AppleContainerRuntime.build`; **no** `--rosetta` unless user opted in via `runArgs`; deterministic derived tag `adev-{base}:{hash12}` (empty base → `adevcontainer:{hash12}`; no `adevcontainer/features:` prefix); hash includes **`recipeVersion`** epoch — bump on install-Dockerfile semantic changes (current `"2"` = chmod-before-install); reuse when tag exists. See BuildKit builder lifecycle |
 | Merge | Feature contributions into effective config before create (`init`, `capAdd`, mounts, lifecycle hooks; `containerEnv` **config wins**). PATH refs in env expanded on create **and** exec — see PATH expansion |
 | Create | Workspace container from **derived image** with same `--platform` |
 | Skip | Reuse-running path: no feature fetch/build |
@@ -234,7 +246,21 @@ Apple `container` does **not** expand `${PATH}` / `$PATH` in env values. Product
 
 ## Lifecycle execution (hook matrix)
 
-Hooks run via runtime **exec** into the running container (effective user + workspace folder when set). String or argv-array forms. Omitted properties are no-ops. Exec env PATH expansion applies (see PATH expansion).
+Hooks run via runtime **exec** into the running container (effective user + workspace folder when set). Omitted properties and empty `{}` maps are no-ops. Nested objects rejected. Exec env PATH expansion applies (see PATH expansion). Contract: [`specs/lifecycle-hooks.md`](../../specs/lifecycle-hooks.md).
+
+### Command forms (`LifecycleCommand`)
+
+Each hook property admits **string** | **argv `string[]`** | **object map** `name → string|argv` (Dev Containers named/parallel JSON shape).
+
+| Form | Parse / run |
+|------|-------------|
+| string | shell via `sh -lc` (same as historical `postCreateCommand`) |
+| argv array | exec argv directly |
+| object map | `LifecycleCommand.parallel([NamedLifecycleCommand…])`; empty `{}` → nil; values must be string or argv (not nested objects) |
+
+**Object-map execution (product choice):** named entries run **sequentially, sorted by name** — fail-fast on first non-zero. Not true parallel (reference `@devcontainers/cli` may run named entries concurrently). Status labels use `property (name)` (e.g. `onCreateCommand (shell-history)`).
+
+**Why it matters:** third-party Features often emit map-form hooks (e.g. `ghcr.io/stuartleeks/dev-container-features/shell-history:0` → `onCreateCommand: { "shell-history": "…" }`). Admitting only string/argv rejected those Features at resolve.
 
 | Path | Hooks / apply |
 |------|----------------|
