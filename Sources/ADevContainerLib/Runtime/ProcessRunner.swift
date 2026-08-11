@@ -410,13 +410,22 @@ public struct InteractiveProcessRunner: ProcessRunning {
 
     /// Give `pid`'s process group the controlling TTY so full-screen editors are not stopped
     /// by job control. Safe no-op when stdin is not a TTY. Always pair with `restore()`.
+    ///
+    /// On interactive TTY paths, claim failure emits a stderr warning (no silent fail-open).
+    /// After a verified claim, `SIGCONT` is sent to the **process group** (`-childPG`), not only
+    /// the leader PID — `container exec -it` helpers may share the group and stop on SIGTTIN.
     public static func makeForeground(pid: pid_t) -> ForegroundClaim? {
         #if canImport(Darwin)
         guard isatty(STDIN_FILENO) != 0 else { return nil }
         let ttyFD = STDIN_FILENO
         // Record who owned the TTY and who must own it again after the child exits.
         let previous = tcgetpgrp(ttyFD)
-        guard previous >= 0 else { return nil }
+        guard previous >= 0 else {
+            StatusPrinter.warning(
+                "interactive TTY foreground claim failed: tcgetpgrp unavailable; child may stop on SIGTTIN/SIGTTOU"
+            )
+            return nil
+        }
         let callerPGID = getpgrp()
 
         // Child may already be in its own group (Foundation default) or still joining ours.
@@ -432,16 +441,35 @@ public struct InteractiveProcessRunner: ProcessRunning {
             if refreshed > 0 { childPG = refreshed }
         }
 
+        // Claim + verify tcgetpgrp == childPG. Brief retries cover races with concurrent
+        // job-control (shell, Foundation Process setup, container exec helpers).
         var claimed = false
         ForegroundClaim.withJobControlSignalsIgnored {
-            if tcsetpgrp(ttyFD, childPG) == 0 {
-                claimed = true
+            for attempt in 0..<10 {
+                if tcsetpgrp(ttyFD, childPG) == 0, tcgetpgrp(ttyFD) == childPG {
+                    claimed = true
+                    break
+                }
+                if attempt < 9 {
+                    usleep(5_000) // 5ms
+                }
             }
         }
-        guard claimed else { return nil }
+        guard claimed else {
+            StatusPrinter.warning(
+                "failed to claim TTY foreground for interactive child (pid=\(pid) pgid=\(childPG)); child may stop on SIGTTIN/SIGTTOU and appear frozen"
+            )
+            return nil
+        }
 
-        // If the child already stopped on SIGTTIN/SIGTTOU before the claim, continue it.
-        _ = kill(pid, SIGCONT)
+        // If the child (or any sibling in its group) already stopped on SIGTTIN/SIGTTOU
+        // before the claim, continue the whole process group — leader-only SIGCONT leaves
+        // helpers stopped and interactive shells look alive but accept no keyboard input.
+        if childPG > 0 {
+            _ = kill(-childPG, SIGCONT)
+        } else {
+            _ = kill(pid, SIGCONT)
+        }
         return ForegroundClaim(previousPGID: previous, callerPGID: callerPGID, ttyFD: ttyFD)
         #else
         _ = pid

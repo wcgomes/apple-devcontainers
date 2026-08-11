@@ -96,9 +96,9 @@ Effective user for `exec`, lifecycle hooks, and VS Code attach defaults (not alw
 | 4 | Final OCI `USER` (`variants[].config.config.User` on Apple image inspect) |
 | 5 | `root` only if inspect OK and all above empty |
 
-- **Create `-u`:** only explicit local `containerUser`. Never `-u` solely for resolved `remoteUser` / metadata / OCI USER.
+- **Create `-u`:** (1) explicit local `containerUser` if set; (2) else non-root connection user; (3) else omit when root. Apple attach ignores nameConfig `remoteUser` and uses container default user — product therefore applies non-root connection user at create so the VS Code terminal matches. When both keys set: create = `containerUser`, connection = `remoteUser`.
 - **Stamp:** successful create always stamps non-empty `devcontainer.remote_user` (resolved connection user, including `root`). Empty stamp is legacy only. `exec` / `--vscode` consume it. No hardcoded `vscode`/`node`; inspect failure ≠ assume root.
-- **nameConfig** written **before** `code` launch. Detail: [cli-runtime-boundary — Connection user](conventions/cli-runtime-boundary.md#connection-user-remoteuser--containeruser). Active change: [`specs/changes/align-remote-user-resolution/`](../specs/changes/align-remote-user-resolution/).
+- **nameConfig** written **before** `code` launch (attach defaults); terminal user still depends on create `-u`, not nameConfig alone. Detail: [cli-runtime-boundary — Connection user](conventions/cli-runtime-boundary.md#connection-user-remoteuser--containeruser). Active change: [`specs/changes/align-remote-user-resolution/`](../specs/changes/align-remote-user-resolution/).
 
 ## Ports and lifecycle
 
@@ -127,7 +127,7 @@ Shipped under `Sources/ADevContainerLib/Features/`. On `up`/`clone`/`rebuild` wh
 2. One-time consent for `build.rosetta=false` when needed (CI: `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`).
 3. Load local packages or fetch OCI over HTTPS (embedded client).
 4. Order via `dependsOn` / `installsAfter`; build derived image via `container build --platform linux/arm64` — feature `install.sh` runs **as root** after `chmod -R 0755`; Dockerfile then **restores base image USER**; install env uses base USER when local config has no remote/container user (`recipeVersion` **`"3"`**). Reuse tag when unchanged. If BuildKit was stopped before the build, restore-after-build stops it again (best-effort); already-running / undetermined status → leave alone.
-5. Create from derived image; merge contributions (env **config wins**, `${PATH}` expansion on create and later exec). Create `-u` only for explicit `containerUser`.
+5. Create from derived image; merge contributions (env **config wins**, `${PATH}` expansion on create and later exec). Create `-u`: explicit `containerUser`, else non-root connection user, else omit when root.
 
 **Clone-only:** if no admitted feature id is `git` or `common-utils`, inject `ghcr.io/devcontainers/features/git:1` (Features path, not apt) so populate can run **in-container full `git clone`** and in-container git works. `up` does not inject. Host git is required only for config-only sparse/shallow fetch and HTTPS `git credential fill`.
 
@@ -179,7 +179,7 @@ code --new-window --folder-uri "vscode-remote://apple-container+${HEX}${FOLDER}"
 
 - Prefer `code --new-window --folder-uri …` so the folder is in the window. `open vscode://…` may **reuse** an existing window.
 - Extension UI command `remote-containers.attachToAppleContainer` opens the **remote authority only** (no folder) → empty/no-folder window UX gap; the `--folder-uri` recipe avoids that.
-- **nameConfig** (attach defaults): write `~/Library/Application Support/Code/User/globalStorage/ms-vscode-remote.remote-containers/nameConfigs/<containerName>.json` with `workspaceFolder` + `remoteUser` (from non-empty connection-user resolution / stamp) **before** launching `code`, so first open sees defaults. Folder path in the URI alone does not set remote user.
+- **nameConfig** (attach defaults): write `~/Library/Application Support/Code/User/globalStorage/ms-vscode-remote.remote-containers/nameConfigs/<containerName>.json` with `workspaceFolder` + `remoteUser` (from non-empty connection-user resolution / stamp) **before** launching `code`. Apple attach **ignores** nameConfig `remoteUser` for the integrated terminal (uses container default user) — create `-u` compensation covers that; nameConfig still written for other attach defaults. Folder path in the URI alone does not set remote user.
 
 Not full Dev Containers up/rebuild or IDE-owned customizations parity; volume-mode is product `clone`, not the extension’s clone-in-volume. Contract: [`specs/vscode.md`](../specs/vscode.md); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../specs/changes/archive/20260808-vscode-customizations-apply/). Gaps: [devcontainer-apple-gaps.md](domain/devcontainer-apple-gaps.md).
 

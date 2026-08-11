@@ -10,7 +10,7 @@ All host runtime interaction goes through **AppleContainerRuntime**. No other mo
 - Non-zero exit + stderr → map to structured CLI errors (command, args class, message).
 - `doctor` validates binary presence/version/runnability before `up` paths rely on it.
 - **ProcessRunner:** async-drain stdout/stderr pipes before and during `wait`, or a full pipe can deadlock the child.
-- **InteractiveProcessRunner:** after Foundation `Process` launch, put the child in the TTY foreground process group (`tcsetpgrp`) and `SIGCONT` if needed. Inherited stdio alone is insufficient — without foreground, full-screen editors (`nano`/`vi`) stop (`STAT=T`) and the parent hangs at `waitUntilExit`. Used by interactive `exec` and recovery TTY editor.
+- **InteractiveProcessRunner:** after Foundation `Process` launch, put the child in the TTY foreground process group (`tcsetpgrp`), **verify** `tcgetpgrp == childPG` (short retry), and `SIGCONT` the **process group** (`kill(-pg, SIGCONT)`), not only the leader PID. Inherited stdio alone is insufficient — without a verified foreground claim, full-screen editors (`nano`/`vi`) and `container exec -it` helpers stop on SIGTTIN (`STAT=T`); leader-only continue leaves siblings stopped so the shell looks correct but accepts no keyboard. Claim failure on an interactive TTY path emits a stderr warning (no silent fail-open). Used by interactive `exec` and recovery TTY editor.
 
 ## Apple container machine JSON (list/inspect; tested 1.2.x)
 
@@ -106,11 +106,17 @@ Precedence for the **effective connection user** (exec, lifecycle, VS Code attac
 4. Final image OCI `USER` (`variants[].config.config.User`)
 5. `root` only when all of the above are empty **and** inspect succeeded with empty USER
 
-**Create `-u`:** pass `container create -u` **only** for an explicit local config `containerUser`. Do **not** pass `-u` for resolved `remoteUser`, metadata-only users, or OCI USER — those affect connection/exec identity, not create process user override.
+**Create `-u`** (first match wins):
+
+1. Explicit local config `containerUser` (non-empty) → `-u <containerUser>`
+2. Else resolved connection user non-empty and **not** `root` → `-u <connectionUser>` (covers local `remoteUser`, metadata, OCI USER)
+3. Else **omit** `-u` (connection user is `root` or empty; image default applies)
+
+**Why:** Apple Remote Containers attach does **not** pass exec `-u` and does **not** honor nameConfig `remoteUser` for the integrated terminal — the terminal uses the container default (create) user. Applying non-root connection user at create keeps VS Code terminal aligned with `remoteUser` / metadata `vscode` without requiring local `containerUser`. When both keys are set, create is still `containerUser` and connection remains `remoteUser`.
 
 **Stamp:** every successful create stamps non-empty `devcontainer.remote_user` to the resolved connection user (including literal `root`). Empty stamp is **legacy only** (pre-change containers); new creates never stamp empty. `exec` and `--vscode` (settings path, nameConfig `remoteUser`) read this stamp — non-empty → use it; empty legacy → omit exec `-u` / runtime default (no fabricated `vscode`/`node`).
 
-**nameConfig:** write `…/nameConfigs/<containerName>.json` (`workspaceFolder` + `remoteUser`) **before** launching `code` so attach picks up defaults on first open.
+**nameConfig:** write `…/nameConfigs/<containerName>.json` (`workspaceFolder` + `remoteUser`) **before** launching `code`. Still write it for attach defaults, but **do not rely on it for terminal user** — Apple attach ignores nameConfig `remoteUser` for the shell; create `-u` is the compensation.
 
 Active change (not archived): [`specs/changes/align-remote-user-resolution/`](../../specs/changes/align-remote-user-resolution/).
 
@@ -239,7 +245,7 @@ On `up`/`clone`/`rebuild` when `features` is non-empty after resolve (and after 
 | Order | `dependsOn` / `installsAfter` topo-sort (id last-segment match so `./x/sample-a` satisfies `…/sample-a:1`); cycle → structured error |
 | Build | Generate Dockerfile (`FeatureDockerfileGenerator`): per feature `COPY` package then **`RUN chmod -R 0755 /tmp/adev-feature-N && … ./install.sh` as root**; after all features, **restore base image OCI `USER`** so derived image default user matches base (ref CLI parity). Install-layer env: when local config has no `remoteUser`/`containerUser`, pass base-image USER into feature install env (not a hardcoded `vscode`/`node`). Recursive +x avoids exit **126** on bare-path lifecycle hooks copied 0644 from OCI. `container build --platform` host-native (`linux/arm64` on Apple Silicon) via `AppleContainerRuntime.build`; **no** `--rosetta` unless user opted in via `runArgs`; deterministic derived tag `adev-{base}:{hash12}` (empty base → `adevcontainer:{hash12}`; no `adevcontainer/features:` prefix); hash includes **`recipeVersion`** epoch — current **`"3"`** (chmod-before-install + root-install then restore USER); reuse when tag exists. See BuildKit builder lifecycle |
 | Merge | Feature contributions into effective config before create (`init`, `capAdd`, mounts, lifecycle hooks; `containerEnv` **config wins**). PATH refs in env expanded on create **and** exec — see PATH expansion |
-| Create | Workspace container from **derived image** with same `--platform`. Create `-u` only for explicit local `containerUser` — see [Connection user](#connection-user-remoteuser--containeruser) |
+| Create | Workspace container from **derived image** with same `--platform`. Create `-u`: explicit `containerUser`, else non-root connection user, else omit when root — see [Connection user](#connection-user-remoteuser--containeruser) |
 | Skip | Reuse-running path: no feature fetch/build |
 
 ### BuildKit builder lifecycle (Features image build)

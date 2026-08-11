@@ -17,7 +17,7 @@ The product MUST resolve a **remote connection user** for every managed create p
 5. Else the **final OCI image `USER`** of the image that will run the workspace container (config base image when Features are absent; **derived** image when Features produce one), obtained from runtime image inspect
 6. Else the literal `root`
 
-Local config wins when set: steps 1–2 always beat metadata. Metadata does **not** force create `-u` (create process user remains local `containerUser` only).
+Local config wins when set: steps 1–2 always beat metadata. Create process user follows **Create process user** below (explicit `containerUser`, else non-root connection user — so metadata `remoteUser` such as `vscode` becomes create `-u` when local `containerUser` is unset).
 
 **Image metadata users (MUST):**
 
@@ -39,7 +39,7 @@ Local config wins when set: steps 1–2 always beat metadata. Metadata does **no
 
 **Create vs connection (MUST):**
 
-- Remote connection user resolution MUST NOT force create `-u` by itself. Create process user is governed solely by **Create process user (`containerUser` only)** below.
+- Create process user is governed by **Create process user** below. Connection user still drives labels/exec/nameConfig/VS Code; when both keys are set, create uses `containerUser` and connection uses `remoteUser`.
 
 #### Scenario: remoteUser wins over containerUser and OCI USER
 
@@ -84,7 +84,7 @@ Local config wins when set: steps 1–2 always beat metadata. Metadata does **no
 - Given a config with neither `remoteUser` nor `containerUser` set, image OCI `USER` `root`, and image `devcontainer.metadata` `{"remoteUser":"vscode"}`
 - When remote connection user is resolved on create
 - Then the resolved remote connection user is `vscode`
-- And create MUST omit `-u` (no local `containerUser`)
+- And create MUST include `-u` `vscode` (non-root connection user; Apple attach uses container default user)
 
 #### Scenario: local config wins over metadata remoteUser
 
@@ -100,33 +100,52 @@ Local config wins when set: steps 1–2 always beat metadata. Metadata does **no
 
 ---
 
-### Requirement: Create process user (`containerUser` only)
+### Requirement: Create process user
 
-On managed create (`up`, `clone`, `rebuild`), the product MUST pass create `-u` **if and only if** config `containerUser` is non-empty after trim.
+On managed create (`up`, `clone`, `rebuild`), the product MUST set create `-u` as follows (first match wins):
 
-- When `containerUser` is set and non-empty, create MUST include `-u <containerUser>` (post-substitution value).
-- When `containerUser` is omitted or empty, create MUST **omit** `-u`, even if `remoteUser` is set and even if the resolved remote connection user is non-empty.
-- `remoteUser` alone MUST NOT cause create `-u`.
+1. When config `containerUser` is non-empty after trim → create MUST include `-u <containerUser>` (post-substitution value).
+2. Else when the **resolved remote connection user** is non-empty after trim and is **not** the literal `root` → create MUST include `-u <connectionUser>`.
+3. Else create MUST **omit** `-u` (connection user is `root` or empty; image default applies).
 
-#### Scenario: create -u only for explicit containerUser
+Rationale (Apple-first): Apple Remote Containers attach does **not** pass exec `-u`; the integrated terminal uses the container’s default (create) user. nameConfig `remoteUser` alone does not change the terminal user. Applying the non-root connection user at create keeps VS Code terminal aligned with `remoteUser` / metadata `vscode` without requiring local `containerUser`.
+
+Connection/exec/nameConfig/VS Code consumers continue to use the connection-user chain unchanged. When `remoteUser` is `alice` and `containerUser` is `bob`, create is still `-u bob` and connection remains `alice`.
+
+#### Scenario: create -u from remoteUser when containerUser unset
 
 - Given a config with `remoteUser` `alice` and no `containerUser`
 - When create argv is built
-- Then create MUST NOT include `-u`
-- And the stamped remote connection user for labels/exec remains `alice` (or further chain if `alice` were empty — here `alice`)
+- Then create MUST include `-u` `alice`
+- And the stamped remote connection user for labels/exec remains `alice`
 
 #### Scenario: create -u when containerUser set
 
 - Given a config with `containerUser` `bob` (with or without `remoteUser`)
 - When create argv is built
 - Then create MUST include `-u` `bob`
+- And when `remoteUser` is also `alice`, connection/stamp/exec remain `alice`
 
-#### Scenario: both unset omits create -u
+#### Scenario: non-root OCI connection user sets create -u
 
 - Given a config with neither `remoteUser` nor `containerUser` set and OCI `USER` `node`
 - When create argv is built
-- Then create MUST omit `-u` (image default applies)
+- Then create MUST include `-u` `node`
 - And `devcontainer.remote_user` is stamped `node`
+
+#### Scenario: connection root omits create -u
+
+- Given neither config user set and successful empty OCI USER (connection resolves to `root`)
+- When create argv is built
+- Then create MUST omit `-u`
+- And `devcontainer.remote_user` is stamped `root`
+
+#### Scenario: metadata vscode sets create -u (Apple terminal)
+
+- Given neither local user key set, OCI `USER` `root`, metadata `remoteUser` `vscode`
+- When create argv is built
+- Then create MUST include `-u` `vscode`
+- And connection/stamp/nameConfig remain `vscode`
 
 ---
 
@@ -226,8 +245,8 @@ Greenfield: existing containers with empty labels are out of scope for automatic
 
 **Modify** the env & user property intent and the **Env user folder** scenario so process user and connection user are not collapsed:
 
-- `remoteUser` — remote connection / exec / attach user when set (feeds resolution chain).
-- `containerUser` — container create process user when set (alone drives create `-u`).
+- `remoteUser` — remote connection / exec / attach user when set (feeds resolution chain; also create `-u` when `containerUser` unset and value is non-root).
+- `containerUser` — explicit container create process user when set (wins create `-u` over connection user).
 - When both are set, create process user is `containerUser` and remote connection user is `remoteUser`.
 - When only one is set, that value participates in the chain per **Remote connection user resolution** and **Create process user**.
 
@@ -237,11 +256,11 @@ Greenfield: existing containers with empty labels are out of scope for automatic
 - When `up` succeeds
 - Then container env includes configured `containerEnv`, create uses `-u vscode`, default cwd is `workspaceFolder`, and stamped `devcontainer.remote_user` / success-JSON `remoteUser` are `vscode`
 
-#### Scenario: remoteUser without containerUser does not set create -u
+#### Scenario: remoteUser without containerUser sets create -u
 
 - Given a config with only `remoteUser` `alice` (no `containerUser`)
 - When `up` succeeds
-- Then create omits `-u`, `devcontainer.remote_user` is `alice`, and `exec` runs as `alice`
+- Then create includes `-u` `alice`, `devcontainer.remote_user` is `alice`, and `exec` runs as `alice`
 
 ---
 

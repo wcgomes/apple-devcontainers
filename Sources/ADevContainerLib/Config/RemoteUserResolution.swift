@@ -10,8 +10,8 @@ import Foundation
 /// 5. final OCI image `USER` (from successful image inspect)
 /// 6. literal `root`
 ///
-/// Local config wins when set (steps 1–2 before metadata). Create `-u` still uses only local
-/// `containerUser` — metadata does not force create process user.
+/// Local config wins when set (steps 1–2 before metadata).
+/// Create `-u` uses explicit `containerUser`, else non-root connection user (Apple attach has no exec `-u`).
 /// Inspect failure while config+metadata users are empty MUST throw — never invent `root` from failure.
 /// No hardcoded editor usernames (`vscode`, etc.).
 public enum RemoteUserResolution {
@@ -25,6 +25,24 @@ public enum RemoteUserResolution {
     /// Config-only tiers (steps 1–2). Nil when both unset/empty.
     public static func fromConfig(remoteUser: String?, containerUser: String?) -> String? {
         nonEmptyTrimmed(remoteUser) ?? nonEmptyTrimmed(containerUser)
+    }
+
+    /// Create process user for `container create -u`.
+    ///
+    /// 1. Explicit non-empty local `containerUser` when set
+    /// 2. Else resolved connection user when non-empty and not `root`
+    /// 3. Else omit (`nil`) — image default applies (typical when connection is `root`)
+    ///
+    /// Apple Remote Containers attach does not pass exec `-u`; the terminal uses the container
+    /// default user. Applying non-root connection user at create keeps VS Code terminal aligned.
+    public static func createProcessUser(containerUser: String?, connectionUser: String?) -> String? {
+        if let cu = nonEmptyTrimmed(containerUser) {
+            return cu
+        }
+        if let conn = nonEmptyTrimmed(connectionUser), conn != "root" {
+            return conn
+        }
+        return nil
     }
 
     /// Full connection-user resolution.
@@ -99,7 +117,7 @@ public enum RemoteUserResolution {
     }
 
     /// Apply resolved connection user onto config so lifecycle / VS Code consumers see it via
-    /// `connectionUser` / `effectiveUser`, without changing `containerUser` (create `-u`).
+    /// `connectionUser` / `effectiveUser`, without changing `containerUser` (explicit create `-u` wins).
     public static func applyingConnectionUser(
         _ connectionUser: String,
         to config: ResolvedDevContainerConfig

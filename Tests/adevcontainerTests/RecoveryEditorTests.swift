@@ -251,6 +251,22 @@ nonisolated(unsafe) let recoveryEditorTests: [(String, () throws -> Void)] = [
         )
     }),
 
+    ("interactiveRunnerPTYChildReceivesStdinBytes", {
+        // Freeze regression: shell can look correct (right user) but accept no keyboard when
+        // helpers stay SIGTTIN-stopped. Sleep-only probes miss that — child must read stdin.
+        // Launcher uses python pty.fork, writes ADEV_STDIN_OK to the master after claim.
+        let probe = InteractiveTTYRestoreProbe.launchStdinProbeUnderPTY()
+        try MiniTest.expectEqual(
+            probe.exitCode,
+            0,
+            "PTY stdin probe failed (exit \(probe.exitCode)): \(probe.detail)"
+        )
+        try MiniTest.expect(
+            probe.detail.contains("STDIN_OK"),
+            "probe must confirm child received stdin bytes: \(probe.detail)"
+        )
+    }),
+
     ("foregroundClaimRestoreDoesNotLeaveSIGTTOUIgnored", {
         // Scoped ignore only — permanent SIG_IGN would hide later job-control bugs.
         #if canImport(Darwin)

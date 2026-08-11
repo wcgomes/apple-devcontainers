@@ -213,13 +213,19 @@ public struct ResolvedDevContainerConfig: Equatable {
         RemoteUserResolution.fromConfig(remoteUser: remoteUser, containerUser: containerUser)
     }
 
-    /// Create process user: non-empty `containerUser` only (drives create `-u`).
+    /// Create process user for `container create -u`.
+    /// Explicit `containerUser` wins; else non-root connection user (`remoteUser` after resolution stamp).
+    /// See `RemoteUserResolution.createProcessUser`.
     public var createProcessUser: String? {
-        RemoteUserResolution.nonEmptyTrimmed(containerUser)
+        RemoteUserResolution.createProcessUser(
+            containerUser: containerUser,
+            connectionUser: remoteUser ?? connectionUserFromConfig
+        )
     }
 
     /// Connection-oriented user from config (`remoteUser` > `containerUser`).
-    /// Prefer this (or a fully resolved stamp) for exec/hooks/VS Code — never for create `-u`.
+    /// Prefer this (or a fully resolved stamp) for exec/hooks/VS Code.
+    /// Create `-u` uses `createProcessUser` (explicit containerUser, else non-root connection).
     public var effectiveUser: String? {
         connectionUserFromConfig
     }

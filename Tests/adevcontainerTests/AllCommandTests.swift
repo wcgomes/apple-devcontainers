@@ -83,7 +83,7 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(obj["remoteUser"] as? String, "root")
         try MiniTest.expect(obj["remoteWorkspaceFolder"] != nil)
         let createArgs = mock.calls.first { $0.arguments.first == "create" }!.arguments
-        try MiniTest.expect(!createArgs.contains("-u"), "no containerUser → omit create -u")
+        try MiniTest.expect(!createArgs.contains("-u"), "connection root → omit create -u")
         try MiniTest.expect(createArgs.contains("devcontainer.remote_user=root"))
     }),
     ("upReusesRunning", {
@@ -765,7 +765,8 @@ nonisolated(unsafe) let phase1Tests: [(String, () throws -> Void)] = [
         try MiniTest.expect(args.contains(resolved.config.workspaceFolder))
         try MiniTest.expectEqual(resolved.labels[ContainerIdentity.labelRemoteUser], "vscode")
     }),
-    ("remoteUserWithoutContainerUserOmitsCreateU", {
+    ("remoteUserWithoutContainerUserSetsCreateU", {
+        // Apple attach uses container default user; non-root connection becomes create -u.
         let config = ResolvedDevContainerConfig(
             image: "alpine:3.20",
             remoteUser: "alice",
@@ -784,8 +785,42 @@ nonisolated(unsafe) let phase1Tests: [(String, () throws -> Void)] = [
             configHash: "h",
             workspacePath: "/ws"
         )
-        try MiniTest.expect(request.user == nil)
-        try MiniTest.expect(!request.createArguments().contains("-u"))
+        try MiniTest.expectEqual(request.user, "alice")
+        let args = request.createArguments()
+        try MiniTest.expect(args.contains("-u"))
+        if let i = args.firstIndex(of: "-u") {
+            try MiniTest.expectEqual(args[i + 1], "alice")
+        }
+        try MiniTest.expectEqual(
+            request.labels[ContainerIdentity.labelRemoteUser],
+            "alice"
+        )
+    }),
+    ("remoteUserAndContainerUserCreateUIsContainerUser", {
+        let config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            remoteUser: "alice",
+            containerUser: "bob",
+            workspaceFolder: "/workspaces/app"
+        )
+        let request = CreateRequest.from(
+            resolved: config,
+            identityName: "ctr",
+            labels: ContainerIdentity.bindModeLabels(
+                workspacePath: "/ws",
+                configPath: "/ws/.devcontainer/devcontainer.json",
+                configHash: "h",
+                workspaceFolder: config.workspaceFolder,
+                remoteUser: "alice"
+            ),
+            configHash: "h",
+            workspacePath: "/ws"
+        )
+        try MiniTest.expectEqual(request.user, "bob")
+        let args = request.createArguments()
+        if let i = args.firstIndex(of: "-u") {
+            try MiniTest.expectEqual(args[i + 1], "bob")
+        }
         try MiniTest.expectEqual(
             request.labels[ContainerIdentity.labelRemoteUser],
             "alice"
@@ -829,11 +864,16 @@ nonisolated(unsafe) let phase1Tests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expectEqual(result.remoteUser, "node")
         let createArgs = mock.calls.first { $0.arguments.first == "create" }!.arguments
-        try MiniTest.expect(!createArgs.contains("-u"))
+        // Non-root OCI connection user applied as create -u (Apple attach default user).
+        try MiniTest.expect(createArgs.contains("-u"))
+        if let i = createArgs.firstIndex(of: "-u") {
+            try MiniTest.expectEqual(createArgs[i + 1], "node")
+        }
         try MiniTest.expect(createArgs.contains("devcontainer.remote_user=node"))
     }),
     ("upCreateStampsMetadataRemoteUserOverOCIRoot", {
         // Official base image pattern: OCI USER=root + metadata remoteUser=vscode
+        // Create must -u vscode so Apple attach terminal is not root.
         let workspace = try TestRepo.makeTempWorkspace(configJSON: """
         { "image": "mcr.microsoft.com/devcontainers/base:ubuntu" }
         """)
@@ -874,7 +914,10 @@ nonisolated(unsafe) let phase1Tests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expectEqual(result.remoteUser, "vscode")
         let createArgs = mock.calls.first { $0.arguments.first == "create" }!.arguments
-        try MiniTest.expect(!createArgs.contains("-u"), "metadata remoteUser must not force create -u")
+        try MiniTest.expect(createArgs.contains("-u"), "metadata vscode → create -u for Apple attach")
+        if let i = createArgs.firstIndex(of: "-u") {
+            try MiniTest.expectEqual(createArgs[i + 1], "vscode")
+        }
         try MiniTest.expect(createArgs.contains("devcontainer.remote_user=vscode"))
     }),
     ("upCreateFailsWhenInspectFailsAndNoConfigUsers", {

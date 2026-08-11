@@ -30,7 +30,7 @@ This change **separates** container process user (create) from **remote connecti
 Lite SDD: this proposal + outcome delta `spec.md` + dependency-ordered `tasks.md` (no `design.md`).
 
 1. Resolve **remote connection user** with precedence `remoteUser` → `containerUser` → final OCI image `USER` (from image inspect) → `root`. Treat inspect **failure** as failure to resolve that tier — **not** as “USER is root”.
-2. Pass create `-u` **only** when config sets a non-empty explicit `containerUser`; otherwise omit `-u` so the image default user applies.
+2. Pass create `-u` when config sets a non-empty explicit `containerUser`; else when the resolved connection user is non-empty and not `root` (Apple attach uses container default user — no exec `-u`); else omit `-u`.
 3. Stamp `devcontainer.remote_user` with the **resolved non-empty** remote connection user on every managed create (`up` / `clone` / `rebuild`).
 4. Drive `exec`, lifecycle hooks, VS Code open/nameConfig/customizations/postAttach, and success-JSON `remoteUser` from that resolved connection user (stamped label on reuse/`exec`/`start` paths).
 5. Features Dockerfile: install layers as root; after all features, restore the base image’s final `USER` (from inspect). Bump Features `recipeVersion` when install-Dockerfile semantics change.

@@ -92,6 +92,8 @@ adevcontainer up --vscode
 
 The CLI opens the remote workspace and applies supported VS Code settings and extensions from `devcontainer.json`.
 
+Apple Remote Containers attach uses the container’s default user (it does not pass exec `-u`). On create, `adevcontainer` therefore applies a non-root connection user as create `-u` when `containerUser` is unset (for example metadata `remoteUser: vscode`), so the integrated terminal matches the intended remote user. Explicit `containerUser` still wins create `-u` when set; `remoteUser` remains the connection/exec/nameConfig user.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for prerequisites, source builds, tests, fixtures, and the repository development workflow.

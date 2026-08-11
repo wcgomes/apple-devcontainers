@@ -246,7 +246,7 @@ public struct CreateRequest: Equatable, Sendable {
             workspaceBindTarget: expanded.workspaceFolder,
             workspaceMountMode: .bind,
             env: expanded.containerEnv,
-            // Create `-u` only for explicit non-empty containerUser (not remoteUser / connection user).
+            // Create `-u`: explicit containerUser, else non-root connection user (Apple attach default).
             user: expanded.createProcessUser,
             workdir: expanded.workspaceFolder,
             mounts: expanded.mounts,
@@ -287,7 +287,7 @@ public struct CreateRequest: Equatable, Sendable {
             workspaceBindTarget: expanded.workspaceFolder,
             workspaceMountMode: .volume,
             env: expanded.containerEnv,
-            // Create `-u` only for explicit non-empty containerUser (not remoteUser / connection user).
+            // Create `-u`: explicit containerUser, else non-root connection user (Apple attach default).
             user: expanded.createProcessUser,
             workdir: expanded.workspaceFolder,
             mounts: expanded.mounts,

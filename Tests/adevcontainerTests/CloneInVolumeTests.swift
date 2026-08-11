@@ -985,7 +985,10 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
             a == "-l" && i + 1 < createCall.arguments.count ? createCall.arguments[i + 1] : nil
         }
         try MiniTest.expect(labelVals.contains { $0 == "devcontainer.remote_user=alice" })
-        try MiniTest.expect(!createCall.arguments.contains("-u"), "remoteUser alone must not set create -u")
+        try MiniTest.expect(createCall.arguments.contains("-u"), "non-root remoteUser → create -u (Apple attach)")
+        if let i = createCall.arguments.firstIndex(of: "-u") {
+            try MiniTest.expectEqual(createCall.arguments[i + 1], "alice")
+        }
     }),
     ("cloneSSHInjectsCreateSSHFlag", {
         let restore = CloneGitFeatureTestSupport.installOverrides()

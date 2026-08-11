@@ -82,7 +82,7 @@ nonisolated(unsafe) let remoteUserResolutionTests: [(String, () throws -> Void)]
         )
         try MiniTest.expectEqual(resolved, "alice")
     }),
-    ("createProcessUserOnlyContainerUser", {
+    ("createProcessUserExplicitContainerUserWins", {
         let both = ResolvedDevContainerConfig(
             image: "alpine:3.20",
             remoteUser: "alice",
@@ -96,16 +96,38 @@ nonisolated(unsafe) let remoteUserResolutionTests: [(String, () throws -> Void)]
             remoteUser: "alice",
             workspaceFolder: "/ws"
         )
-        try MiniTest.expect(remoteOnly.createProcessUser == nil)
+        // Non-root connection user becomes create -u when containerUser unset (Apple attach).
+        try MiniTest.expectEqual(remoteOnly.createProcessUser, "alice")
         try MiniTest.expectEqual(remoteOnly.connectionUserFromConfig, "alice")
+        let rootConn = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            remoteUser: "root",
+            workspaceFolder: "/ws"
+        )
+        try MiniTest.expect(rootConn.createProcessUser == nil)
         let neither = ResolvedDevContainerConfig(
             image: "alpine:3.20",
             workspaceFolder: "/ws"
         )
         try MiniTest.expect(neither.createProcessUser == nil)
         try MiniTest.expect(neither.connectionUserFromConfig == nil)
+        // Pure helper
+        try MiniTest.expectEqual(
+            RemoteUserResolution.createProcessUser(containerUser: "bob", connectionUser: "alice"),
+            "bob"
+        )
+        try MiniTest.expectEqual(
+            RemoteUserResolution.createProcessUser(containerUser: nil, connectionUser: "vscode"),
+            "vscode"
+        )
+        try MiniTest.expect(
+            RemoteUserResolution.createProcessUser(containerUser: nil, connectionUser: "root") == nil
+        )
+        try MiniTest.expect(
+            RemoteUserResolution.createProcessUser(containerUser: nil, connectionUser: nil) == nil
+        )
     }),
-    ("createRequestUserOnlyFromContainerUser", {
+    ("createRequestUserFromContainerUserOrNonRootConnection", {
         let remoteOnly = ResolvedDevContainerConfig(
             image: "alpine:3.20",
             remoteUser: "alice",
@@ -118,8 +140,12 @@ nonisolated(unsafe) let remoteUserResolutionTests: [(String, () throws -> Void)]
             configHash: "h",
             workspacePath: "/ws"
         )
-        try MiniTest.expect(req1.user == nil)
-        try MiniTest.expect(!req1.createArguments().contains("-u"))
+        try MiniTest.expectEqual(req1.user, "alice")
+        let args1 = req1.createArguments()
+        try MiniTest.expect(args1.contains("-u"))
+        if let i = args1.firstIndex(of: "-u") {
+            try MiniTest.expectEqual(args1[i + 1], "alice")
+        }
 
         let containerOnly = ResolvedDevContainerConfig(
             image: "alpine:3.20",
@@ -166,7 +192,22 @@ nonisolated(unsafe) let remoteUserResolutionTests: [(String, () throws -> Void)]
             configHash: "h",
             workspaceVolumeName: "vol"
         )
-        try MiniTest.expect(vol.user == nil)
+        try MiniTest.expectEqual(vol.user, "alice")
+
+        let rootOnly = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            remoteUser: "root",
+            workspaceFolder: "/workspaces/app"
+        )
+        let reqRoot = CreateRequest.from(
+            resolved: rootOnly,
+            identityName: "ctr",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        )
+        try MiniTest.expect(reqRoot.user == nil)
+        try MiniTest.expect(!reqRoot.createArguments().contains("-u"))
     }),
     ("lifecycleUsesConnectionUserNotContainerUser", {
         let mock = MockProcessRunner()
@@ -274,7 +315,8 @@ nonisolated(unsafe) let remoteUserResolutionTests: [(String, () throws -> Void)]
         try MiniTest.expectEqual(neitherLocal, "meta-c")
     }),
     ("officialBaseImageMetadataRemoteUserPattern", {
-        // OCI USER=root + metadata remoteUser=vscode → connection vscode; create omits -u
+        // OCI USER=root + metadata remoteUser=vscode → connection vscode; create -u vscode
+        // (Apple attach uses container default user — no exec -u)
         let connection = try RemoteUserResolution.resolve(
             remoteUser: nil,
             containerUser: nil,
@@ -283,11 +325,12 @@ nonisolated(unsafe) let remoteUserResolutionTests: [(String, () throws -> Void)]
             ociUserProvider: { "root" }
         )
         try MiniTest.expectEqual(connection, "vscode")
-        let config = ResolvedDevContainerConfig(
+        var config = ResolvedDevContainerConfig(
             image: "mcr.microsoft.com/devcontainers/base:ubuntu",
             workspaceFolder: "/workspaces/app"
         )
-        try MiniTest.expect(config.createProcessUser == nil)
+        config = RemoteUserResolution.applyingConnectionUser(connection, to: config)
+        try MiniTest.expectEqual(config.createProcessUser, "vscode")
         let req = CreateRequest.from(
             resolved: config,
             identityName: "ctr",
@@ -295,8 +338,12 @@ nonisolated(unsafe) let remoteUserResolutionTests: [(String, () throws -> Void)]
             configHash: "h",
             workspacePath: "/ws"
         )
-        try MiniTest.expect(req.user == nil)
-        try MiniTest.expect(!req.createArguments().contains("-u"))
+        try MiniTest.expectEqual(req.user, "vscode")
+        let args = req.createArguments()
+        try MiniTest.expect(args.contains("-u"))
+        if let i = args.firstIndex(of: "-u") {
+            try MiniTest.expectEqual(args[i + 1], "vscode")
+        }
         try MiniTest.expectEqual(req.labels[ContainerIdentity.labelRemoteUser], "vscode")
     })
 ]

@@ -42,17 +42,18 @@ Assume Swift 6.x / SPM already available. Test-first: write failing tests before
 
 ---
 
-## 3. Create `-u` only for explicit `containerUser`
+## 3. Create `-u` — explicit `containerUser`, else non-root connection user
 
-- [x] 3.1 Write failing tests: `CreateRequest.from` / `fromVolumeMode` set `user` **only** from non-empty `containerUser`; `remoteUser`-only → `user == nil` / no `-u` in `toCreateArgv`; both set → `-u` is `containerUser` (path: `Tests/adevcontainerTests/AllUnitTests.swift`)
-- [x] 3.2 Implement create user wiring (stop passing connection-user / old `effectiveUser` into `CreateRequest.user`) (path: `Sources/ADevContainerLib/Runtime/CreateRequest.swift`)
-- [x] 3.3 Fix command tests that assumed create `-u` from `remoteUser` alone (path: `Tests/adevcontainerTests/AllCommandTests.swift`, `Tests/adevcontainerTests/CloneInVolumeTests.swift`, `Tests/adevcontainerTests/RebuildCommandPhaseTests.swift` as needed)
+- [x] 3.1 Write tests: `CreateRequest.from` / `fromVolumeMode` set `user` from non-empty `containerUser`, else non-root connection user; both set → `-u` is `containerUser`; connection `root` → omit (path: `Tests/adevcontainerTests/RemoteUserResolutionTests.swift`, `AllCommandTests.swift`)
+- [x] 3.2 Implement create user wiring via `RemoteUserResolution.createProcessUser` (path: `Sources/ADevContainerLib/Config/RemoteUserResolution.swift`, `DevContainerConfig.swift`, `CreateRequest.swift`)
+- [x] 3.3 Fix command tests for Apple-attach create policy (path: `Tests/adevcontainerTests/AllCommandTests.swift`, `CloneInVolumeTests.swift` as needed)
 
 ## Checkpoint — create user
 
-- [x] verify **create -u only for explicit containerUser**
-- [x] verify **create -u when containerUser set**
-- [x] verify **both unset omits create -u**
+- [x] verify **create -u from remoteUser when containerUser unset**
+- [x] verify **create -u when containerUser set** (connection still remoteUser when both set)
+- [x] verify **connection root omits create -u**
+- [x] verify **metadata vscode sets create -u (Apple terminal)**
 
 ---
 
@@ -90,7 +91,7 @@ Assume Swift 6.x / SPM already available. Test-first: write failing tests before
 - [x] verify **nameConfig remoteUser matches stamp not hardcoded**
 - [x] verify **postAttach runs as remote connection user not containerUser**
 - [x] verify **settings apply under remote connection user home**
-- [x] verify **remoteUser without containerUser does not set create -u**
+- [x] verify **remoteUser without containerUser sets create -u**
 
 ---
 
@@ -128,12 +129,12 @@ Assume Swift 6.x / SPM already available. Test-first: write failing tests before
 
 ## 8. Docs note (product-facing, optional in this change)
 
-- [x] 8.1 [P] README / help: brief note that `remoteUser` is connection/exec/attach, `containerUser` alone sets create `-u`, and omitted users fall back to image USER then `root` (path: `README.md`, `Sources/ADevContainerLib/Support/CommandSurface.swift` if help mentions users)
+- [x] 8.1 [P] README: brief note that Apple attach uses container default user, so create applies non-root connection user when `containerUser` unset; `containerUser` still wins create `-u` when set (path: `README.md`)
 - [x] 8.2 Domain fold + archive are **out of this task set** (implementer lands contract after code; coordinator archives). Do not move this folder to `specs/changes/archive/` here.
 
 ## Checkpoint — docs
 
-- [x] verify README does not claim create `-u` from `remoteUser` alone
+- [x] verify README notes Apple attach / create non-root connection user
 - [x] verify no wiki edits required for this Lite change
 
 ---
@@ -152,5 +153,23 @@ Assume Swift 6.x / SPM already available. Test-first: write failing tests before
 - [x] verify **local config wins over metadata remoteUser**
 - [x] verify **Features install env uses base USER when config users empty**
 - [x] verify default suite green
+
+---
+
+## 10. Apple attach: create `-u` from non-root connection user
+
+Root cause: Apple Remote Containers attach never passes exec `-u`; terminal uses container default user. nameConfig `remoteUser` is ignored for the terminal. Prior policy omitted create `-u` unless local `containerUser` was set, so official images (OCI root + metadata `vscode`) left init/terminal as root.
+
+- [x] 10.1 Evolve create policy: explicit `containerUser` → else non-root connection user → else omit (path: `RemoteUserResolution.swift`, `DevContainerConfig.swift`, `CreateRequest.swift`)
+- [x] 10.2 Update unit/command/clone tests; keep connection/exec/nameConfig chain unchanged (path: `RemoteUserResolutionTests.swift`, `AllCommandTests.swift`, `CloneInVolumeTests.swift`)
+- [x] 10.3 Evolve change `spec.md` / proposal create wording; README Apple-attach note
+- [x] 10.4 Run `swift run adevcontainerTests`
+
+## Checkpoint — Apple attach create user
+
+- [x] verify remoteUser=alice + containerUser=bob → create `-u bob`, connection alice
+- [x] verify only remoteUser/metadata vscode → create `-u vscode`
+- [x] verify connection root → omit create `-u`
+- [x] verify suite green
 
 (End of file)
