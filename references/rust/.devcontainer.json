@@ -1,0 +1,17 @@
+{
+  "name": "reference-rust",
+  "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "postCreateCommand": "rustc --version && cargo --version",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml"
+      ],
+      "settings": {
+        "rust-analyzer.check.command": "clippy"
+      }
+    }
+  }
+}

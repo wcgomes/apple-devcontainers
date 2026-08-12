@@ -1,0 +1,19 @@
+{
+  "name": "reference-typescript",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:1-22-bookworm",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "postCreateCommand": "node --version && npm --version",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "yoavbls.pretty-ts-errors"
+      ],
+      "settings": {
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "editor.formatOnSave": true
+      }
+    }
+  }
+}
