@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Volume-mode workspaces via `adevcontainer clone`: host git prerequisite, config-only fetch, volume-mode identity and labels, in-container full clone populate (SSH/HTTPS auth), hooks and temp cleanup, success JSON, git Feature auto-inject, and host-resolved git author identity. Does not replace bind-mode `up`.
+Volume-mode workspaces via `adevcontainer clone`: host git prerequisite, config-only fetch, volume-mode identity and labels, in-container full clone populate (SSH/HTTPS auth), hooks and temp cleanup, success presentation (human digest default; JSON with `--json`), git Feature auto-inject, and host-resolved git author identity. Does not replace bind-mode `up`.
 
 ## Requirements
 
@@ -24,10 +24,11 @@ The CLI MUST provide `adevcontainer clone <git-url>` where `<git-url>` is a sing
 **v1 argument surface:**
 
 - MUST accept exactly the git URL positional.
+- MAY accept `--json`, `--skip-pull`, and `--vscode` (same semantics as `up` where applicable).
 - MUST NOT accept `--branch`, `--depth`, submodule flags, or PAT/token flags as product options.
 - Unknown flags MUST fail closed with a structured error.
 
-Success MUST emit machine-readable JSON on stdout (progress on stderr per existing StatusPrinter rules). Failure MUST be structured (non-zero exit; JSON error shape consistent with other commands when `--json` / machine mode applies per product norms).
+Success presentation matches `up`/`rebuild`: human key/value digest on stdout by default; machine-readable JSON on stdout only with `--json` (progress on stderr per existing StatusPrinter rules). Failure MUST be structured (non-zero exit; JSON error shape consistent with other commands when `--json` / machine mode applies per product norms).
 
 #### Scenario: Clone accepts URL positional only
 - Given a valid public git URL to a repo with a supported `devcontainer.json`
@@ -321,9 +322,9 @@ See also: [core.md](core.md) **Up lifecycle** and [lifecycle-hooks.md](lifecycle
 
 ---
 
-### Requirement: Clone success JSON
+### Requirement: Clone success presentation
 
-On successful `clone`, stdout machine-readable JSON MUST include at least:
+On successful `clone` **without** `--json`, stdout MUST emit a human key/value digest (same nestIndent/style as human `up`/`rebuild`) after `==> Ready`, including at least:
 
 | Field | Meaning |
 |-------|---------|
@@ -334,12 +335,22 @@ On successful `clone`, stdout machine-readable JSON MUST include at least:
 | `gitUrl` | Normalized git URL used for identity/labels (userinfo stripped for `scheme://`) |
 | `workspaceVolume` | Workspace named volume name |
 
-Additional fields (e.g. `containerName`) MAY be included. Progress remains on stderr; `ADEVCONTAINER_QUIET=1` silences progress status as today.
+Optional `containerName` MUST appear in the digest when present (same as `up`/`rebuild`).
+
+When `--json` is set, stdout MUST emit machine-readable JSON including at least the same fields (pretty-printed). Additional fields (e.g. `containerName`) MAY be included. Human digest MUST NOT appear with `--json`.
+
+Progress remains on stderr; `ADEVCONTAINER_QUIET=1` silences progress status as today. Connection hints follow the digest or JSON per [terminal-output.md](terminal-output.md).
+
+#### Scenario: Human clone success digest includes gitUrl and workspaceVolume
+- Given a successful human (non-`--json`) clone
+- When stdout is inspected after Ready
+- Then it includes indented `outcome`, `containerId`, `remoteUser`, `remoteWorkspaceFolder`, `gitUrl`, and `workspaceVolume`
 
 #### Scenario: Success JSON includes gitUrl and workspaceVolume
-- Given a successful clone
+- Given a successful clone with `--json`
 - When the machine-readable result is parsed
 - Then it includes `outcome`, `containerId`, `remoteUser`, `remoteWorkspaceFolder`, `gitUrl`, and `workspaceVolume`
+- And stdout has no human key/value digest lines
 
 ---
 

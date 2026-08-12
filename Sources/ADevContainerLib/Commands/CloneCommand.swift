@@ -5,11 +5,19 @@ public struct CloneOptions: Sendable {
     public var skipPull: Bool
     /// Best-effort open of VS Code on the remote workspace after lifecycle success.
     public var openVSCode: Bool
+    /// Machine-readable success JSON on stdout when true; human digest otherwise.
+    public var jsonOutput: Bool
 
-    public init(gitURL: String, skipPull: Bool = false, openVSCode: Bool = false) {
+    public init(
+        gitURL: String,
+        skipPull: Bool = false,
+        openVSCode: Bool = false,
+        jsonOutput: Bool = false
+    ) {
         self.gitURL = gitURL
         self.skipPull = skipPull
         self.openVSCode = openVSCode
+        self.jsonOutput = jsonOutput
     }
 }
 

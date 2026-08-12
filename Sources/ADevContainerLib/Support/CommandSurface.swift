@@ -195,7 +195,7 @@ public enum CommandSurface {
         Options:
           -w, --workspace <path>   Workspace root for `up` only (default: cwd)
           --name <container>       Managed container name/id (exec/start/stop/delete/prune/rebuild/inspect)
-          --json                   Machine-readable output (up, list, rebuild)
+          --json                   Machine-readable output (up, clone, list, rebuild)
           --skip-pull              Skip image pull on up/clone/rebuild
           --vscode                 Best-effort open VS Code; applies extensions + gates postAttach
           -h, --help               Show help
@@ -276,7 +276,7 @@ public enum CommandSurface {
             """
         case "clone":
             return """
-            adevcontainer clone <git-url> [--skip-pull] [--vscode]
+            adevcontainer clone <git-url> [--json] [--skip-pull] [--vscode]
 
             Create a volume-mode managed dev container (workspace on a named volume).
             Host git fetches config only; full clone runs inside the container.
@@ -286,6 +286,10 @@ public enum CommandSurface {
             Optional: ADEVCONTAINER_GIT_TOKEN. No PAT flags / GCM-in-guest.
             If the config has no git/common-utils feature, clone injects
             ghcr.io/devcontainers/features/git:1 for in-container git.
+
+            --json: machine-readable success JSON (outcome, containerId, remoteUser,
+            remoteWorkspaceFolder, gitUrl, workspaceVolume; optional containerName).
+            Default human mode prints an indented key/value digest after Ready.
 
             --vscode: best-effort open VS Code on the resolved remote folder after
             success (same prereqs/soft-fail/extensions-then-open/postAttach gate as up).

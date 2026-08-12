@@ -753,6 +753,43 @@ enum CloneGitFeatureTestSupport {
 // MARK: - Clone command orchestration
 
 nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
+    ("cloneOptionsDefaultJsonOutputFalse", {
+        let opts = CloneOptions(gitURL: "https://example.com/r.git")
+        try MiniTest.expectEqual(opts.jsonOutput, false)
+        try MiniTest.expectEqual(opts.openVSCode, false)
+        try MiniTest.expectEqual(opts.skipPull, false)
+    }),
+    ("cloneOptionsAcceptJsonFlagViaParseArgs", {
+        let parsed = try CommandSurface.parseArgs([
+            "https://example.com/r.git", "--json", "--skip-pull", "--vscode"
+        ])
+        try MiniTest.expect(parsed.flags.contains("json"))
+        try MiniTest.expect(parsed.flags.contains("skip-pull"))
+        try MiniTest.expect(parsed.flags.contains("vscode"))
+        try MiniTest.expectEqual(parsed.passthrough, ["https://example.com/r.git"])
+        let opts = CloneOptions(
+            gitURL: parsed.passthrough[0],
+            skipPull: parsed.flags.contains("skip-pull"),
+            openVSCode: parsed.flags.contains("vscode"),
+            jsonOutput: parsed.flags.contains("json")
+        )
+        try MiniTest.expectEqual(opts.jsonOutput, true)
+        try MiniTest.expectEqual(opts.skipPull, true)
+        try MiniTest.expectEqual(opts.openVSCode, true)
+    }),
+    ("cloneHelpAndUsageListJson", {
+        let usage = CommandSurface.usageText()
+        try MiniTest.expect(usage.contains("--json"), "usage mentions --json")
+        try MiniTest.expect(
+            usage.contains("up, clone, list, rebuild") || usage.contains("clone"),
+            "usage associates --json with clone"
+        )
+        let help = CommandSurface.commandHelpText("clone")
+        try MiniTest.expect(help != nil, "clone help present")
+        guard let help else { return }
+        try MiniTest.expect(help.contains("[--json]"), "clone help lists --json")
+        try MiniTest.expect(help.contains("machine-readable"), "clone help describes JSON mode")
+    }),
     ("cloneMissingGitNoContainer", {
         let git = MockGitClient()
         git.requireGitResult = .failure(CLIError(

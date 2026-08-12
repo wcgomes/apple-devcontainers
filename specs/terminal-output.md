@@ -55,7 +55,7 @@ Product log lines MUST use stable textual prefixes (monochrome greppable form):
 
 - Connection hints (e.g. how to `exec` or open with `--vscode`) SHOULD emit as **info** (quieter than a top-level phase), not as full `==> ` phase lines.
 - Connection hints MUST honor QUIET (silenced with other progress/info).
-- On successful human `up`/`rebuild` without originating `--vscode`, hints MUST appear **after** the human outcome digest on stdout, separated by a blank line on stderr. Human outcome fields MUST be indented under `==> Ready`. On successful `clone`, hints MUST appear after success JSON on stdout (same blank separator). Originating `--vscode` MUST suppress these hints.
+- On successful human `up`/`clone`/`rebuild` without originating `--vscode`, hints MUST appear **after** the human outcome digest on stdout, separated by a blank line on stderr. Human outcome fields MUST be indented under `==> Ready` (clone digest additionally includes `gitUrl` and `workspaceVolume`). On successful `--json` `up`/`clone`/`rebuild`, hints MUST appear after success JSON on stdout (same blank separator). Originating `--vscode` MUST suppress these hints.
 
 **Human error shape**
 
@@ -96,6 +96,16 @@ Product log lines MUST use stable textual prefixes (monochrome greppable form):
 - Given quiet mode unset, human (non-JSON) `up` success without `--vscode`
 - When the command finishes
 - Then stderr includes `==> Ready`, stdout includes indented `outcome:` / identity fields, and connection hints appear on stderr after a blank line following that digest (not before the outcome fields)
+
+#### Scenario: Human clone success order Ready then digest then hints
+- Given quiet mode unset, human (non-JSON) `clone` success without `--vscode`
+- When the command finishes
+- Then stderr includes `==> Ready`, stdout includes indented `outcome:` / identity fields including `gitUrl:` and `workspaceVolume:`, and connection hints appear on stderr after a blank line following that digest
+
+#### Scenario: Clone JSON success is pure JSON then hints
+- Given quiet mode unset, `clone --json` success without `--vscode`
+- When the command finishes
+- Then host stdout is pure machine JSON (no human digest lines) and connection hints appear on stderr after a blank line
 
 #### Scenario: Error formatting remains structured
 - Given a failing command in human (non-JSON) mode

@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 @testable import ADevContainerLib
 
 private func withStatusPrinterCapture(_ body: () throws -> Void) throws -> String {
@@ -211,5 +216,69 @@ nonisolated(unsafe) let statusPrinterTests: [(String, () throws -> Void)] = [
         let stripped = TerminalStyle.stripANSI(out)
         try MiniTest.expect(stripped.hasPrefix("warning: "))
         try MiniTest.expect(out.contains(TerminalStyle.styleWarningBody("colored-warn", color: true).trimmingCharacters(in: .newlines)) || out.contains(TerminalStyle.ansiDim + "colored-warn"))
+    }),
+    ("successPresentationCloneHumanDigestIncludesCloneFields", {
+        let previousColor = TerminalStyle.colorOverride
+        defer { TerminalStyle.colorOverride = previousColor }
+        TerminalStyle.colorOverride = false
+        let result = CloneResult(
+            outcome: "success",
+            containerId: "ctr-1",
+            remoteUser: "vscode",
+            remoteWorkspaceFolder: "/workspaces/app",
+            containerName: "adev-app-deadbeef",
+            gitUrl: "https://github.com/org/app",
+            workspaceVolume: "adev-app-deadbeef-ws"
+        )
+        var captured = ""
+        try withCapturedStdout({
+            SuccessPresentation.emitHumanDigest(result)
+            // print() may fully-buffer when fd 1 is a pipe; flush before capture closes.
+            #if canImport(Darwin) || canImport(Glibc)
+            fflush(nil)
+            #endif
+        }, capture: &captured)
+        let pad = TerminalStyle.nestIndent
+        try MiniTest.expect(captured.contains("\(pad)outcome: success\n"), "stdout was: \(captured)")
+        try MiniTest.expect(captured.contains("\(pad)containerId: ctr-1\n"))
+        try MiniTest.expect(captured.contains("\(pad)remoteUser: vscode\n"))
+        try MiniTest.expect(captured.contains("\(pad)remoteWorkspaceFolder: /workspaces/app\n"))
+        try MiniTest.expect(captured.contains("\(pad)containerName: adev-app-deadbeef\n"))
+        try MiniTest.expect(captured.contains("\(pad)gitUrl: https://github.com/org/app\n"))
+        try MiniTest.expect(captured.contains("\(pad)workspaceVolume: adev-app-deadbeef-ws\n"))
+        try MiniTest.expect(!captured.contains("{"), "human digest is not JSON")
+    }),
+    ("successPresentationCloneJsonShapeUnchanged", {
+        let result = CloneResult(
+            outcome: "success",
+            containerId: "ctr-1",
+            remoteUser: "root",
+            remoteWorkspaceFolder: "/workspaces/app",
+            containerName: "adev-app-deadbeef",
+            gitUrl: "https://github.com/org/app",
+            workspaceVolume: "adev-app-deadbeef-ws"
+        )
+        let obj = try JSONSerialization.jsonObject(with: try result.jsonData()) as! [String: Any]
+        try MiniTest.expectEqual(obj["outcome"] as? String, "success")
+        try MiniTest.expectEqual(obj["containerId"] as? String, "ctr-1")
+        try MiniTest.expectEqual(obj["remoteUser"] as? String, "root")
+        try MiniTest.expectEqual(obj["remoteWorkspaceFolder"] as? String, "/workspaces/app")
+        try MiniTest.expectEqual(obj["containerName"] as? String, "adev-app-deadbeef")
+        try MiniTest.expectEqual(obj["gitUrl"] as? String, "https://github.com/org/app")
+        try MiniTest.expectEqual(obj["workspaceVolume"] as? String, "adev-app-deadbeef-ws")
+    }),
+    ("successPresentationConnectionHintsSuppressedWithVSCode", {
+        let previousEnabled = StatusPrinter.enabled
+        defer { StatusPrinter.enabled = previousEnabled }
+        StatusPrinter.enabled = true
+        var stderr = ""
+        try withCapturedStderr({
+            SuccessPresentation.emitConnectionHintsIfNeeded(openVSCode: true, nameOrId: "ctr")
+        }, capture: &stderr)
+        try MiniTest.expectEqual(stderr, "")
+        try withCapturedStderr({
+            SuccessPresentation.emitConnectionHintsIfNeeded(openVSCode: false, nameOrId: "ctr")
+        }, capture: &stderr)
+        try MiniTest.expect(stderr.contains("Connect with:"))
     }),
 ]

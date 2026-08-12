@@ -9,8 +9,8 @@ Product host-terminal presentation: **StatusPrinter** + **TerminalStyle** + **Su
 | Phase / info / warn / human error | **stderr** | StatusPrinter / CLIError |
 | Internal tool body (live tee) | **stderr** | Framed display; raw capture |
 | User `exec` / interactive TTY | passthrough | **Not** tool-framed |
-| Human success digest (`outcome: …`) | **stdout** | After `==> Ready`; indented |
-| `--json` / clone success JSON | **stdout** | Pure machine payload |
+| Human success digest (`outcome: …`) | **stdout** | After `==> Ready`; indented (`up`/`clone`/`rebuild`) |
+| `--json` success JSON | **stdout** | Pure machine payload (`up`/`clone`/`rebuild`/…) |
 
 No verbose flag, product log files, spinners, or emoji/icon severity markers.
 
@@ -28,19 +28,21 @@ No verbose flag, product log files, spinners, or emoji/icon severity markers.
 - **Section spacing:** blank stderr line before each top-level phase except the first; no blank placeholders under QUIET; never blank-pad stdout JSON.
 - Stable greppable prefixes (ANSI stripped): `==> `, `warning: `, `error: `.
 
-## Post-success layout (human up/rebuild)
+## Post-success layout (human up/clone/rebuild)
 
 ```text
 ==> Ready
     outcome: success          # success value green when color on
     containerId: …
     …
+    gitUrl: …                 # clone only
+    workspaceVolume: …        # clone only
 
     Connect with: <cmd>       # label dim; command bold white
     Open in VS Code with: …
 ```
 
-Order: Ready (stderr) → outcome digest (stdout, nestIndent) → blank + connection hints (stderr). Clone: Ready → JSON stdout → blank + hints. Start: ack print → blank + hints.
+Order: Ready (stderr) → outcome digest (stdout, nestIndent) → blank + connection hints (stderr). With `--json`: Ready → pure JSON stdout → blank + hints. Start: ack print → blank + hints.
 
 ## Internal tool framing
 

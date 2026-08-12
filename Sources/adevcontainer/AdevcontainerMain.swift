@@ -90,19 +90,20 @@ struct AdevcontainerMain {
                     hint: "Usage: adevcontainer clone <git-url>"
                 )
             }
-            let openVSCode = parsed.flags.contains("vscode")
-            let result = try CloneCommand.run(
-                options: CloneOptions(
-                    gitURL: parsed.passthrough[0],
-                    skipPull: parsed.flags.contains("skip-pull"),
-                    openVSCode: openVSCode
-                ),
-                runtime: runtime
+            let opts = CloneOptions(
+                gitURL: parsed.passthrough[0],
+                skipPull: parsed.flags.contains("skip-pull"),
+                openVSCode: parsed.flags.contains("vscode"),
+                jsonOutput: parsed.flags.contains("json")
             )
-            // Always machine-readable JSON on success (spec).
-            print(try result.jsonString())
+            let result = try CloneCommand.run(options: opts, runtime: runtime)
+            if opts.jsonOutput {
+                print(try result.jsonString())
+            } else {
+                SuccessPresentation.emitHumanDigest(result)
+            }
             SuccessPresentation.emitConnectionHintsIfNeeded(
-                openVSCode: openVSCode,
+                openVSCode: opts.openVSCode,
                 nameOrId: result.containerName ?? result.containerId
             )
             return 0
