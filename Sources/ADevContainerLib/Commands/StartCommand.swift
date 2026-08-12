@@ -37,7 +37,7 @@ public enum StartCommand {
 
         StatusPrinter.status("Starting container", item: info.id)
         try runtime.start(nameOrId: info.id)
-        // Bare start: no create-path / postStart. postAttach only via --vscode open gate.
+        // Bare start: no create-path / postStart. Extensions via --vscode; postAttach via open gate.
         print("Started \(info.id)")
         try openAndPostAttach(options: options, nameOrId: info.id, runtime: runtime, picker: picker)
         SuccessPresentation.emitConnectionHintsIfNeeded(
@@ -69,23 +69,10 @@ public enum StartCommand {
         guard let payload else { return }
 
         let image = (payload.image ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let openOutcome: VSCodeOpenOutcome
-        if options.openVSCode {
-            openOutcome = VSCodeOpen.bestEffortOpen(
-                target: VSCodeOpenTarget(
-                    containerId: payload.containerId,
-                    image: image,
-                    remoteWorkspaceFolder: payload.remoteWorkspaceFolder,
-                    containerName: payload.containerName,
-                    remoteUser: payload.remoteUser
-                )
-            )
-        } else {
-            openOutcome = .notRequested
-        }
 
         // Resolve config from labels (bind host paths or volume cat) for postAttach + vscode apply.
         // Load must not fail start after container is already up — treat errors as absent.
+        // Config load precedes extensions/open so install-before-open can use the payload.
         let config: ResolvedDevContainerConfig?
         do {
             config = try PostAttachConfigLoader.load(
@@ -107,14 +94,32 @@ public enum StartCommand {
                 config: config,
                 runtime: runtime
             )
-            // Extensions only after successful open.
-            if openOutcome.isOpenSuccess {
+            // Extensions gated on `--vscode` only (not open success).
+            if options.openVSCode {
                 _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
                     containerId: payload.containerId,
                     config: config,
                     runtime: runtime
                 )
             }
+        }
+
+        let openOutcome: VSCodeOpenOutcome
+        if options.openVSCode {
+            openOutcome = VSCodeOpen.bestEffortOpen(
+                target: VSCodeOpenTarget(
+                    containerId: payload.containerId,
+                    image: image,
+                    remoteWorkspaceFolder: payload.remoteWorkspaceFolder,
+                    containerName: payload.containerName,
+                    remoteUser: payload.remoteUser
+                )
+            )
+        } else {
+            openOutcome = .notRequested
+        }
+
+        if let config {
             try LifecycleRunner.applyPostAttachGate(
                 openOutcome: openOutcome,
                 containerId: payload.containerId,

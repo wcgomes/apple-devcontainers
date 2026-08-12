@@ -233,7 +233,7 @@ public enum UpCommand {
         )
     }
 
-    /// Open (optional) → extensions apply (open success) → postAttach gate → Ready.
+    /// Extensions apply (`--vscode` only) → open (optional) → postAttach gate → Ready.
     /// postAttach is never before open when `--vscode`. Extensions never fold into postAttachCommand.
     private static func finish(
         options: UpOptions,
@@ -244,6 +244,14 @@ public enum UpCommand {
         runtime: AppleContainerRuntime
     ) throws -> UpResult {
         let result = successResult(id: id, name: name, config: config)
+        // Extensions gated on `--vscode` only (not open success) so first attach sees the registry.
+        if options.openVSCode {
+            _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
+                containerId: id,
+                config: config,
+                runtime: runtime
+            )
+        }
         let openOutcome = VSCodeOpen.openIfRequested(
             options.openVSCode,
             target: VSCodeOpenTarget(
@@ -254,14 +262,6 @@ public enum UpCommand {
                 remoteUser: result.remoteUser
             )
         )
-        // Extensions only after successful open (same CLI attach hook as postAttach).
-        if openOutcome.isOpenSuccess {
-            _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
-                containerId: id,
-                config: config,
-                runtime: runtime
-            )
-        }
         // Reuse/restart never re-runs Features; merge feature postAttach from image metadata.
         var postAttachConfig = config
         PostAttachConfigLoader.mergeFeaturePostAttach(

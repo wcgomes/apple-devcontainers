@@ -126,7 +126,7 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - `features` — object map of OCI or local path feature ref → options; processed by the Features runner (see Features requirements)
 
 **Editor customizations (config-file, v1)**
-- `customizations.vscode.extensions` — array of string extension IDs; retained and applied after successful `--vscode` open per apply requirements
+- `customizations.vscode.extensions` — array of string extension IDs; retained and applied when `--vscode` is set (before open; not gated on open success) per apply requirements
 - `customizations.vscode.settings` — JSON object; retained and merged into guest Machine settings on create-path (and repair on drift) per apply requirements
 - Other `customizations` content remains admitted metadata and is not applied in v1
 
@@ -341,7 +341,7 @@ The CLI MUST fail closed on unsupported or unknown-dangerous configuration. Erro
 
 **No longer pure-ignore**
 - `hostRequirements` — MUST evaluate per **hostRequirements preflight** (not silent ignore)
-- `customizations.vscode` — MUST still admit without failing parse when present as an object under object-shaped `customizations` (see existing scenario **customizations.vscode does not fail**). When nested `extensions` / `settings` are well-formed, the CLI MUST retain them and MUST apply per **Parse and retain customizations.vscode extensions and settings**, **Apply vscode settings on create-path (and repair on drift)**, **Apply vscode extensions after successful --vscode open**, and **Vscode customizations apply idempotency**. Malformed nested shapes soft-skip apply with warn rather than failing whole-config resolve when `customizations.vscode` is an object.
+- `customizations.vscode` — MUST still admit without failing parse when present as an object under object-shaped `customizations` (see existing scenario **customizations.vscode does not fail**). When nested `extensions` / `settings` are well-formed, the CLI MUST retain them and MUST apply per **Parse and retain customizations.vscode extensions and settings**, **Apply vscode settings on create-path (and repair on drift)**, **Apply vscode extensions when --vscode is set (before open)**, and **Vscode customizations apply idempotency**. Malformed nested shapes soft-skip apply with warn rather than failing whole-config resolve when `customizations.vscode` is an object.
 
 **Unknown non-metadata top-level properties**
 - MUST hard-error (fail closed), except keys explicitly supported in core plus lifecycle hooks, allowlisted `runArgs`, `hostRequirements`, and **`features`**.
@@ -379,7 +379,7 @@ The CLI MUST fail closed on unsupported or unknown-dangerous configuration. Erro
 #### Scenario: parseable vscode customizations are applied per policy
 - Given a valid config with well-formed `customizations.vscode.settings` and `extensions`
 - When the user completes a fresh `up` create-path and later a successful `--vscode` open on a command that loads that config
-- Then settings were attempted on create-path and extensions were attempted after open success per the apply requirements
+- Then settings were attempted on create-path and extensions were attempted under the `--vscode` flag gate (before open; not gated on open success) per the apply requirements
 - And apply soft-fail never fails lifecycle solely due to apply errors
 
 #### Scenario: Allowlisted cap-add no longer errors as unknown runArgs
@@ -552,10 +552,9 @@ postAttach gating applies on `up`, `start`, `clone`, and `rebuild` after the com
 | Fresh create-path `up`/`clone`/`rebuild` with well-formed settings | after create-path hooks: settings merge (soft-fail); marker/idempotency rules |
 | Fresh create-path without settings (and no pending payload) | no settings apply required |
 | Any path with well-formed extensions, `--vscode` absent | extensions not installed by CLI on that invocation |
-| Any path with well-formed extensions, `--vscode` set, open soft-failed/skipped | extensions not installed on that invocation |
-| Any path with well-formed extensions, `--vscode` set, open success, marker pending/drift | after open: extensions install (soft-fail), then postAttach per existing matrix |
+| Any path with well-formed extensions, `--vscode` set, marker pending/drift | before open: extensions install (soft-fail; flag gate only — runs even if open later soft-fails); then open; then postAttach only on open success per existing matrix |
 | Any path with matching marker for full normalized payload | skip redundant settings+extensions apply |
-| `start` / reuse with loadable config and marker drift | settings repair when applicable; extensions only if open success and still pending |
+| `start` / reuse with loadable config and marker drift | settings repair when applicable; extensions only when `--vscode` is set and still pending (not gated on open success) |
 
 postAttach matrix rows and gating text above remain in force. Customizations apply is **not** part of create-path delete-on-fail and **not** folded into postAttach execution.
 

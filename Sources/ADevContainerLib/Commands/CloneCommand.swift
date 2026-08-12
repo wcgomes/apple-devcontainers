@@ -344,7 +344,14 @@ public enum CloneCommand {
             gitUrl: identity.normalizedGitURL,
             workspaceVolume: identity.workspaceVolumeName
         )
-        // Open → extensions (on success) → postAttach (never before open when --vscode).
+        // Extensions (`--vscode` only) → open → postAttach (never before open when --vscode).
+        if options.openVSCode {
+            _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
+                containerId: id,
+                config: effectiveConfig,
+                runtime: runtime
+            )
+        }
         let openOutcome = VSCodeOpen.openIfRequested(
             options.openVSCode,
             target: VSCodeOpenTarget(
@@ -355,13 +362,6 @@ public enum CloneCommand {
                 remoteUser: result.remoteUser
             )
         )
-        if openOutcome.isOpenSuccess {
-            _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
-                containerId: id,
-                config: effectiveConfig,
-                runtime: runtime
-            )
-        }
         try LifecycleRunner.applyPostAttachGate(
             openOutcome: openOutcome,
             containerId: id,

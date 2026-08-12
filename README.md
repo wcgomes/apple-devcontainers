@@ -92,7 +92,7 @@ Make sure the [Remote - Containers extension](https://marketplace.visualstudio.c
 adevcontainer up --vscode
 ```
 
-The CLI opens the remote workspace and applies supported VS Code settings and extensions from `devcontainer.json`.
+The CLI applies supported VS Code settings and extensions from `devcontainer.json`, then opens the remote workspace so the first attach can see the installed registry.
 
 <img src="assets/vscode-integration.png" alt="VSCode integration">
 

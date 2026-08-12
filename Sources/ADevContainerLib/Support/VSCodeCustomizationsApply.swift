@@ -64,12 +64,14 @@ public protocol VSCodeGuestOperating: Sendable {
     func removeFile(containerId: String, path: String, user: String?) throws
     /// Unpack zip/VSIX bytes into `destDir` (created if needed).
     func unpackZip(containerId: String, zipData: Data, destDir: String, user: String?) throws
+    /// VS Marketplace `targetPlatform` for this guest (e.g. `linux-arm64`). Throws when unknown.
+    func resolveMarketplaceTargetPlatform(containerId: String, user: String?) throws -> String
 }
 
 /// Marketplace (or test) VSIX fetch.
 public protocol VSCodeVSIXDownloading: Sendable {
-    /// Fetch VSIX for `publisher.name` or `publisher.name@version`.
-    func fetchVSIX(extensionId: String) throws -> VSCodeVSIXArtifact
+    /// Fetch VSIX for `publisher.name` or `publisher.name@version` targeting guest `targetPlatform`.
+    func fetchVSIX(extensionId: String, targetPlatform: String) throws -> VSCodeVSIXArtifact
 }
 
 public struct VSCodeVSIXArtifact: Equatable, Sendable {
@@ -279,25 +281,59 @@ public struct ExecVSCodeGuestOps: VSCodeGuestOperating {
         }
     }
 
+    public func resolveMarketplaceTargetPlatform(containerId: String, user: String?) throws -> String {
+        let result = try runtime.exec(
+            nameOrId: containerId,
+            command: ["sh", "-lc", #"printf '%s' "$(uname -m)""#],
+            user: user
+        )
+        guard result.succeeded else {
+            throw CLIError(
+                code: CLIErrorCode.runtimeFailed,
+                message: "Failed to detect guest architecture (uname -m)"
+            )
+        }
+        let machine = result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
+        // os-release is typically world-readable; ignore read failures (non-alpine linux).
+        let osRelease = try? readTextFile(containerId: containerId, path: "/etc/os-release", user: user)
+        guard let platform = VSCodeCustomizationsApply.marketplaceTargetPlatform(
+            unameMachine: machine,
+            osReleaseText: osRelease
+        ) else {
+            throw CLIError(
+                code: CLIErrorCode.runtimeFailed,
+                message:
+                    "Unsupported guest architecture '\(machine)' for marketplace VSIX "
+                    + "(need aarch64/arm64 or x86_64/amd64); refusing host-platform download"
+            )
+        }
+        return platform
+    }
+
     private func shellSingleQuoted(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
 
-/// Host-side marketplace VSIX download (latest or pinned `publisher.name@version`).
+/// Host-side marketplace VSIX download (latest or pinned `publisher.name@version`) for guest platform.
 public struct MarketplaceVSCodeVSIXDownloader: VSCodeVSIXDownloading {
     public var session: URLSession
     public var queryURL: URL
-    public var assetURLBuilder: @Sendable (String, String, String) -> URL
+    /// Build asset URL: publisher, name, version, targetPlatform → VSIXPackage URL.
+    /// Pass empty `targetPlatform` for universal builds (omit `?targetPlatform=`; marketplace 404s otherwise).
+    public var assetURLBuilder: @Sendable (String, String, String, String) -> URL
 
     public init(
         session: URLSession = .shared,
         queryURL: URL = URL(string: "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery")!,
-        assetURLBuilder: @escaping @Sendable (String, String, String) -> URL = {
-            publisher, name, version in
-            URL(string:
-                "https://\(publisher).gallery.vsassets.io/_apis/public/gallery/publisher/\(publisher)/extension/\(name)/\(version)/assetbyname/Microsoft.VisualStudio.Services.VSIXPackage"
-            )!
+        assetURLBuilder: @escaping @Sendable (String, String, String, String) -> URL = {
+            publisher, name, version, targetPlatform in
+            MarketplaceVSCodeVSIXDownloader.defaultAssetURL(
+                publisher: publisher,
+                name: name,
+                version: version,
+                targetPlatform: targetPlatform
+            )
         }
     ) {
         self.session = session
@@ -305,21 +341,49 @@ public struct MarketplaceVSCodeVSIXDownloader: VSCodeVSIXDownloading {
         self.assetURLBuilder = assetURLBuilder
     }
 
-    public func fetchVSIX(extensionId: String) throws -> VSCodeVSIXArtifact {
-        let parsed = VSCodeCustomizationsApply.parseExtensionId(extensionId)
-        let version: String
-        if let pinned = parsed.version, !pinned.isEmpty {
-            version = pinned
-        } else {
-            version = try resolveLatestVersion(publisher: parsed.publisher, name: parsed.name)
+    /// Marketplace asset URL. Non-empty `targetPlatform` adds `?targetPlatform=` (multi-arch).
+    /// Empty/whitespace `targetPlatform` omits the query — required for universal-only packages
+    /// (gallery returns HTTP 404 when a platform query is applied to a universal VSIX).
+    public static func defaultAssetURL(
+        publisher: String,
+        name: String,
+        version: String,
+        targetPlatform: String
+    ) -> URL {
+        var components = URLComponents(string:
+            "https://\(publisher).gallery.vsassets.io/_apis/public/gallery/publisher/\(publisher)/extension/\(name)/\(version)/assetbyname/Microsoft.VisualStudio.Services.VSIXPackage"
+        )!
+        let tp = targetPlatform.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tp.isEmpty {
+            components.queryItems = [URLQueryItem(name: "targetPlatform", value: tp)]
         }
-        let url = assetURLBuilder(parsed.publisher, parsed.name, version)
+        return components.url!
+    }
+
+    public func fetchVSIX(extensionId: String, targetPlatform: String) throws -> VSCodeVSIXArtifact {
+        let parsed = VSCodeCustomizationsApply.parseExtensionId(extensionId)
+        // Always gallery-resolve (including pins) so we know whether the VSIX is
+        // platform-specific (`?targetPlatform=`) or universal (no query).
+        let pick = try resolveMarketplaceVersion(
+            publisher: parsed.publisher,
+            name: parsed.name,
+            targetPlatform: targetPlatform,
+            pinnedVersion: parsed.version
+        )
+        // Empty string → universal URL (builder omits query). Guest platform → platform asset.
+        let assetTP = pick.assetTargetPlatform ?? ""
+        let url = assetURLBuilder(parsed.publisher, parsed.name, pick.version, assetTP)
         let data = try download(url: url)
-        let folder = "\(parsed.publisher).\(parsed.name)-\(version)"
+        let folder = "\(parsed.publisher).\(parsed.name)-\(pick.version)"
         return VSCodeVSIXArtifact(data: data, installFolderName: folder)
     }
 
-    private func resolveLatestVersion(publisher: String, name: String) throws -> String {
+    private func resolveMarketplaceVersion(
+        publisher: String,
+        name: String,
+        targetPlatform: String,
+        pinnedVersion: String?
+    ) throws -> VSCodeCustomizationsApply.MarketplaceVersionPick {
         // Minimal extensionquery body for public gallery.
         let body: [String: Any] = [
             "filters": [
@@ -351,16 +415,32 @@ public struct MarketplaceVSCodeVSIXDownloader: VSCodeVSIXDownloading {
             let extensions = first["extensions"] as? [[String: Any]],
             let ext = extensions.first,
             let versions = ext["versions"] as? [[String: Any]],
-            let verObj = versions.first,
-            let version = verObj["version"] as? String,
-            !version.isEmpty
+            !versions.isEmpty
         else {
             throw CLIError(
                 code: CLIErrorCode.runtimeFailed,
                 message: "Could not resolve marketplace version for \(publisher).\(name)"
             )
         }
-        return version
+        guard let pick = VSCodeCustomizationsApply.pickMarketplaceVersion(
+            versions: versions,
+            targetPlatform: targetPlatform,
+            pinnedVersion: pinnedVersion
+        ) else {
+            let pinNote: String
+            if let pinnedVersion, !pinnedVersion.isEmpty {
+                pinNote = " version \(pinnedVersion)"
+            } else {
+                pinNote = ""
+            }
+            throw CLIError(
+                code: CLIErrorCode.runtimeFailed,
+                message:
+                    "No marketplace version of \(publisher).\(name)\(pinNote) for targetPlatform=\(targetPlatform) "
+                    + "(and no universal build)"
+            )
+        }
+        return pick
     }
 
     private func download(url: URL) throws -> Data {
@@ -395,9 +475,10 @@ public struct MarketplaceVSCodeVSIXDownloader: VSCodeVSIXDownloading {
             throw CLIError(code: CLIErrorCode.runtimeFailed, message: "VSIX download returned no data")
         }
         if let status = box.status, !(200...299).contains(status) {
+            let urlNote = request.url.map { " for \($0.absoluteString)" } ?? ""
             throw CLIError(
                 code: CLIErrorCode.runtimeFailed,
-                message: "VSIX download HTTP \(status)"
+                message: "VSIX download HTTP \(status)\(urlNote)"
             )
         }
         return data
@@ -470,6 +551,98 @@ public enum VSCodeCustomizationsApply {
         return (base, base, version)
     }
 
+    // MARK: Guest marketplace targetPlatform
+
+    /// Map guest `uname -m` + optional `/etc/os-release` → VS Marketplace `targetPlatform`.
+    /// Returns nil when arch is unrecognized (caller MUST soft-fail rather than download host VSIX).
+    public static func marketplaceTargetPlatform(unameMachine: String, osReleaseText: String?) -> String? {
+        let machine = unameMachine.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let arch: String
+        switch machine {
+        case "aarch64", "arm64":
+            arch = "arm64"
+        case "x86_64", "amd64":
+            arch = "x64"
+        default:
+            return nil
+        }
+        if osReleaseIsAlpine(osReleaseText) {
+            return "alpine-\(arch)"
+        }
+        return "linux-\(arch)"
+    }
+
+    /// Result of picking a gallery version row for guest download.
+    public struct MarketplaceVersionPick: Equatable, Sendable {
+        public var version: String
+        /// Guest platform for the asset URL query, or `nil` when the row is universal
+        /// (caller MUST omit `?targetPlatform=` — marketplace 404s universal + query).
+        public var assetTargetPlatform: String?
+
+        public init(version: String, assetTargetPlatform: String?) {
+            self.version = version
+            self.assetTargetPlatform = assetTargetPlatform
+        }
+    }
+
+    /// Prefer a version row matching `targetPlatform`; else universal (missing/empty/undefined platform).
+    /// Gallery order is newest-first; first match wins. Optional `pinnedVersion` filters rows first.
+    /// `assetTargetPlatform` is non-nil only for a platform-specific row (include query on asset URL).
+    public static func pickMarketplaceVersion(
+        versions: [[String: Any]],
+        targetPlatform: String,
+        pinnedVersion: String? = nil
+    ) -> MarketplaceVersionPick? {
+        let rows: [[String: Any]]
+        if let pinned = pinnedVersion, !pinned.isEmpty {
+            rows = versions.filter { ($0["version"] as? String) == pinned }
+        } else {
+            rows = versions
+        }
+        for row in rows {
+            guard let version = row["version"] as? String, !version.isEmpty else { continue }
+            if let tp = row["targetPlatform"] as? String, tp == targetPlatform {
+                return MarketplaceVersionPick(version: version, assetTargetPlatform: targetPlatform)
+            }
+        }
+        for row in rows {
+            guard let version = row["version"] as? String, !version.isEmpty else { continue }
+            if isUniversalMarketplaceTargetPlatform(row["targetPlatform"] as? String) {
+                return MarketplaceVersionPick(version: version, assetTargetPlatform: nil)
+            }
+        }
+        return nil
+    }
+
+    /// True when the gallery row is platform-agnostic (no natives / universal build).
+    public static func isUniversalMarketplaceTargetPlatform(_ targetPlatform: String?) -> Bool {
+        guard let targetPlatform else { return true }
+        let t = targetPlatform.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty { return true }
+        switch t.lowercased() {
+        case "undefined", "universal", "unknown":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func osReleaseIsAlpine(_ text: String?) -> Bool {
+        guard let text else { return false }
+        for line in text.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.lowercased().hasPrefix("id=") else { continue }
+            var value = String(trimmed.dropFirst(3))
+            if (value.hasPrefix("\"") && value.hasSuffix("\""))
+                || (value.hasPrefix("'") && value.hasSuffix("'"))
+            {
+                value = String(value.dropFirst().dropLast())
+            }
+            return value.lowercased() == "alpine"
+        }
+        return false
+    }
+
     /// Bare `publisher.name` (no version) for cycle / visited keys.
     public static func bareExtensionId(_ id: String) -> String {
         let p = parseExtensionId(id)
@@ -479,10 +652,35 @@ public enum VSCodeCustomizationsApply {
     /// `extensionDependencies` string IDs from an unpacked extension `package.json`.
     /// Missing/invalid JSON or non-array → empty (soft).
     public static func parseExtensionDependencies(_ packageJSON: String?) -> [String] {
+        parsePackageJSONExtensionIDArray(packageJSON, key: "extensionDependencies")
+    }
+
+    /// `extensionPack` string IDs from an unpacked extension `package.json`.
+    /// Missing/invalid JSON or non-array → empty (soft).
+    public static func parseExtensionPack(_ packageJSON: String?) -> [String] {
+        parsePackageJSONExtensionIDArray(packageJSON, key: "extensionPack")
+    }
+
+    /// `extensionDependencies` ∪ `extensionPack` (deps first, then pack; bare-id de-duped).
+    /// BFS enqueue source after each installed/present extension folder is processed.
+    public static func parseTransitiveExtensionIDs(_ packageJSON: String?) -> [String] {
+        var ids: [String] = []
+        var seen = Set<String>()
+        for id in parseExtensionDependencies(packageJSON) + parseExtensionPack(packageJSON) {
+            let key = bareExtensionId(id).lowercased()
+            if seen.insert(key).inserted {
+                ids.append(id)
+            }
+        }
+        return ids
+    }
+
+    /// String IDs from a package.json array field. Missing/invalid/non-array → empty (soft).
+    private static func parsePackageJSONExtensionIDArray(_ packageJSON: String?, key: String) -> [String] {
         guard let packageJSON, !packageJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let data = packageJSON.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let raw = obj["extensionDependencies"] as? [Any]
+              let raw = obj[key] as? [Any]
         else {
             return []
         }
@@ -492,8 +690,8 @@ public enum VSCodeCustomizationsApply {
             guard let s = item as? String else { continue }
             let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !t.isEmpty else { continue }
-            let key = bareExtensionId(t).lowercased()
-            if seen.insert(key).inserted {
+            let bareKey = bareExtensionId(t).lowercased()
+            if seen.insert(bareKey).inserted {
                 ids.append(t)
             }
         }
@@ -630,7 +828,7 @@ public enum VSCodeCustomizationsApply {
         }
     }
 
-    /// After successful `--vscode` open: install missing extensions; finalize marker on full success.
+    /// With `--vscode`: install missing extensions (before open); finalize marker on full success.
     @discardableResult
     public static func applyExtensionsIfNeeded(
         containerId: String,
@@ -677,8 +875,10 @@ public enum VSCodeCustomizationsApply {
             var anyFailed = false
             var failMessages: [String] = []
             var registryDirty = false
+            // Resolve once on first download need — refuse silent host-arch VSIX when unknown.
+            var cachedTargetPlatform: String?
 
-            // BFS: config IDs first (depth 0), then each package.json extensionDependencies.
+            // BFS: config IDs first (depth 0), then each package.json deps ∪ pack.
             var queue: [(id: String, depth: Int)] = payload.extensions.map { ($0, 0) }
             var visitedBareIDs = Set<String>()
 
@@ -708,7 +908,28 @@ public enum VSCodeCustomizationsApply {
                         : "Installing \(id)"
                     StatusPrinter.detail(label, level: item.depth + 1)
                     do {
-                        let artifact = try downloader.fetchVSIX(extensionId: id)
+                        let targetPlatform: String
+                        if let cached = cachedTargetPlatform {
+                            targetPlatform = cached
+                        } else {
+                            do {
+                                let resolved = try guest.resolveMarketplaceTargetPlatform(
+                                    containerId: containerId,
+                                    user: user
+                                )
+                                cachedTargetPlatform = resolved
+                                targetPlatform = resolved
+                            } catch {
+                                let msg =
+                                    "guest marketplace targetPlatform: \(error.localizedDescription)"
+                                warnExtensions(msg)
+                                return .softFailed(message: msg)
+                            }
+                        }
+                        let artifact = try downloader.fetchVSIX(
+                            extensionId: id,
+                            targetPlatform: targetPlatform
+                        )
                         let dest = (extDir as NSString).appendingPathComponent(artifact.installFolderName)
                         try guest.unpackZip(
                             containerId: containerId,
@@ -732,7 +953,7 @@ public enum VSCodeCustomizationsApply {
                     }
                 }
 
-                // Expand extensionDependencies from package.json (soft if missing/unreadable).
+                // Expand extensionDependencies ∪ extensionPack (soft if missing/unreadable).
                 guard let folder = installedFolder else { continue }
                 let folderPath = (extDir as NSString).appendingPathComponent(folder)
                 let pkgPath = (folderPath as NSString).appendingPathComponent("package.json")
@@ -741,10 +962,10 @@ public enum VSCodeCustomizationsApply {
                     path: pkgPath,
                     user: user
                 )
-                for dep in parseExtensionDependencies(pkgText) {
-                    let depKey = bareExtensionId(dep).lowercased()
-                    if !visitedBareIDs.contains(depKey) {
-                        queue.append((dep, item.depth + 1))
+                for related in parseTransitiveExtensionIDs(pkgText) {
+                    let relatedKey = bareExtensionId(related).lowercased()
+                    if !visitedBareIDs.contains(relatedKey) {
+                        queue.append((related, item.depth + 1))
                     }
                 }
             }
@@ -837,6 +1058,8 @@ public enum VSCodeCustomizationsApply {
         }
         let absPath = (extensionsDir as NSString).appendingPathComponent(folderName)
         let ts = installedTimestampMs ?? Int64(Date().timeIntervalSince1970 * 1000)
+        // Bare IDs unpinned (updates allowed); `publisher.name@version` pins.
+        let pinned = parsed.version.map { !$0.isEmpty } ?? false
         return [
             "identifier": ["id": bareId.lowercased()] as [String: Any],
             "version": version,
@@ -848,7 +1071,7 @@ public enum VSCodeCustomizationsApply {
             "relativeLocation": folderName,
             "metadata": [
                 "installedTimestamp": ts,
-                "pinned": true,
+                "pinned": pinned,
                 "source": "vsix"
             ] as [String: Any]
         ]

@@ -114,7 +114,7 @@ public struct RecoveryErrorDetails: Equatable, Sendable {
 }
 
 /// Structured CLI error with actionable fields for humans and machines.
-public struct CLIError: Error, Equatable, Sendable {
+public struct CLIError: Error, Equatable, Sendable, LocalizedError {
     public var code: String
     public var property: String?
     public var message: String
@@ -136,6 +136,10 @@ public struct CLIError: Error, Equatable, Sendable {
     }
 
     public var exitCode: Int32 { 1 }
+
+    /// So `error.localizedDescription` (soft-fail warns, NSError bridges) carries `message`,
+    /// not the opaque "ADevContainerLib.CLIError error 1".
+    public var errorDescription: String? { message }
 
     /// Human presentation. When `color` is true (default: TerminalStyle policy), only the
     /// `error: ` label is red; message body and property/hint use dim info gray.

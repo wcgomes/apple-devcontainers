@@ -12,7 +12,7 @@ import Foundation
 ///   ensureVolume list-then-reuse for workspace/config volumes (never deleted) →
 ///   create with the old label dict + drift-eligible updates only → start → volume
 ///   writable-if-user-changed (soft-fail) → create-path hooks (delete-on-fail of the
-///   NEW container) → settings apply → `--vscode` open → extensions → postAttach gate
+///   NEW container) → settings apply → `--vscode` extensions → open → postAttach gate
 ///   (fail-keep).
 public enum RebuildCommand {
     /// Optional Features fetch override for tests (same pattern as `up`/`clone`).
@@ -775,9 +775,9 @@ public enum RebuildCommand {
         )
     }
 
-    // MARK: - Finish (open → extensions → postAttach gate), up parity
+    // MARK: - Finish (extensions → open → postAttach gate), up parity
 
-    /// Open (optional) → extensions apply (open success) → postAttach gate → Ready.
+    /// Extensions apply (`--vscode` only) → open (optional) → postAttach gate → Ready.
     /// postAttach is never before open when `--vscode`. Extensions never fold into postAttachCommand.
     private static func finish(
         options: RebuildOptions,
@@ -797,6 +797,14 @@ public enum RebuildCommand {
             gitUrl: isVolumeMode ? imagesLabels[ContainerIdentity.labelGitURL] : nil,
             workspaceVolume: isVolumeMode ? imagesLabels[ContainerIdentity.labelWorkspaceVolume] : nil
         )
+        // Extensions gated on `--vscode` only (not open success) so first attach sees the registry.
+        if options.openVSCode {
+            _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
+                containerId: id,
+                config: config,
+                runtime: runtime
+            )
+        }
         let openOutcome = VSCodeOpen.openIfRequested(
             options.openVSCode,
             target: VSCodeOpenTarget(
@@ -807,14 +815,6 @@ public enum RebuildCommand {
                 remoteUser: result.remoteUser
             )
         )
-        // Extensions only after successful open (same CLI attach hook as postAttach).
-        if openOutcome.isOpenSuccess {
-            _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
-                containerId: id,
-                config: config,
-                runtime: runtime
-            )
-        }
         // Rebuild never re-runs Features; merge feature postAttach from image metadata.
         var postAttachConfig = config
         PostAttachConfigLoader.mergeFeaturePostAttach(
