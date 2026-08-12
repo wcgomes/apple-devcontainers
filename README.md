@@ -6,7 +6,10 @@
 
 Native Swift CLI that reads `devcontainer.json` and runs development environments on Apple [`container`](https://github.com/apple/container).
 
-Use `up` with an existing checkout, or use `clone` to keep the repository in a named volume for faster I/O. Work from your terminal, an AI agent, or optionally VS Code.
+Use `up` with an existing checkout, or use `clone` to keep the repository in a named volume for faster I/O. Work from your terminal, an AI agent or VS Code.
+
+<img src="assets/adevcontainer-start.png" alt="Pick list (adevcontainer start)">
+<img src="assets/adevcontainer-connect.png" alt="Connect to a running dev container">
 
 For implementation details and behavior beyond this quick reference, see the [technical documentation](wiki/index.md).
 
