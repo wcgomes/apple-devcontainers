@@ -104,7 +104,7 @@ Apple BuildKit with `build.rosetta=true` can require Rosetta even for native arm
 
 ### VS Code attach (`--vscode` + manual)
 
-After lifecycle success, `up` / `start` / `clone` / `rebuild` accept **`--vscode`**: best-effort host `code --new-window --folder-uri …`. Missing `code` or launch fail → stderr warn; open alone does not fail the command. Without the flag, same URI recipe works manually (does not run postAttach or CLI extension install). Successful open gates **extensions apply** then **`postAttachCommand`** (CLI attach approximation). Full recipe + apply policy: [architecture.md — VS Code flow](../architecture.md#vs-code-flow). Contract: [`specs/vscode.md`](../../specs/vscode.md); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../../specs/changes/archive/20260808-vscode-customizations-apply/).
+After lifecycle success, `up` / `start` / `clone` / `rebuild` accept **`--vscode`**: best-effort host `code --new-window --folder-uri …`. Missing `code` or launch fail → stderr warn; open alone does not fail the command. Without the flag, same URI recipe works manually (does not run postAttach or CLI extension install). With `--vscode`: **extensions apply → open → postAttach** (postAttach still open-success only; extensions flag-gated only). Full recipe + apply policy: [architecture.md — VS Code flow](../architecture.md#vs-code-flow). Contract: [`specs/vscode.md`](../../specs/vscode.md); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../../specs/changes/archive/20260808-vscode-customizations-apply/).
 
 | Piece | Fact |
 |-------|------|
@@ -116,8 +116,8 @@ After lifecycle success, `up` / `start` / `clone` / `rebuild` accept **`--vscode
 | Apple attach spike | `apple-container+` attach does **not** install `customizations.vscode.extensions` (e.g. `swiftlang.swift-vscode`) — product must apply via CLI |
 | customizations.vscode | **CLI applies** config-file only (v1; not feature/metadata merge; not image build). Helper: `VSCodeCustomizationsApply` |
 | settings | Merge into `~/.vscode-server/data/Machine/settings.json` under effective remote user — **create-path** after hooks on fresh `up`/`clone`; repair on `start`/reuse marker drift. **Not** gated on `--vscode`. Validated: Machine settings take effect (e.g. tabSize / insertFinalNewline) |
-| extensions | After **successful** `--vscode` open only; host VSIX → tar-pipe → guest unzip under `~/.vscode-server/extensions` (not base64-in-argv). **Registry required:** upsert `extensions.json` — folder unpack alone leaves UI at 0 installed. Cache invalidate: best-effort rm `extensions.user.cache`. BFS `extensionDependencies` (cycle guard; soft-fail per ID; e.g. Swift pulls `lldb-dap`). Skip if no flag or open soft-fails; manual UI attach without flag does not install. Reload Window may be needed once |
-| Order after open | extensions apply (soft-fail) → postAttach (fail-keep). Apply is **not** delivered via `postAttachCommand` |
+| extensions | When `--vscode` only (**before** open; not gated on open success); marketplace VSIX for **guest** `targetPlatform` (linux/alpine × arm64/x64) → tar-pipe → guest unzip under `~/.vscode-server/extensions` (not base64-in-argv). **Registry required:** upsert `extensions.json` — folder unpack alone leaves UI at 0 installed. `metadata.pinned`: **false** bare IDs; **true** only `publisher.name@version`. Cache invalidate: best-effort rm `extensions.user.cache`. BFS **`extensionDependencies` ∪ `extensionPack`** (shared cycle guard; soft-fail per ID; e.g. Swift → `lldb-dap`). Unknown guest arch soft-fails (no host VSIX). Skip without flag; manual UI attach without flag does not install. Install-before-open usually enough; Reload Window residual MAY |
+| Order with `--vscode` | extensions apply (soft-fail) → open → postAttach on open success (fail-keep). Apply is **not** delivered via `postAttachCommand` |
 | Soft-fail apply | Warn stderr; never fail lifecycle exit; never delete/stop container solely due to apply. **≠** postAttach fail-keep |
 | Idempotency | Guest marker `$HOME/.adevcontainer/vscode-customizations.applied` = hash of normalized **config** extensions+settings only (transitive deps side effects); skip on match; re-apply on drift; full hash only after full payload success (settings-only leaves extensions pending) |
 | Identity | `customizations` stay out of create identity / config hash |
@@ -127,6 +127,17 @@ After lifecycle success, `up` / `start` / `clone` / `rebuild` accept **`--vscode
 | UI gap | `remote-containers.attachToAppleContainer` attaches authority **without** folder → empty window; folder-uri avoids it |
 | `open vscode://` | May reuse window; prefer `code --new-window --folder-uri` |
 | Parity | Not full Dev Containers up/rebuild / IDE-owned apply; manual attach without `--vscode` still valid |
+
+#### CLI extension seed vs full marketplace install
+
+CLI apply is a **seed** (download VSIX, unpack, registry upsert) — not full gallery/extension-host install. Shipped BFS: **`extensionDependencies` ∪ `extensionPack`**.
+
+| Aspect | Full VS Code gallery / extension host | CLI seed (shipped) |
+|--------|----------------------------------------|---------------------|
+| Transitive graph | **`extensionPack`** (member failures soft) **and** **`extensionDependencies`** (hard) | BFS **pack ∪ deps** from each VSIX `package.json`; shared cycle guard; **soft-fail per ID** (both edges). Marker hash = **config-file IDs + settings only** (transitive side effects not hash inputs) |
+| Activation / runtime | Runs extension host; can download **`runtimeDependencies`** and other activation-time assets | **No** extension host, activation, or `runtimeDependencies` downloads. Heavy runtimes (e.g. **.NET SDK**) are **image prereqs**, not seed artifacts |
+| Platform VSIX | Target = **guest/remote** OS/arch | **Shipped:** guest `uname -m` + `/etc/os-release` → marketplace `targetPlatform` (`linux-arm64` / `linux-x64` / `alpine-arm64` / `alpine-x64`); `?targetPlatform=` only on platform-specific assets (universal omits — 404 with query); version pick prefers matching platform then universal; **unknown guest arch soft-fails** (refuse host-platform VSIX) |
+| Example (not a product special-case) | `ms-dotnettools.csdevkit`: pack → `ms-dotnettools.csharp`; hard dep → `ms-dotnettools.vscode-dotnet-runtime` | Listing only `csdevkit` seeds that ID + pack members + deps from its `package.json` (csharp + vscode-dotnet-runtime); still **no** EH/activation/`runtimeDependencies`; .NET SDK stays image prereq |
 
 ## Config surface implications
 
@@ -148,7 +159,7 @@ After lifecycle success, `up` / `start` / `clone` / `rebuild` accept **`--vscode
 - Bind + named volume mounts — supported
 - `postCreateCommand` — supported
 - Large `forwardPorts` / `portsAttributes` — publish + metadata
-- `customizations.vscode` — **CLI applies** (settings create-path; extensions after successful `--vscode` open); Apple attach does not auto-install — see VS Code attach table above
+- `customizations.vscode` — **CLI applies** (settings create-path; extensions when `--vscode`, before open); Apple attach does not auto-install — see VS Code attach table above
 
 ## Identity workaround
 

@@ -232,7 +232,7 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
 
     // MARK: Extensions wiring
 
-    ("upExtensionsAfterOpenBeforePostAttach", {
+    ("upExtensionsBeforeOpenBeforePostAttach", {
         let ws = try TestRepo.makeTempWorkspace(
             configJSON: VSCodeCustCmdSupport.configJSON(
                 settings: true,
@@ -243,6 +243,7 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
         defer { try? FileManager.default.removeItem(at: ws) }
         let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
         var bodies: [String] = []
+        var sequence: [String] = []
         let mock = MockProcessRunner()
         mock.handlers = [
             { args in
@@ -262,7 +263,11 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
                 }
                 if args.first == "exec" {
                     if let lc = args.firstIndex(of: "-lc"), lc + 1 < args.count {
-                        bodies.append(args[lc + 1])
+                        let body = args[lc + 1]
+                        bodies.append(body)
+                        if body.contains("echo postAttach-ran") {
+                            sequence.append("postAttach")
+                        }
                     }
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
@@ -271,13 +276,14 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
         ]
         let guest = MockVSCodeGuest()
         let dl = MockVSCodeDownloader()
+        dl.onFetch = { sequence.append("extensions") }
         let restoreApply = VSCodeCustCmdSupport.installApply(guest: guest, downloader: dl)
         defer { restoreApply() }
         let launcher = MockVSCodeLauncher()
+        launcher.onLaunch = { sequence.append("open") }
         let restoreOpen = VSCodeCustCmdSupport.installOpen(launcher: launcher)
         defer { restoreOpen() }
 
-        // Track order: open call vs unpack vs postAttach body
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         let result = try UpCommand.run(
             options: UpOptions(workspacePath: ws.path, skipPull: true, openVSCode: true),
@@ -289,6 +295,7 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
         try MiniTest.expectEqual(dl.calls, ["pub.name"])
         try MiniTest.expectEqual(guest.unpackCalls.count, 1)
         try MiniTest.expect(bodies.contains("echo postAttach-ran"))
+        try MiniTest.expectEqual(sequence, ["extensions", "open", "postAttach"])
         let marker = guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         try MiniTest.expectEqual(marker, VSCodeCustomizationsPayload.from(config: resolved.config).contentHash)
@@ -320,7 +327,7 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
         try MiniTest.expectEqual(guest.unpackCalls.count, 0)
     }),
 
-    ("upExtensionsSkippedWhenOpenSoftFails", {
+    ("upExtensionsApplyWhenOpenSoftFails", {
         let ws = try TestRepo.makeTempWorkspace(
             configJSON: VSCodeCustCmdSupport.configJSON(settings: false, extensions: true)
         )
@@ -342,7 +349,13 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
             localEnv: [:]
         )
         try MiniTest.expectEqual(result.outcome, "success")
-        try MiniTest.expectEqual(dl.calls.count, 0)
+        // Extensions gate is --vscode only; open soft-fail must not block install.
+        try MiniTest.expectEqual(dl.calls, ["pub.name"])
+        try MiniTest.expectEqual(guest.unpackCalls.count, 1)
+        let marker = guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try MiniTest.expectEqual(marker, VSCodeCustomizationsPayload.from(config: resolved.config).contentHash)
+        try MiniTest.expectEqual(launcher.calls.count, 0)
     }),
 
     ("upExtensionsSoftFailKeepsSuccess", {

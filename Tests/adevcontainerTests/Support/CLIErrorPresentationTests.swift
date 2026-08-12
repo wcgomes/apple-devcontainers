@@ -87,4 +87,16 @@ nonisolated(unsafe) let cliErrorPresentationTests: [(String, () throws -> Void)]
         try MiniTest.expect(msg.contains("TOOL_FAIL_MARK"))
         try MiniTest.expect(!msg.contains("| TOOL_FAIL_MARK"))
     }),
+    ("cliErrorLocalizedDescriptionUsesMessage", {
+        // Soft-fail paths use error.localizedDescription; without LocalizedError,
+        // NSError bridges to opaque "ADevContainerLib.CLIError error 1".
+        let err = CLIError(
+            code: CLIErrorCode.runtimeFailed,
+            message: "VSIX download HTTP 404 for https://example/vsix"
+        )
+        let asError: Error = err
+        try MiniTest.expectEqual(asError.localizedDescription, err.message)
+        try MiniTest.expect(!asError.localizedDescription.contains("CLIError error"))
+        try MiniTest.expectEqual(err.errorDescription, err.message)
+    }),
 ]

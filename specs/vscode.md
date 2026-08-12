@@ -16,7 +16,7 @@ MVP acceptance for editor integration is:
 
 3. **CLI attach hook for postAttach:** A successful best-effort open under `--vscode` is the product’s CLI attach hook for gating `postAttachCommand` (see **postAttachCommand policy (CLI-only)**). This is an approximation of IDE attach, not confirmation that the remote session is fully ready.
 
-4. **CLI apply of config-file vscode customizations (additive):** The CLI MUST apply parseable config-file `customizations.vscode.settings` on create-path (not gated on open) and MUST apply parseable `customizations.vscode.extensions` after successful `--vscode` open, per the apply requirements. Manual attach without `--vscode` does not receive CLI extension install. Apply failures are soft-fail and MUST NOT be presented as full Dev Containers parity.
+4. **CLI apply of config-file vscode customizations (additive):** The CLI MUST apply parseable config-file `customizations.vscode.settings` on create-path (not gated on open) and MUST apply parseable `customizations.vscode.extensions` when `--vscode` is set (before open; not gated on open success), per the apply requirements. Manual attach without `--vscode` does not receive CLI extension install. Apply failures are soft-fail and MUST NOT be presented as full Dev Containers parity.
 
 #### Scenario: Running container is attachable target
 - Given a successful `up` (or `clone`)
@@ -48,7 +48,7 @@ The CLI MUST accept an optional boolean flag `--vscode` on:
 
 When `--vscode` is **absent**, those commands MUST behave as today for editor open (no automatic editor open). When `--vscode` is **present**, after the command’s container lifecycle succeeds and the managed container is running (or already running for a start no-op), the CLI MUST attempt a **best-effort** open of a **new** VS Code window attached to that container at the **resolved remote workspace folder** (see VS Code best-effort open). postAttach gating after that open is specified under **postAttachCommand policy (CLI-only)**.
 
-On `rebuild`, `--vscode` behavior MUST be identical to the `up`/`clone` create path: after rebuild lifecycle success on the new container, attempt a best-effort open; on open **success**, run extensions apply then the postAttach gate; on open **soft-fail**, skip both with status when present — never failing rebuild solely due to open.
+On `rebuild`, `--vscode` behavior MUST be identical to the `up`/`clone` create path: after rebuild lifecycle success on the new container, run extensions apply (flag gate only), then attempt a best-effort open; on open **success**, run the postAttach gate; on open **soft-fail**, skip postAttach with status when present (extensions may already have run) — never failing rebuild solely due to open.
 
 Unknown or misspelled variants that are not the product flag MUST continue to fail closed per existing usage rules. `--vscode` MUST be combinable with other valid flags for those commands (including `--json` where applicable).
 
@@ -371,7 +371,7 @@ When resolved config retains a non-empty well-formed `customizations.vscode.sett
 - Given well-formed settings and create-path success
 - When `--vscode` is omitted or open soft-fails
 - Then settings apply still runs (or already ran) on create-path per this requirement
-- And extensions apply remains subject to the open gate (see extensions requirement)
+- And extensions apply remains subject to the `--vscode` flag gate (see extensions requirement)
 
 #### Scenario: settings soft-fail keeps lifecycle success
 - Given create-path would otherwise succeed and settings merge is forced to fail (e.g. mocked exec failure)
@@ -388,31 +388,30 @@ When resolved config retains a non-empty well-formed `customizations.vscode.sett
 
 ---
 
-### Requirement: Apply vscode extensions after successful --vscode open
+### Requirement: Apply vscode extensions when --vscode is set (before open)
 
 When resolved config retains one or more well-formed extension IDs, the CLI MUST attempt to install any **missing** IDs into the guest remote VS Code Server extensions directory under the **resolved remote connection user** home (conceptually under `~/.vscode-server/extensions` or the product-equivalent remote extensions location) — not create-only `containerUser` when `remoteUser` differs.
 
 **When extensions apply RUNS**
 
-On `up`, `start`, and `clone`, extensions apply MUST run only when **all** of the following hold:
+On `up`, `start`, `clone`, and `rebuild`, extensions apply MUST run only when **all** of the following hold:
 
 1. At least one well-formed extension ID is retained (or the normalized payload pending apply includes extensions), and
 2. `--vscode` is set, and
-3. The best-effort VS Code open outcome is **success** (host `code` launch succeeded per **VS Code best-effort open**), and
-4. Idempotency says apply is still needed (marker missing or hash drift — see **Vscode customizations apply idempotency**).
+3. Idempotency says apply is still needed (marker missing or hash drift — see **Vscode customizations apply idempotency**).
 
-That successful open is the same **CLI attach hook** approximation used for postAttach gating. Extensions apply MUST occur **after** successful open and **MUST NOT** use `postAttachCommand` as the delivery vehicle.
+Extensions apply is **not** gated on open success. Open soft-fail MUST NOT prevent extensions apply for that `--vscode` invocation. Extensions apply MUST NOT use `postAttachCommand` as the delivery vehicle.
 
-**Order relative to postAttach**
+**Order relative to open and postAttach**
 
-- After open success: run extensions apply (soft-fail), **then** run postAttach per existing **postAttachCommand policy (CLI-only)** (unchanged fail-keep).
-- Extensions apply failure MUST NOT by itself skip or fail postAttach; postAttach gating remains solely open-success + presence as specified today.
-- Extensions apply MUST NOT run before open when `--vscode` is set.
+- With `--vscode`: run extensions apply (soft-fail) **before** best-effort open, **then** open, **then** postAttach per existing **postAttachCommand policy (CLI-only)** (unchanged fail-keep; still only after open success).
+- Design intent: install-before-open so the first attach can observe the Server registry (usually eliminates a Reload Window).
+- Extensions apply failure MUST NOT by itself skip or fail open or postAttach; postAttach gating remains solely open-success + presence as specified today.
+- Extensions apply MAY complete (and finalize the marker when full apply succeeds) even when open later soft-fails.
 
 **When extensions apply is SKIPPED**
 
 - `--vscode` absent (including manual Attach without the flag): MUST NOT install extensions via the CLI; MUST NOT fail the command solely because extensions were not applied.
-- `--vscode` set but open soft-failed/skipped: MUST NOT install extensions for that invocation.
 - No well-formed extension IDs retained: no extensions install work.
 - Marker hash already matches normalized payload (including extensions): MUST skip redundant install work.
 
@@ -421,21 +420,27 @@ That successful open is the same **CLI attach hook** approximation used for post
 - Already-installed IDs (folder present in the remote extensions directory with matching identity **and** listed in the Server registry — see **registry visibility** below) MUST be treated as satisfied for that ID. Folder-only without a registry entry is **not** complete: the CLI MUST upsert the registry for that ID.
 - The CLI SHOULD prefer an apply mechanism that does **not** require waiting for VS Code Server fully ready when a VSIX download + unpack (or equivalent) path is viable.
 - **Transfer path (v1):** host marketplace VSIX download, copy into the guest via tar-pipe (or equivalent directory copy that does **not** embed multi-MB payloads in exec argv/base64), then guest unzip into the extensions directory.
+- **Guest-platform VSIX (MUST):** Marketplace download MUST target the **guest/remote** OS/arch (`targetPlatform`), not the host Mac. Multi-arch extensions (e.g. `ms-dotnettools.csharp`, `ms-dotnettools.csdevkit` natives) ship platform-specific VSIX assets; a host (darwin/win32) asset leaves broken natives inside the Linux Apple container guest.
+  - Detect guest platform once per extensions apply under the remote connection user context (e.g. `uname -m` + `/etc/os-release`): at least `linux-arm64` / `linux-x64`; `alpine-arm64` / `alpine-x64` when `ID=alpine` is reliably detectable.
+  - Version resolve MUST prefer a gallery version row whose `targetPlatform` matches the guest (not blind `versions[0]`). Universal / platform-agnostic rows (missing, empty, `undefined`, or `universal` platform) are an allowed fallback when no exact match exists.
+  - The VSIX asset URL MUST include the marketplace platform qualifier (`?targetPlatform=<id>` on the `assetbyname/…VSIXPackage` URL) when the chosen gallery row is **platform-specific**. Universal / platform-agnostic assets MUST **omit** `?targetPlatform=` (Marketplace returns 404 when the query is present on universal assets).
+  - If guest platform detection fails or the arch is unsupported, the CLI MUST **soft-fail** extensions apply with a clear warning and MUST **not** silently download a host-platform VSIX.
 - Marketplace/network/permission failures are soft-fail (below).
 
 **Registry visibility (MUST)**
 
 - Install of an extension ID is **not complete** until the VS Code Server extensions registry file under the remote extensions directory (`~/.vscode-server/extensions/extensions.json` or product-equivalent) lists that extension so the remote UI shows it as installed.
 - After each successful unpack (or when a matching folder already exists but is unregistered), the CLI MUST upsert a registry entry for that extension (by identifier id, case-insensitive).
-- When the registry was modified, the CLI SHOULD best-effort invalidate the Server extensions user cache (e.g. remove `~/.vscode-server/data/CachedProfilesData/__default__profile__/extensions.user.cache` when present) so a reload can pick up the registry without a full Server reinstall.
-- Users MAY need **Developer: Reload Window** once after first apply for the UI to refresh; the CLI is not required to force a reload.
+- Registry `metadata.pinned` MUST be **false** by default for bare `publisher.name` IDs and **true** only when the config ID is version-pinned (`publisher.name@version`).
+- When the registry was modified, the CLI SHOULD best-effort invalidate the Server extensions user cache (e.g. remove `~/.vscode-server/data/CachedProfilesData/__default__profile__/extensions.user.cache` when present) so the Server can pick up the registry without a full reinstall.
+- Install-before-open is intended to make the registry visible on first attach; users MAY still need **Developer: Reload Window** in residual cases. The CLI is not required to force a reload.
 
-**Transitive `extensionDependencies` (MUST)**
+**Transitive `extensionDependencies` ∪ `extensionPack` (MUST)**
 
-- After each installed (or already-present) extension is processed, the CLI MUST attempt to install that package’s `package.json` `extensionDependencies` string IDs **transitively** (breadth-first or equivalent), with a **cycle guard** (visited bare `publisher.name` set) so mutual or repeated deps do not loop forever.
-- Each dependency ID follows the same install + registry rules and the same per-ID soft-fail as config-listed IDs.
-- Soft-fail of one dependency ID MUST NOT by itself abort processing of other queued IDs.
-- **Marker hash remains config-only:** the normalized payload hash MUST include only config-file extension IDs (+ settings). Transitive dependency installs are side effects of listed IDs and MUST NOT expand the marker hash input. A matching marker still means “config payload already applied”; deps are installed as part of that apply when the payload is pending, not as separate config entries.
+- After each installed (or already-present) extension is processed, the CLI MUST attempt to install that package’s `package.json` **`extensionDependencies` and `extensionPack`** string IDs **transitively** (breadth-first or equivalent), with a **shared cycle guard** (visited bare `publisher.name` set) covering both fields so mutual or repeated IDs do not loop forever.
+- Each dependency or pack-member ID follows the same install + registry rules and the same per-ID soft-fail as config-listed IDs.
+- Soft-fail of one dependency or pack-member ID MUST NOT by itself abort processing of other queued IDs (pack and deps share the same soft-fail policy — neither hard-fails lifecycle).
+- **Marker hash remains config-only:** the normalized payload hash MUST include only config-file extension IDs (+ settings). Transitive dependency and pack-member installs are side effects of listed IDs and MUST NOT expand the marker hash input. A matching marker still means “config payload already applied”; transitive IDs are installed as part of that apply when the payload is pending, not as separate config entries.
 
 **Soft-fail (MUST)**
 
@@ -449,52 +454,80 @@ That successful open is the same **CLI attach hook** approximation used for post
 
 - Soft-fail extensions apply ≠ postAttach fail-keep. postAttach non-zero after a run still fails the lifecycle command and keeps the container.
 
-#### Scenario: extensions install after successful --vscode open on up
+#### Scenario: extensions install before open on up --vscode
 - Given a valid config with well-formed `customizations.vscode.extensions`, successful create-path, and no matching guest marker
 - When the user runs `up --vscode` and host `code` launch succeeds
-- Then after open success the CLI attempts to install missing extension IDs into the remote extensions directory under the resolved remote connection user home
+- Then the CLI attempts to install missing extension IDs **before** open into the remote extensions directory under the resolved remote connection user home
 - And each successfully installed ID is listed in the guest `extensions.json` registry (not folder-only)
-- And then postAttach runs per existing policy when present
+- And then open runs, then postAttach runs per existing policy when present
 - And lifecycle success is preserved when extensions apply soft-fails (absent postAttach failure)
+
+#### Scenario: marketplace VSIX targets guest platform not host
+- Given a Linux guest (e.g. aarch64 Apple container → `linux-arm64`) and a multi-arch extension ID pending install
+- When extensions apply downloads a marketplace VSIX
+- Then version resolve prefers a gallery row whose `targetPlatform` matches the guest (not an arbitrary host/first row)
+- And the asset URL includes the guest `targetPlatform` qualifier when that row is platform-specific (universal assets omit the query)
+- And the CLI does not silently install a darwin/win32 host VSIX into the guest
+
+#### Scenario: unknown guest platform soft-fails extensions apply
+- Given guest architecture cannot be mapped to a marketplace `targetPlatform`
+- When extensions apply would otherwise download VSIX assets
+- Then the CLI soft-fails extensions apply with a clear warning
+- And MUST NOT download a host-platform VSIX as a silent fallback
+- And lifecycle success is preserved solely for that soft-fail
 
 #### Scenario: folder unpack alone is not UI-visible without registry
 - Given an extension folder already exists under the remote extensions directory but `extensions.json` does not list that extension (registry empty or missing entry)
-- When extensions apply runs for that ID (open gate satisfied, marker pending)
+- When extensions apply runs for that ID (`--vscode` flag set, marker pending)
 - Then the CLI upserts the registry entry for that ID (and SHOULD invalidate extensions user cache when registry changes)
 - And install is treated complete for that ID only after registry listing succeeds (folder-only is insufficient)
+
+#### Scenario: registry metadata.pinned reflects version pin only
+- Given a bare config ID `publisher.name` and a version-pinned ID `publisher.name@1.2.3`
+- When registry entries are built for each
+- Then bare ID entry has `metadata.pinned` **false**
+- And version-pinned ID entry has `metadata.pinned` **true**
 
 #### Scenario: transitive extensionDependencies install (Swift → lldb-dap style)
 - Given config lists `swiftlang.swift-vscode` (or equivalent) whose unpacked `package.json` declares a hard `extensionDependencies` entry such as `llvm-vs-code-extensions.lldb-dap`
 - When extensions apply runs successfully for the config-listed ID
-- Then the CLI attempts install of the dependency ID (and further transitive deps) with cycle guard
+- Then the CLI attempts install of the dependency ID (and further transitive deps/pack members) with cycle guard
 - And dependency failures soft-fail per ID without failing lifecycle solely due to apply
 - And the marker hash input still contains only the config-listed extension IDs (plus settings), not the transitive dependency IDs as extra config entries
 
+#### Scenario: transitive extensionPack install (csdevkit-style pack + deps)
+- Given config lists only a root extension (e.g. `ms-dotnettools.csdevkit`) whose unpacked `package.json` declares both `extensionPack` members (e.g. `ms-dotnettools.csharp`) and `extensionDependencies` (e.g. `ms-dotnettools.vscode-dotnet-runtime`)
+- When extensions apply runs successfully for the config-listed ID
+- Then the CLI attempts install of **both** pack members and dependency IDs (and further transitive IDs from either field) with the shared visited bare-id cycle guard
+- And failure of one pack or dep ID soft-fails that ID and continues the queue without failing lifecycle solely due to apply
+- And the marker hash input still contains only the config-listed extension IDs (plus settings), not transitive pack/dep IDs as extra config entries
+
 #### Scenario: extensions skipped without --vscode
 - Given well-formed extensions in config
-- When the user runs `up` (or `start` / `clone`) **without** `--vscode`
+- When the user runs `up` (or `start` / `clone` / `rebuild`) **without** `--vscode`
 - Then the CLI MUST NOT install those extensions on that invocation
 - And settings may still have been applied on create-path
 - And the command is not failed solely because extensions were not applied
 
-#### Scenario: extensions skipped when open soft-fails
+#### Scenario: extensions still apply when open soft-fails under --vscode
 - Given well-formed extensions and lifecycle that would otherwise succeed
 - When the user runs with `--vscode` and open soft-fails
-- Then the CLI MUST NOT install extensions for that invocation
+- Then the CLI still attempts extensions install for that invocation (flag gate only)
 - And lifecycle success is unchanged by open soft-fail alone
 - And postAttach remains skipped per existing policy
+- And the marker MAY be finalized when extensions apply fully succeeds even though open soft-failed
 
 #### Scenario: extensions soft-fail keeps lifecycle success
-- Given open success under `--vscode` and extension install forced to fail
+- Given `--vscode` set and extension install forced to fail
 - When extensions apply runs
 - Then stderr includes a warning
 - And the lifecycle command exit remains success when postAttach is absent or exits 0
 - And the container is not deleted or stopped solely due to extensions apply failure
 
-#### Scenario: start with --vscode applies pending extensions
+#### Scenario: start with --vscode applies pending extensions before open
 - Given a managed container where settings may already be applied but extensions are still pending (marker missing/drift) and config loads via start config-load paths
-- When the user runs `start --vscode` and open succeeds
-- Then the CLI attempts pending extensions install after open success
+- When the user runs `start --vscode`
+- Then the CLI attempts pending extensions install before open
 - And soft-fail and idempotency policies apply
 
 #### Scenario: postAttach still fail-keep after extensions apply
@@ -519,10 +552,10 @@ The CLI MUST record successful application of the **normalized** customizations 
 
 1. Before apply work, the CLI SHOULD read the marker (if present) and compare to the hash of the current normalized payload from resolved/loadable config.
 2. When the marker hash **matches**, the CLI MUST skip redundant settings merge and extensions install for that payload.
-3. When the marker is **missing** or the hash **differs** (config edited without rebuilding), the CLI MUST treat apply as pending and run the applicable apply steps (settings per settings requirement; extensions only when the open gate is satisfied).
-4. The CLI MUST write/update the marker to the new hash only after the apply steps required for that invocation’s pending work have completed successfully for the full normalized payload. If only settings could run (no open) and extensions remain pending, the CLI MUST NOT claim full-payload success in the marker until extensions are also successfully applied **or** the normalized payload has no extensions. (If payload has both settings and extensions: settings-only success on create-path without open leaves extensions pending — marker MUST NOT match full payload until extensions succeed on a later open, unless product chooses a split marker; v1 MUST ensure extensions still run on first successful open when not yet applied. A single marker for the full payload is acceptable if create-path settings re-merge remains safe/idempotent when extensions later complete and then the full hash is written.)
-5. Apply MUST NOT blindly re-run on every postAttach or every successful open when the marker already matches.
-6. Marker hash input MUST NOT include transitive `extensionDependencies` IDs discovered at install time — only config-listed extension IDs (normalized) and settings. Transitive installs remain side effects of applying listed IDs when apply runs.
+3. When the marker is **missing** or the hash **differs** (config edited without rebuilding), the CLI MUST treat apply as pending and run the applicable apply steps (settings per settings requirement; extensions only when the `--vscode` flag gate is satisfied).
+4. The CLI MUST write/update the marker to the new hash only after the apply steps required for that invocation’s pending work have completed successfully for the full normalized payload. If only settings could run (no `--vscode`) and extensions remain pending, the CLI MUST NOT claim full-payload success in the marker until extensions are also successfully applied **or** the normalized payload has no extensions. (If payload has both settings and extensions: settings-only success on create-path without `--vscode` leaves extensions pending — marker MUST NOT match full payload until extensions succeed on a later `--vscode` invocation, unless product chooses a split marker; v1 MUST ensure extensions still run on first `--vscode` when not yet applied. A single marker for the full payload is acceptable if create-path settings re-merge remains safe/idempotent when extensions later complete and then the full hash is written. Marker finalization on full extensions success MUST NOT require open success.)
+5. Apply MUST NOT blindly re-run on every postAttach or every `--vscode` invocation when the marker already matches.
+6. Marker hash input MUST NOT include transitive `extensionDependencies` or `extensionPack` IDs discovered at install time — only config-listed extension IDs (normalized) and settings. Transitive installs remain side effects of applying listed IDs when apply runs.
 
 **Normalization**
 
@@ -531,20 +564,20 @@ The CLI MUST record successful application of the **normalized** customizations 
 
 #### Scenario: matching marker skips re-apply
 - Given a guest marker whose hash matches the normalized extensions+settings from config
-- When the user runs `up --vscode` (or start/clone) with open success
+- When the user runs `up --vscode` (or start/clone)
 - Then the CLI skips redundant settings merge and extensions install for that payload
 - And does not fail solely due to skip
 
 #### Scenario: hash drift re-applies
 - Given a guest marker that does not match the current normalized payload (e.g. extension ID added in config without rebuilding)
-- When a path runs that can apply (settings on create/reuse/start load; extensions on open success)
+- When a path runs that can apply (settings on create/reuse/start load; extensions when `--vscode` is set)
 - Then the CLI attempts apply for the drifted payload per the settings and extensions requirements
 - And updates the marker only according to successful full-payload completion rules above
 
-#### Scenario: not every open blindly reinstalls
+#### Scenario: not every --vscode blindly reinstalls
 - Given a matching marker after a prior successful full apply
-- When the user runs `start --vscode` again with open success
-- Then extensions are not reinstalled solely because open succeeded again
+- When the user runs `start --vscode` again
+- Then extensions are not reinstalled solely because `--vscode` was set again
 
 ---
 

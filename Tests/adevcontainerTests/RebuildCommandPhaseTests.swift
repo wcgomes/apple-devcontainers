@@ -235,12 +235,14 @@ final class RecordingGuestOps: VSCodeGuestOperating, @unchecked Sendable {
     var lastWrite: String?
     var writes: [String] = []
     var dirsEnsured: [String] = []
+    var onWrite: ((String) -> Void)?
 
     func resolveHome(containerId: String, user: String?) throws -> String { home }
     func readTextFile(containerId: String, path: String, user: String?) throws -> String? { existingText }
     func writeTextFile(containerId: String, path: String, contents: String, user: String?) throws {
         lastWrite = "\(path):\(contents)"
         writes.append("\(path):\(contents)")
+        onWrite?(path)
     }
     func ensureDirectory(containerId: String, path: String, user: String?) throws {
         dirsEnsured.append(path)
@@ -248,10 +250,13 @@ final class RecordingGuestOps: VSCodeGuestOperating, @unchecked Sendable {
     func listDirectoryNames(containerId: String, path: String, user: String?) throws -> [String] { [] }
     func removeFile(containerId: String, path: String, user: String?) throws {}
     func unpackZip(containerId: String, zipData: Data, destDir: String, user: String?) throws {}
+    func resolveMarketplaceTargetPlatform(containerId: String, user: String?) throws -> String {
+        "linux-arm64"
+    }
 }
 
 struct StubVSIXDownloader: VSCodeVSIXDownloading {
-    func fetchVSIX(extensionId: String) throws -> VSCodeVSIXArtifact {
+    func fetchVSIX(extensionId: String, targetPlatform: String) throws -> VSCodeVSIXArtifact {
         VSCodeVSIXArtifact(data: Data(), installFolderName: "\(extensionId)-1.0.0")
     }
 }
@@ -1852,7 +1857,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(guest.writes.contains { $0.contains("settings.json") }, "settings applied without --vscode")
     }),
 
-    ("rebuildVscodeOpenExtensionsThenPostAttach", {
+    ("rebuildVscodeExtensionsThenOpenThenPostAttach", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
         {
           "image": "alpine:3.20",
@@ -1876,8 +1881,13 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         )
         s.containers = [info]
         s.install()
+        var sequence: [String] = []
         let launcher = MockVSCodeLauncher()
+        launcher.onLaunch = { sequence.append("open") }
         let guest = RecordingGuestOps()
+        guest.onWrite = { path in
+            if path.contains("extensions.json") { sequence.append("extensions") }
+        }
         let restore = RebuildOpenSupport.install(launcher: launcher, resolverPath: "/usr/local/bin/code")
         defer { restore() }
         let stderr = try withEnabledStatusStderr {
@@ -1887,10 +1897,12 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         }
         try MiniTest.expectEqual(launcher.calls.count, 1, "VS Code opened once")
         try expectNoPostSuccessConnectionHints(stderr)
-        try MiniTest.expect(guest.writes.contains { $0.contains("extensions.json") }, "extensions applied after open")
+        try MiniTest.expect(guest.writes.contains { $0.contains("extensions.json") }, "extensions applied before open")
         let postAttachIdx = s.mock.calls.firstIndex { $0.arguments.last?.contains("postAttachCustom") == true }
         try MiniTest.expect(postAttachIdx != nil, "postAttach ran after open")
         try MiniTest.expect(guest.writes.contains { $0.contains("settings.json") }, "settings applied too")
+        // extensions registry write precedes open; postAttach is after open in lifecycle.
+        try MiniTest.expect(sequence.firstIndex(of: "extensions")! < sequence.firstIndex(of: "open")!)
     }),
 
     ("rebuildVscodeOpenSoftFailSucceedsNoPostAttach", {

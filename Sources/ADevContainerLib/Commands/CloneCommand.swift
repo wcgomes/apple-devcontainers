@@ -5,11 +5,19 @@ public struct CloneOptions: Sendable {
     public var skipPull: Bool
     /// Best-effort open of VS Code on the remote workspace after lifecycle success.
     public var openVSCode: Bool
+    /// Machine-readable success JSON on stdout when true; human digest otherwise.
+    public var jsonOutput: Bool
 
-    public init(gitURL: String, skipPull: Bool = false, openVSCode: Bool = false) {
+    public init(
+        gitURL: String,
+        skipPull: Bool = false,
+        openVSCode: Bool = false,
+        jsonOutput: Bool = false
+    ) {
         self.gitURL = gitURL
         self.skipPull = skipPull
         self.openVSCode = openVSCode
+        self.jsonOutput = jsonOutput
     }
 }
 
@@ -344,7 +352,14 @@ public enum CloneCommand {
             gitUrl: identity.normalizedGitURL,
             workspaceVolume: identity.workspaceVolumeName
         )
-        // Open → extensions (on success) → postAttach (never before open when --vscode).
+        // Extensions (`--vscode` only) → open → postAttach (never before open when --vscode).
+        if options.openVSCode {
+            _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
+                containerId: id,
+                config: effectiveConfig,
+                runtime: runtime
+            )
+        }
         let openOutcome = VSCodeOpen.openIfRequested(
             options.openVSCode,
             target: VSCodeOpenTarget(
@@ -355,13 +370,6 @@ public enum CloneCommand {
                 remoteUser: result.remoteUser
             )
         )
-        if openOutcome.isOpenSuccess {
-            _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
-                containerId: id,
-                config: effectiveConfig,
-                runtime: runtime
-            )
-        }
         try LifecycleRunner.applyPostAttachGate(
             openOutcome: openOutcome,
             containerId: id,

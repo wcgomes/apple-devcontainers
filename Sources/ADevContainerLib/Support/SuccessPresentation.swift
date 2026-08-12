@@ -1,11 +1,13 @@
 import Foundation
 #if canImport(Darwin)
 import Darwin
+#elseif canImport(Glibc)
+import Glibc
 #endif
 
 /// Post-success human presentation: outcome digest (stdout) then connection hints (stderr).
 ///
-/// Terminal order for human `up`/`rebuild`:
+/// Terminal order for human `up`/`clone`/`rebuild`:
 /// ```
 /// ==> Ready
 /// outcome: success
@@ -15,7 +17,7 @@ import Darwin
 /// Open in VS Code with: …
 /// ```
 public enum SuccessPresentation {
-    /// Human key/value digest on stdout (not used for `--json` / clone JSON).
+    /// Human key/value digest on stdout (not used for `--json`).
     public static func emitHumanDigest(
         outcome: String,
         containerId: String,
@@ -59,13 +61,27 @@ public enum SuccessPresentation {
         )
     }
 
+    /// Clone human digest: up-shape fields plus clone-only `gitUrl` / `workspaceVolume`.
+    public static func emitHumanDigest(_ result: CloneResult) {
+        emitHumanDigest(
+            outcome: result.outcome,
+            containerId: result.containerId,
+            remoteUser: result.remoteUser,
+            remoteWorkspaceFolder: result.remoteWorkspaceFolder,
+            containerName: result.containerName
+        )
+        let pad = TerminalStyle.nestIndent
+        print("\(pad)gitUrl: \(result.gitUrl)")
+        print("\(pad)workspaceVolume: \(result.workspaceVolume)")
+    }
+
     /// Flush stdout then emit connection hints on stderr with a leading blank line.
     /// Skipped when `--vscode` opened the editor (hints are redundant).
     public static func emitConnectionHintsIfNeeded(openVSCode: Bool, nameOrId: String) {
         guard !openVSCode else { return }
         // Prefer libc fflush — FileHandle.synchronizeFile throws on non-seekable pipes (tests).
-        #if canImport(Darwin)
-        fflush(stdout)
+        #if canImport(Darwin) || canImport(Glibc)
+        fflush(nil)
         #endif
         StatusPrinter.connectionHint(nameOrId: nameOrId, leadingBlank: true)
     }
