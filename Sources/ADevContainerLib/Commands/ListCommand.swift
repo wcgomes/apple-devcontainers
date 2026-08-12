@@ -50,36 +50,15 @@ public enum ListCommand {
             return s
         }
 
-        // Human table
+        // Human table (shared layout with InteractivePicker).
         if managed.isEmpty {
             return "No managed containers"
         }
-        var lines: [String] = []
-        let displayNames = managed.map { info in
-            RecoveryHelper.isRecoveryHelper(info) ? "\(info.name) [RECOVERY]" : info.name
-        }
-        let nameWidth = max(4, displayNames.map(\.count).max() ?? 4)
-        let stateWidth = max(5, managed.map(\.state.count).max() ?? 5)
-        let header =
-            pad("NAME", nameWidth)
-            + "  " + pad("STATE", stateWidth)
-            + "  MODE    GIT_URL"
-        lines.append(header)
-        for (info, displayName) in zip(managed, displayNames) {
-            let mode = info.labels[ContainerIdentity.labelWorkspaceMode] ?? "-"
-            let git = info.labels[ContainerIdentity.labelGitURL] ?? ""
-            lines.append(
-                pad(displayName, nameWidth)
-                + "  " + pad(info.state, stateWidth)
-                + "  " + pad(mode, 6)
-                + "  " + git
-            )
+        let widths = ManagedContainerTable.Widths(containers: managed)
+        var lines: [String] = [ManagedContainerTable.header(widths: widths)]
+        for info in managed {
+            lines.append(ManagedContainerTable.row(info: info, widths: widths))
         }
         return lines.joined(separator: "\n")
-    }
-
-    private static func pad(_ s: String, _ width: Int) -> String {
-        if s.count >= width { return s }
-        return s + String(repeating: " ", count: width - s.count)
     }
 }

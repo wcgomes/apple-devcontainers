@@ -207,6 +207,22 @@ Apple named volumes mount **root:root** ([gaps](../domain/devcontainer-apple-gap
 - `start`: runtime start of a managed container; **volume-mode runs no hooks** (bind start-stopped `postStart` stays on `up` path).
 - `exec`: user/workdir from labels `devcontainer.remote_user` / `devcontainer.workspace_folder` when set (both modes stamp workdir; new creates always stamp non-empty `remote_user` incl. `root`; empty label = legacy omit `-u` — see [Connection user](#connection-user-remoteuser--containeruser)).
 
+### InteractivePicker (multi-container)
+
+`ManagedContainers.resolveSelection` → **`InteractivePicker`** when `--name` omitted and more than one managed container. Code: `ManagedContainers.swift`, `TerminalRawInput.swift`. Rows/header via shared **`ManagedContainerTable`** (NAME STATE MODE GIT_URL; lead `>` / `N)` — [terminal-output](terminal-output.md#managed-container-table-list--interactivepicker)).
+
+| Mode | When | Behavior |
+|------|------|----------|
+| Live navigable | `.default` only (`prefersLiveRawInput == true`), stdin TTY, raw enter succeeds | ↑/↓ or j/k move, Enter confirm, Esc/Ctrl-C cancel, digits **1–9** jump; UI on **stderr**; selected lead `>` `styleCommand` |
+| Numbered `readLine` | Non-TTY, raw setup fail, or no live raw path | Numbered lead `N)` table + `Enter number:` on stderr |
+| Fail closed | `!picker.isInteractive` and multi | `selection_required` — still need `--name` (non-interactive never auto-picks among many) |
+
+**`prefersLiveRawInput`:** only `InteractivePicker.default` sets `true`. Custom inits default `false` so injected `readLine` / `readInput` skip live termios (tests). Explicit `readInput` always takes the navigable path without opening raw stdin.
+
+**`TerminalRawInput`:** termios raw clears `ICANON | ECHO | ISIG`; Ctrl-C arrives as `0x03` → cancel so `defer` always restores prior termios (never leave host shell without ICANON/ECHO). Non-TTY or `tcsetattr` fail → `nil` → numbered fallback.
+
+Presentation / QUIET: [terminal-output.md](terminal-output.md) (picker stays raw stderr, not QUIET-gated).
+
 ## `up` reuse vs `rebuild` (forced rebuild)
 
 | Path | Behavior |

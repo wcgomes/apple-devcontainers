@@ -147,6 +147,18 @@ nonisolated(unsafe) let terminalStyleTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!success.contains(TerminalStyle.ansiErrorRed))
         try MiniTest.expect(!success.contains(TerminalStyle.ansiWarningYellow))
     }),
+    ("terminalStyleMutedDistinctFromInfoDim", {
+        let muted = TerminalStyle.styleMuted("stopped", color: true)
+        let info = TerminalStyle.styleInfo("stopped", color: true)
+        try MiniTest.expect(muted.contains(TerminalStyle.ansiMutedGray))
+        try MiniTest.expect(muted.contains(TerminalStyle.ansiBold))
+        try MiniTest.expect(!muted.contains(TerminalStyle.ansiDim))
+        try MiniTest.expect(info.contains(TerminalStyle.ansiDim))
+        try MiniTest.expect(!info.contains(TerminalStyle.ansiMutedGray))
+        try MiniTest.expect(muted != info)
+        try MiniTest.expectEqual(TerminalStyle.stripANSI(muted), "stopped")
+        try MiniTest.expectEqual(TerminalStyle.styleMuted("stopped", color: false), "stopped")
+    }),
     ("terminalStylePhaseItemParentheticalWhite", {
         let line = TerminalStyle.stylePhase(
             "==> Running postStartCommand (feature 1)",

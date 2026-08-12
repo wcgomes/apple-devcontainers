@@ -40,6 +40,8 @@ public enum TerminalStyle {
     public static let ansiErrorRed = "\u{001B}[38;5;196m"
     /// Success value (e.g. outcome success): 256-color green (46).
     public static let ansiSuccessGreen = "\u{001B}[38;5;46m"
+    /// Muted secondary text (e.g. non-running STATE): 256-color gray (245), distinct from SGR dim.
+    public static let ansiMutedGray = "\u{001B}[38;5;245m"
     /// Hint lines under errors: soft cyan (distinct from phase steel blue 75).
     public static let ansiHintCyan = "\u{001B}[38;5;87m"
 
@@ -179,6 +181,12 @@ public enum TerminalStyle {
     public static func styleInfo(_ text: String, color: Bool? = nil) -> String {
         guard color ?? colorEnabled else { return text }
         return ansiDim + text + ansiReset
+    }
+
+    /// Bold muted gray (256-color 245), distinct from `styleInfo` dim — e.g. non-running container STATE.
+    public static func styleMuted(_ text: String, color: Bool? = nil) -> String {
+        guard color ?? colorEnabled else { return text }
+        return ansiBold + ansiMutedGray + text + ansiReset
     }
 
     /// Emphasized command / copy-paste target: bold default foreground (reads as white on dark themes).

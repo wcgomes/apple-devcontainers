@@ -1,6 +1,6 @@
 # Convention: Terminal output presentation
 
-Product host-terminal presentation: **StatusPrinter** + **TerminalStyle** + **SuccessPresentation**. Prefer StatusPrinter for product progress/warn/info; CLIError.formatted for human errors; SuccessPresentation for post-success digest/hints. Do not write product lines via raw `FileHandle.standardError` (interactive prompts may stay raw — not QUIET-gated). Prescriptive contract: [specs/terminal-output.md](../../specs/terminal-output.md). Change archive: `specs/changes/archive/20260811-improve-terminal-logs/`.
+Product host-terminal presentation: **StatusPrinter** + **TerminalStyle** + **SuccessPresentation**. Prefer StatusPrinter for product progress/warn/info; CLIError.formatted for human errors; SuccessPresentation for post-success digest/hints. Do not write product lines via raw `FileHandle.standardError` (**exception:** interactive prompts / **InteractivePicker** UI stay raw stderr — not QUIET-gated). Prescriptive contract: [specs/terminal-output.md](../../specs/terminal-output.md). Change archive: `specs/changes/archive/20260811-improve-terminal-logs/`.
 
 ## Channels (stderr vs stdout)
 
@@ -59,8 +59,22 @@ Live-tee internal tools (hooks, Features build, clone populate `streamOutput: tr
 | Phase, info, connection hints | Silent |
 | `warning: `, human `error: ` | Emit |
 | Framed tool body | Emit |
-| Interactive prompts | Still usable |
+| Interactive prompts / picker UI | Still usable (raw stderr) |
 | JSON / human digest stdout | Unchanged |
+
+## Managed container table (list + InteractivePicker)
+
+**`ManagedContainerTable`** shared human layout for `list` (stdout) and **InteractivePicker** (stderr). Code: `ManagedContainerTable.swift`.
+
+Columns (header dim `styleInfo`): **NAME STATE MODE GIT_URL**. Pad plain cells, then style (ANSI must not skew columns). Cell styles (color on): name `stylePhaseHead`; state `styleSuccess` when running else **`styleMuted`** (bold + 256 fg `245` — not weight-normal; distinct from header `styleInfo` dim); mode `styleCommand`; git plain default foreground (not dim, not bold). Recovery helpers append ` [RECOVERY]` on the name. Monochrome when color off; `list --json` monochrome.
+
+| Surface | Stream | Lead column |
+|---------|--------|-------------|
+| Human `list` | stdout | none (`lead=0`) |
+| Navigable picker | stderr | `" > "` when selected (`>` = `styleCommand`) / `"   "` else |
+| Numbered picker | stderr | right-padded `"  N) "` |
+
+Picker chrome (raw stderr, not StatusPrinter / not QUIET-gated): prompt `Select a container:`; navigable hint dim `styleInfo` (`↑/↓ move · Enter select · Esc cancel`). Keys/raw-mode: [cli-runtime-boundary — InteractivePicker](cli-runtime-boundary.md#interactivepicker-multi-container).
 
 ## Color (TerminalStyle)
 
@@ -74,7 +88,8 @@ Enable when stderr is a TTY and `NO_COLOR` unset. `FORCE_COLOR=1` may force; **`
 | Error label only | Bold red `196`; body dim |
 | Error `hint:` line | Cyan `87` |
 | Outcome `success` | Bold green `46` |
-| Info / tool lines | Dim |
+| Info / tool lines / table header | Dim (`styleInfo`) |
+| Muted (non-running STATE) | Bold + 256 fg `245` (`styleMuted`; not weight-normal; not header dim) |
 
 ## Nomenclature (user-facing)
 
