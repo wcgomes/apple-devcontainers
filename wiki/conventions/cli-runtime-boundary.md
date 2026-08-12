@@ -134,7 +134,7 @@ Set on create and use for reuse/inspect/`list`:
 | Label `devcontainer.workspace_mode` | `bind` on `up` create; `volume` on `clone` create |
 | Label `devcontainer.workspace_volume` | Workspace volume name (`adev-*-ws`; volume-mode) |
 | Label `devcontainer.git_url` | Normalized remote (userinfo stripped; volume-mode) |
-| Label `devcontainer.config_volumes` | Config `type=volume` names for prune |
+| Label `devcontainer.config_volumes` | Config `type=volume` source names — **prune candidate set only** (delete gated on real mounts; see [prune](#prune-resource-set)) |
 | Label `devcontainer.workspace_folder` | Create-time container workdir for exec (both modes) |
 | Label `devcontainer.remote_user` | Resolved connection user at create (both modes); **always non-empty on new creates** (incl. `root`); empty = legacy only; consumed by `exec` / `--vscode` |
 
@@ -234,19 +234,21 @@ Presentation / QUIET: [terminal-output.md](terminal-output.md) (picker stays raw
 
 ## `prune` resource set
 
-`prune` removes, in product order appropriate to the runtime:
+`prune` removes container + config `image` + **unreferenced** candidate volumes. Labels define candidates only — **not** unconditional volume delete.
 
 | Resource | Included? |
 |----------|-----------|
-| Workspace container | Yes |
-| Named volumes from config `mounts` (`type=volume`, via label) | Yes |
-| Workspace volume `adev-*-ws` (volume-mode) | Yes |
+| Workspace container | Yes (first; fail → no volume deletes) |
+| Named volumes from config `mounts` (`type=volume`, via `config_volumes` label) | Candidate only — delete **iff unreferenced** after target gone |
+| Workspace volume `adev-*-ws` (volume-mode, `workspace_volume` label) | Candidate only — same attachment gate |
 | Config `image` reference | Yes |
 | Derived Features tags (`adev-{base}:{hash12}` / `adevcontainer:{hash12}`) | **No** — not removed unless the tag equals config `image` |
 | Bind-mount host paths | **No** |
 | Global `volume prune` / `image prune` | **No** |
 
-Missing resources are skipped. Exit non-zero only if deleting an **existing** resource fails. Contrast with `delete` (container only).
+**Attachment gate (after target container deleted or already absent):** for each distinct candidate name, inspect real volume mounts on **all** remaining containers (managed or not, **running or stopped**) via `containersAttached` / `list --all` style inspection. Target does not count. **Unreferenced** + exists → delete. **Referenced (shared)** → preserve + stderr StatusPrinter warning listing referencers (prefer name+id); share-only is **not** a hard failure (exit 0 when no other hard fails). **Attach inspect fail** → preserve that volume + non-zero. Runtime rejection on volume delete remains hard-fail. Missing resources skipped.
+
+**Model:** labels live on containers, not volumes; same volume name = shared resource (Docker-like). No Compose `external` / shared-private naming schema. `delete` stays container-only. Recovery-helper prune skip unchanged. Contract: [`specs/managed-lifecycle.md`](../../specs/managed-lifecycle.md); archive [`20260812-prune-shared-volume-safety`](../../specs/changes/archive/20260812-prune-shared-volume-safety/).
 
 ## Features runner
 
