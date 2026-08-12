@@ -37,7 +37,9 @@ public enum FeatureOptions {
         return out.trimmingCharacters(in: CharacterSet(charactersIn: "_"))
     }
 
-    /// Environment map for install.sh (options only; feature containerEnv is runtime merge).
+    /// Environment map for install.sh from resolved options (UPPER_SNAKE keys).
+    /// Feature metadata `containerEnv` is emitted as Dockerfile `ENV` lines (install-time,
+    /// BuildKit expands `$VAR`/`${VAR}`) and merged again at runtime create/exec (config-wins).
     public static func installEnvironment(
         user: [String: FeatureOptionValue],
         defaults: [String: FeatureOptionValue]
@@ -82,7 +84,19 @@ public enum FeatureOptions {
         user == "root" ? "/root" : "/home/\(user)"
     }
 
-    /// Dockerfile ENV lines / export prefix for RUN install.sh.
+    /// Dockerfile `ENV KEY=value` lines for feature metadata `containerEnv`.
+    /// Values preserve `$VAR` / `${VAR}` for BuildKit/Docker ENV expansion — never
+    /// shell single-quote (that would wipe PATH when value is `$PATH:…`).
+    public static func dockerfileEnvLines(_ env: [String: String]) -> [String] {
+        guard !env.isEmpty else { return [] }
+        return env.keys.sorted().map { key in
+            "ENV \(key)=\(dockerfileEnvValue(env[key] ?? ""))"
+        }
+    }
+
+    /// Shell export prefix for RUN install.sh (options + user contract keys).
+    /// Uses single-quote escaping; do **not** put feature `containerEnv` with `$VAR`
+    /// refs through this path — use `dockerfileEnvLines` instead.
     public static func installEnvExportPrefix(_ env: [String: String]) -> String {
         guard !env.isEmpty else { return "" }
         let parts = env.keys.sorted().map { key in
@@ -90,6 +104,21 @@ public enum FeatureOptions {
             return "\(key)=\(val)"
         }
         return parts.joined(separator: " ") + " "
+    }
+
+    /// Escape a value for a Dockerfile `ENV KEY=…` assignment without blocking `$` expansion.
+    private static func dockerfileEnvValue(_ s: String) -> String {
+        if s.isEmpty { return "\"\"" }
+        // Unquoted when safe; include $ { } so PATH=$PATH:$DOTNET_ROOT stays expandable.
+        let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_./:+@${}"))
+        if s.unicodeScalars.allSatisfy({ safe.contains($0) }) {
+            return s
+        }
+        // Double-quote when whitespace/special chars present; Docker still expands $VAR.
+        let escaped = s
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
     }
 
     private static func shellEscape(_ s: String) -> String {

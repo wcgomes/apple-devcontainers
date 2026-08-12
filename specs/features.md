@@ -169,8 +169,21 @@ When `features` is non-empty after admission, on a fresh create path the product
 3. **Pull** the config base image with **`--platform`** set to the host-native Linux platform:
    - `linux/arm64` when the host is arm64 / aarch64 (product default on Apple Silicon)
    - `linux/amd64` only when the host is x86_64
-  4. **Build** a derived image with Apple `container build` from a **generated Dockerfile** that `FROM`s the base image and, per feature, `COPY`s the package then `RUN`s recursive `chmod -R 0755` on the package directory **before** `./install.sh` **as root** (options / `_REMOTE_USER` / `_CONTAINER_USER` env) so scripts `install.sh` copies into bare-path lifecycle hooks remain executable (ref CLI parity; avoids exit 126). After **all** feature install layers, the generated Dockerfile MUST restore the **base image’s** final OCI `USER` per **Features install as root then restore base image USER**. Install remains as root with `_REMOTE_USER` / `_CONTAINER_USER` env; the Dockerfile MUST NOT leave the derived image’s final default user as root solely because install ran as root when the base image USER was non-root. `_REMOTE_USER` / `_CONTAINER_USER` install env MUST be derived from config `remoteUser` / `containerUser` without inventing editor usernames; when both unset, install env MUST use the inspected base image USER when non-empty, else `root` — MUST NOT hardcode `vscode`. Callers MUST fail closed on base inspect failure before fabricating install-env users. Build argv MUST include the same host-native **`--platform`**.
-  5. **Tag** a deterministic local image as `adev-{base}:{hash12}`, where `base` is the same human base as container identity and `hash12` is a 12-character content hash of base image + features + a product **`recipeVersion`** constant (install Dockerfile semantics epoch). If `base` is empty → `adevcontainer:{hash12}`. MUST NOT use an `adevcontainer/features:` prefix or a `/features` path segment. **Reuse** when that tag already exists locally (skip rebuild). When generator install-layer semantics change (e.g. chmod recipe, final-`USER` restore), the product MUST bump `recipeVersion` so existing tags miss and rebuild.
+  4. **Build** a derived image with Apple `container build` from a **generated Dockerfile** that `FROM`s the base image and, per feature, `COPY`s the package then `RUN`s recursive `chmod -R 0755` on the package directory **before** `./install.sh` **as root** so scripts `install.sh` copies into bare-path lifecycle hooks remain executable (ref CLI parity; avoids exit 126). After **all** feature install layers, the generated Dockerfile MUST restore the **base image’s** final OCI `USER` per **Features install as root then restore base image USER**. Install remains as root; the Dockerfile MUST NOT leave the derived image’s final default user as root solely because install ran as root when the base image USER was non-root. Callers MUST fail closed on base inspect failure before fabricating install-env users. Build argv MUST include the same host-native **`--platform`**.
+
+     **Install env composition (MUST)** — for **each** feature install layer, make that feature’s declared metadata `containerEnv` (from `devcontainer-feature.json`) available to that feature’s `./install.sh` during the install `RUN` (parity with `@devcontainers/cli` ENV-before-install intent):
+
+     1. Feature metadata **`containerEnv`** key/value pairs declared for that feature, emitted as Dockerfile **`ENV` lines before** that feature’s install `RUN`. Values MUST preserve `$VAR` / `${VAR}` for BuildKit/Docker ENV expansion and MUST NOT be shell single-quoted (single-quoting blocks expansion and can replace `PATH` with a literal `$PATH:…` string).
+     2. Feature **options** (resolved user options over metadata defaults), mapped to install env names as today, on the install `RUN` export prefix.
+     3. **`_REMOTE_USER` / `_CONTAINER_USER`** (and homes) per existing Features install user-env contract (config users → base image USER → `root`; no hardcoded editor usernames), on the install `RUN` export prefix so they win over `ENV` for the install process on key collision. `_REMOTE_USER` / `_CONTAINER_USER` install env MUST be derived from config `remoteUser` / `containerUser` without inventing editor usernames; when both unset, install env MUST use the inspected base image USER when non-empty, else `root` — MUST NOT hardcode `vscode`.
+
+     **Empty metadata (MUST):** When a feature’s `containerEnv` is absent or empty, install env MUST still include options and user keys; no extra feature `ENV` lines are required.
+
+     **Scope of availability (MUST):** Each feature’s `containerEnv` MUST be visible to **that** feature’s `install.sh`. The product MUST NOT omit a non-empty declared key solely because runtime merge also applies the same key later.
+
+     **Unchanged (MUST NOT regress):** Runtime merge of feature `containerEnv` into effective create/exec env remains **config `containerEnv` wins** on key conflict (see **Merge feature metadata into create and lifecycle**). Config-file `containerEnv` is **not** required in the install Dockerfile; install-time source is feature metadata only.
+
+  5. **Tag** a deterministic local image as `adev-{base}:{hash12}`, where `base` is the same human base as container identity and `hash12` is a 12-character content hash of base image + features + a product **`recipeVersion`** constant (install Dockerfile semantics epoch). If `base` is empty → `adevcontainer:{hash12}`. MUST NOT use an `adevcontainer/features:` prefix or a `/features` path segment. **Reuse** when that tag already exists locally (skip rebuild). Current Features `recipeVersion` is **`"5"`** (ENV-before-RUN feature `containerEnv` with expandable `$VAR`/`${VAR}`; prior epoch `"4"` was RUN-prefix containerEnv without expandable `$` refs). When generator install-layer semantics change (e.g. chmod recipe, final-`USER` restore, install-env composition), the product MUST bump `recipeVersion` so existing tags miss and rebuild.
 6. **Create** the managed dev container **from the derived image** (not the raw config `image`) with the same **`--platform`**. Contributions that affect create flags (`init`, `capAdd`, env, mounts) MUST be merged **before** create.
 7. **Start** the container, then run lifecycle hooks (onCreate → …) as today.
 
@@ -251,6 +264,43 @@ On `rebuild`, the same derived-tag identity material applies: when the rebuilt c
 - When the Features Dockerfile install env is generated
 - Then `_REMOTE_USER` and `_CONTAINER_USER` are `node` (not unconditional `root`, not `vscode`)
 
+#### Scenario: install sees feature containerEnv
+- Given a feature whose metadata declares `containerEnv.DOTNET_ROOT=/usr/share/dotnet` (or equivalent non-empty map)
+- When the Features Dockerfile install layer for that feature is generated
+- Then the generated Dockerfile includes `ENV DOTNET_ROOT=/usr/share/dotnet` (or equivalent non-single-quoted ENV form) before that feature’s install `RUN`
+- And that feature’s `./install.sh` install environment includes `DOTNET_ROOT` with value `/usr/share/dotnet`
+
+#### Scenario: containerEnv PATH dollar-refs expand (no single-quote wipe)
+- Given a feature whose metadata declares `containerEnv.DOTNET_ROOT=/usr/share/dotnet` and `containerEnv.PATH=$PATH:$DOTNET_ROOT` (or `${PATH}:$DOTNET_ROOT`)
+- When the Features Dockerfile install layer for that feature is generated
+- Then the Dockerfile contains an `ENV` assignment for `PATH` whose value still includes expandable `$PATH` / `${PATH}` (e.g. `ENV PATH=$PATH:$DOTNET_ROOT`)
+- And the Dockerfile does **not** contain a shell single-quoted PATH value such as `PATH='$PATH:$DOTNET_ROOT'`
+- And `DOTNET_ROOT` is still available to `install.sh` (via `ENV` or equivalent)
+- And system utilities on the base image PATH (e.g. `dirname`) remain reachable during install because PATH is not replaced by the literal string `$PATH:…`
+
+#### Scenario: empty containerEnv unchanged
+- Given a feature with absent or empty metadata `containerEnv`
+- When the Features Dockerfile install layer for that feature is generated
+- Then install env still includes resolved option keys and `_REMOTE_USER` / `_CONTAINER_USER` (and homes)
+- And no extra feature `containerEnv` keys are required
+
+#### Scenario: install env still has options and user keys
+- Given a feature with options and non-empty metadata `containerEnv`, and config/base user inputs that resolve install users
+- When the Features Dockerfile install layer is generated
+- Then install env includes option-derived keys, the feature’s `containerEnv` keys, and `_REMOTE_USER` / `_CONTAINER_USER` (and homes)
+- And option/user keys remain on the RUN export prefix (not forced into `ENV` solely by this change)
+
+#### Scenario: recipeVersion bump invalidates derived tags (epoch 4 vs 5)
+- Given the same base image + feature refs/options
+- When derived tags are computed with product `recipeVersion` `"4"` vs `"5"`
+- Then the tags differ (stale images built under the prior install recipe are not reused)
+
+#### Scenario: runtime merge still config-wins (no change from install-time containerEnv)
+- Given feature metadata `containerEnv.FOO=from-feature` and config `containerEnv.FOO=from-config`
+- When effective **runtime** env is computed for create/exec
+- Then `FOO` is `from-config`
+- And this conflict policy is unchanged by install-time `containerEnv` availability
+
 ---
 
 ### Requirement: Features install as root then restore base image USER
@@ -328,7 +378,7 @@ After features are resolved (and before create for flag contributions; lifecycle
 |--------------|----------------|
 | `init` | Effective create includes `--init` (union with config `runArgs` `--init`) |
 | `capAdd` | Each capability mapped via the existing **cap-add allowlist path**; disallowed names fail closed with structured error |
-| `containerEnv` | Merged into effective env; **config `containerEnv` wins** on key conflict |
+| `containerEnv` | Merged into effective **runtime** create/exec env; **config `containerEnv` wins** on key conflict. Install-time availability of feature `containerEnv` is governed solely by **Derived image build** and MUST NOT reverse or weaken config-wins at runtime |
 | mounts | Bind and volume only; sources normalized with **MountNormalizer** for file→dir promotion; incompatible mount types fail structured |
 | lifecycle hooks contributed by features | Appended/merged into the create-path exec order after start (installs already in derived image); same string/argv/object-map forms and failure/delete-on-fail policy as config hooks for create-path failures |
 

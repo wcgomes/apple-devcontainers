@@ -100,7 +100,21 @@ Contract + README/CLI help landed (archive `20260810-rebuild`). Remaining gaps o
 
 ### Features build (Rosetta / platform / USER)
 
-Apple BuildKit with `build.rosetta=true` can require Rosetta even for native arm64 image builds. Product ensures `build.rosetta=false` (one-time consent) and passes `--platform linux/arm64` on Features pull/build/create. Feature install runs **as root** then Dockerfile **restores base OCI USER** (`recipeVersion` **`"3"`**); install env uses base USER when config remote/container user empty. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
+Apple BuildKit with `build.rosetta=true` can require Rosetta even for native arm64 image builds. Product ensures `build.rosetta=false` (one-time consent) and passes `--platform linux/arm64` on Features pull/build/create. Feature install runs **as root** then Dockerfile **restores base OCI USER** (`recipeVersion` **`"5"`**); install env uses base USER when config remote/container user empty. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
+
+### Features install `containerEnv`
+
+**Shipped** (`recipeVersion` **`"5"`**): `FeatureDockerfileGenerator` emits feature metadata `containerEnv` as Dockerfile **`ENV` before** each feature’s install `RUN` (Dockerfile expands `$PATH`/`$VAR` — single-quoted RUN-prefix `PATH` wiped system PATH, e.g. dotnet). Feature **options** and user contract keys (`_REMOTE_USER` / `_CONTAINER_USER`) stay on the install **`RUN` env prefix**.
+
+| Piece | Fact |
+|-------|------|
+| Install | Metadata `containerEnv` → Dockerfile `ENV` before `./install.sh` (e.g. dotnet `DOTNET_ROOT`, `PATH=…:$PATH`) |
+| RUN prefix | Options + `_REMOTE_USER` / `_CONTAINER_USER` only (base USER when config remote/container user empty) |
+| Precedence | `ENV` then RUN prefix; options/user overwrite on key collision for that install layer |
+| Runtime | Create/exec merge unchanged: feature contributions then **config wins** |
+| Example | `references/multiplatform` — `base:ubuntu` + `dotnet:2` + `node:1` (no pre-built language image required solely for install env) |
+
+Detail: [cli-runtime-boundary — Features runner](../conventions/cli-runtime-boundary.md#features-runner).
 
 ### VS Code attach (`--vscode` + manual)
 
@@ -147,7 +161,7 @@ CLI apply is a **seed** (download VSIX, unpack, registry upsert) — not full ga
 - **Lifecycle**: run via `container exec` (hook matrix: create-path full order on `up`/`clone`; bind start-stopped `postStart` only; bare `start` no create-path/postStart; reuse none for create-path; **postAttach implemented** — runs after successful `--vscode` open only, skip otherwise, fail-keep; `start` loads config from labels; feature postAttach from image metadata on reuse/`start`). Forms: string | argv | named object map (map runs sequentially sorted by name, not true parallel). Exec must expand `containerEnv` PATH refs (same as create) or login-shell hooks fail (`id`/`bash` not found). Not Docker entrypoint injection parity. Detail: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md).
 - **`runArgs`**: allowlist (`--init`, `--cap-add`/`--cap-drop`, …); privileged/tun/device/security family **warn-skip**; unknown and first-class smuggling flags fail closed.
 - **`hostRequirements`**: preflight — fail on memory/cpus shortfall; map requested limits to create `-m`/`-c` when host OK; warn unsupported `gpu`; fail on unparseable/unknown keys.
-- **Features**: OCI + local path fetch/load + derived image build on `up` (see [cli-runtime-boundary](../conventions/cli-runtime-boundary.md)); **warn-skip** `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker` and privileged/securityOpt metadata ([0003](../decisions/0003-warn-skip-apple-incompatibles.md)). Install as root, restore base USER; `recipeVersion` `"3"`.
+- **Features**: OCI + local path fetch/load + derived image build on `up` (see [cli-runtime-boundary](../conventions/cli-runtime-boundary.md)); **warn-skip** `docker-outside-of-docker`, `docker-in-docker`, `docker-from-docker` and privileged/securityOpt metadata ([0003](../decisions/0003-warn-skip-apple-incompatibles.md)). Install as root, restore base USER; `recipeVersion` `"5"`. Metadata `containerEnv` → Dockerfile `ENV` before install RUN; options + user keys on RUN prefix — [Features install containerEnv](#features-install-containerenv). Runtime create/exec still config-wins.
 - **Connection user**: local `remoteUser` → local `containerUser` → image metadata last non-empty remote/container user → OCI USER → root (chain unchanged). **Create `-u`:** explicit `containerUser` if set; else non-root connection user; else omit when root — Apple attach ignores nameConfig `remoteUser` / uses container default. Successful create always stamps non-empty `devcontainer.remote_user` (incl. `root`; empty = legacy only). Archive: [`specs/changes/archive/20260811-align-remote-user-resolution/`](../../specs/changes/archive/20260811-align-remote-user-resolution/).
 
 ## Reference config hotspots
