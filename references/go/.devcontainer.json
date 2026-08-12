@@ -1,0 +1,19 @@
+{
+  "name": "reference-go",
+  "image": "mcr.microsoft.com/devcontainers/go:1-1.23-bookworm",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "postCreateCommand": "go version",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go"
+      ],
+      "settings": {
+        "go.toolsManagement.autoUpdate": true,
+        "gopls": {
+          "ui.semanticTokens": true
+        }
+      }
+    }
+  }
+}

@@ -61,6 +61,11 @@ public enum FeatureDockerfileGenerator {
             try? fileManager.removeItem(atPath: destFeatureDir)
             try copyPackage(from: pkg.directoryPath, to: destFeatureDir, fileManager: fileManager)
 
+            // Feature metadata containerEnv → Dockerfile ENV before install RUN so
+            // BuildKit expands $PATH/$VAR (parity with @devcontainers/cli). Do not
+            // put these through installEnvExportPrefix (shell single-quotes wipe PATH).
+            // Options + _REMOTE_*/_CONTAINER_* stay on the RUN export prefix and win
+            // over ENV for the install process on key collision.
             var installEnv = FeatureOptions.installEnvironment(
                 user: feature.admitted.options,
                 defaults: feature.metadata.optionDefaults
@@ -69,10 +74,14 @@ public enum FeatureDockerfileGenerator {
                 installEnv[k] = v
             }
             let exportPrefix = FeatureOptions.installEnvExportPrefix(installEnv)
+            let envLines = FeatureOptions.dockerfileEnvLines(feature.metadata.containerEnv)
 
             lines.append("# Feature: \(feature.admitted.reference)")
             lines.append("USER root")
             lines.append("COPY \(featureDirName) /tmp/adev-feature-\(index)")
+            for envLine in envLines {
+                lines.append(envLine)
+            }
             // Match @devcontainers/cli: chmod -R 0755 the package before install so
             // lifecycle scripts (e.g. shell-history oncreate.sh) remain executable when
             // install.sh copies them into /usr/local/share/… for bare-path shell hooks.

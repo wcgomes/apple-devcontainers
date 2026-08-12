@@ -2840,6 +2840,193 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(ctx.dockerfileContents.contains("_REMOTE_USER=node"))
         try MiniTest.expect(ctx.dockerfileContents.contains("_CONTAINER_USER=node"))
     }),
+    ("featureDockerfileGeneratorInstallSeesContainerEnv", {
+        // Feature metadata containerEnv (e.g. DOTNET_ROOT) must reach install.sh.
+        var meta = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refA
+        )
+        meta.containerEnv["DOTNET_ROOT"] = "/usr/share/dotnet"
+        let ctxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-df-cenv-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: ctxDir) }
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(
+                    reference: FeaturesTestSupport.refA,
+                    options: ["greeting": .string("hi")]
+                ),
+                metadata: meta
+            )
+        ]
+        let packages = [
+            FetchedFeaturePackage(
+                reference: FeaturesTestSupport.refA,
+                directoryPath: FeaturesTestSupport.fixtureFeatureDir("sample-a")
+            )
+        ]
+        let ctx = try FeatureDockerfileGenerator.write(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            packages: packages,
+            contextDirectory: ctxDir,
+            remoteUser: "vscode",
+            containerUser: "vscode",
+            baseUser: "root"
+        )
+        let contents = ctx.dockerfileContents
+        // Metadata containerEnv is Dockerfile ENV (not RUN single-quoted prefix).
+        try MiniTest.expect(contents.contains("ENV DOTNET_ROOT=/usr/share/dotnet"))
+        try MiniTest.expect(contents.contains("ENV SAMPLE_A=from-feature-a"))
+        try MiniTest.expect(contents.contains("./install.sh"))
+        // Config-file containerEnv must not appear in install Dockerfile.
+        try MiniTest.expect(!contents.contains("from-config"))
+    }),
+    ("featureDockerfileGeneratorContainerEnvPathDollarRefs", {
+        // PATH=$PATH:$DOTNET_ROOT must not become PATH='$PATH:…' (wipes real PATH).
+        var meta = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refA
+        )
+        meta.containerEnv["DOTNET_ROOT"] = "/usr/share/dotnet"
+        meta.containerEnv["PATH"] = "$PATH:$DOTNET_ROOT"
+        let ctxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-df-path-refs-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: ctxDir) }
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(
+                    reference: FeaturesTestSupport.refA,
+                    options: ["greeting": .string("hi")]
+                ),
+                metadata: meta
+            )
+        ]
+        let packages = [
+            FetchedFeaturePackage(
+                reference: FeaturesTestSupport.refA,
+                directoryPath: FeaturesTestSupport.fixtureFeatureDir("sample-a")
+            )
+        ]
+        let ctx = try FeatureDockerfileGenerator.write(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            packages: packages,
+            contextDirectory: ctxDir,
+            remoteUser: "vscode",
+            containerUser: "vscode",
+            baseUser: "root"
+        )
+        let contents = ctx.dockerfileContents
+        try MiniTest.expect(contents.contains("ENV DOTNET_ROOT=/usr/share/dotnet"))
+        try MiniTest.expect(contents.contains("ENV PATH=$PATH:$DOTNET_ROOT"))
+        try MiniTest.expect(!contents.contains("PATH='$PATH:$DOTNET_ROOT'"))
+        try MiniTest.expect(!contents.contains("PATH=\"'$PATH:$DOTNET_ROOT'\""))
+        // Options / user keys remain on RUN export prefix (not ENV).
+        try MiniTest.expect(contents.contains("GREETING=hi"))
+        try MiniTest.expect(!contents.contains("ENV GREETING="))
+        try MiniTest.expect(contents.contains("_REMOTE_USER=vscode"))
+        try MiniTest.expect(!contents.contains("ENV _REMOTE_USER="))
+        // ENV lines appear before the feature's install RUN.
+        let envPathIdx = contents.range(of: "ENV PATH=$PATH:$DOTNET_ROOT")?.lowerBound
+        let runIdx = contents.range(of: "RUN chmod -R 0755")?.lowerBound
+        try MiniTest.expect(envPathIdx != nil && runIdx != nil)
+        if let envPathIdx, let runIdx {
+            try MiniTest.expect(envPathIdx < runIdx)
+        }
+    }),
+    ("featureDockerfileGeneratorEmptyContainerEnvUnchanged", {
+        let meta = FeatureMetadata(
+            id: "no-cenv",
+            containerEnv: [:],
+            optionDefaults: ["greeting": .string("hello")]
+        )
+        let ctxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-df-empty-cenv-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: ctxDir) }
+        // Need a real package with install.sh — use sample-a package path but empty-cenv metadata.
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(
+                    reference: FeaturesTestSupport.refA,
+                    options: ["greeting": .string("yo")]
+                ),
+                metadata: meta
+            )
+        ]
+        let packages = [
+            FetchedFeaturePackage(
+                reference: FeaturesTestSupport.refA,
+                directoryPath: FeaturesTestSupport.fixtureFeatureDir("sample-a")
+            )
+        ]
+        let ctx = try FeatureDockerfileGenerator.write(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            packages: packages,
+            contextDirectory: ctxDir,
+            remoteUser: "vscode",
+            containerUser: "vscode",
+            baseUser: "root"
+        )
+        let contents = ctx.dockerfileContents
+        try MiniTest.expect(contents.contains("GREETING=yo"))
+        try MiniTest.expect(contents.contains("_REMOTE_USER=vscode"))
+        try MiniTest.expect(contents.contains("_CONTAINER_USER=vscode"))
+        try MiniTest.expect(contents.contains("_REMOTE_USER_HOME=/home/vscode"))
+        try MiniTest.expect(contents.contains("_CONTAINER_USER_HOME=/home/vscode"))
+        // Fixture SAMPLE_A must not leak when metadata.containerEnv is empty.
+        try MiniTest.expect(!contents.contains("SAMPLE_A="))
+        try MiniTest.expect(!contents.contains("DOTNET_ROOT="))
+    }),
+    ("featureDockerfileGeneratorContainerEnvWithOptionsAndUser", {
+        var meta = try FeatureMetadata.parse(
+            data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
+                .appendingPathComponent("devcontainer-feature.json")),
+            featureRef: FeaturesTestSupport.refA
+        )
+        meta.containerEnv["DOTNET_ROOT"] = "/usr/share/dotnet"
+        let ctxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-df-coexist-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: ctxDir) }
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(
+                    reference: FeaturesTestSupport.refA,
+                    options: ["greeting": .string("hi")]
+                ),
+                metadata: meta
+            )
+        ]
+        let packages = [
+            FetchedFeaturePackage(
+                reference: FeaturesTestSupport.refA,
+                directoryPath: FeaturesTestSupport.fixtureFeatureDir("sample-a")
+            )
+        ]
+        let ctx = try FeatureDockerfileGenerator.write(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            packages: packages,
+            contextDirectory: ctxDir,
+            remoteUser: "dev",
+            containerUser: "dev",
+            baseUser: "root"
+        )
+        let contents = ctx.dockerfileContents
+        try MiniTest.expect(contents.contains("ENV DOTNET_ROOT=/usr/share/dotnet"))
+        try MiniTest.expect(contents.contains("ENV SAMPLE_A=from-feature-a"))
+        try MiniTest.expect(contents.contains("GREETING=hi"))
+        try MiniTest.expect(!contents.contains("ENV GREETING="))
+        try MiniTest.expect(contents.contains("_REMOTE_USER=dev"))
+        try MiniTest.expect(contents.contains("_CONTAINER_USER=dev"))
+        try MiniTest.expect(contents.contains("_REMOTE_USER_HOME=/home/dev"))
+        try MiniTest.expect(contents.contains("USER root"))
+        let lastUserLine = contents.split(separator: "\n").last(where: { $0.hasPrefix("USER ") })
+        try MiniTest.expectEqual(lastUserLine.map(String.init), "USER root")
+    }),
     ("featuresRunnerFailsClosedOnBaseInspectFailure", {
         let cache = FileManager.default.temporaryDirectory
             .appendingPathComponent("feat-inspect-fail-\(UUID().uuidString)", isDirectory: true).path
@@ -2881,7 +3068,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!mockProc.calls.contains { $0.arguments.first == "build" })
     }),
     ("derivedImageTagRecipeVersionBumpedForUserRestore", {
-        try MiniTest.expectEqual(DerivedImageTag.recipeVersion, "3")
+        try MiniTest.expectEqual(DerivedImageTag.recipeVersion, "5")
         let metaA = try FeatureMetadata.parse(
             data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
                 .appendingPathComponent("devcontainer-feature.json")),
@@ -2893,19 +3080,25 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
                 metadata: metaA
             )
         ]
-        let v2 = DerivedImageTag.compute(
+        let v4 = DerivedImageTag.compute(
             baseImage: "alpine:3.20",
             ordered: ordered,
             nameBase: "x",
-            recipeVersion: "2"
+            recipeVersion: "4"
         )
-        let v3 = DerivedImageTag.compute(
+        let v5 = DerivedImageTag.compute(
             baseImage: "alpine:3.20",
             ordered: ordered,
             nameBase: "x",
-            recipeVersion: "3"
+            recipeVersion: "5"
         )
-        try MiniTest.expect(v2 != v3, "recipeVersion bump must change derived tag")
+        try MiniTest.expect(v4 != v5, "recipeVersion bump must change derived tag")
+        let product = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            nameBase: "x"
+        )
+        try MiniTest.expectEqual(product, v5)
     }),
     ("tomlMergeBuildRosettaFalsePreservesKeys", {
         let input = """
@@ -3138,7 +3331,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
     }),
     ("featureDerivedTagChangesWithRecipeVersion", {
         // Generator install-semantics bumps must invalidate stale derived images
-        // (e.g. chmod +x install.sh only → chmod -R 0755 package).
+        // (e.g. containerEnv as ENV with $VAR expansion → recipeVersion 5).
         let metaA = try FeatureMetadata.parse(
             data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
                 .appendingPathComponent("devcontainer-feature.json")),
@@ -3157,24 +3350,24 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             baseImage: "alpine:3.20",
             ordered: ordered,
             nameBase: "app",
-            recipeVersion: "2"
+            recipeVersion: "5"
         )
         let sameVAgain = DerivedImageTag.compute(
             baseImage: "alpine:3.20",
             ordered: ordered,
             nameBase: "app",
-            recipeVersion: "2"
+            recipeVersion: "5"
         )
-        let bumped = DerivedImageTag.compute(
+        let prior = DerivedImageTag.compute(
             baseImage: "alpine:3.20",
             ordered: ordered,
             nameBase: "app",
-            recipeVersion: "3"
+            recipeVersion: "4"
         )
         try MiniTest.expectEqual(sameV, sameVAgain)
-        try MiniTest.expect(sameV != bumped)
+        try MiniTest.expect(sameV != prior)
         try MiniTest.expect(sameV.hasPrefix("adev-app:"))
-        try MiniTest.expect(bumped.hasPrefix("adev-app:"))
+        try MiniTest.expect(prior.hasPrefix("adev-app:"))
         try MiniTest.expectEqual(
             String(sameV.split(separator: ":").last ?? "").count,
             12
