@@ -15,6 +15,8 @@ let allTests: [(String, () throws -> Void)] = []
     + statusPrinterTests
     + processRunnerFramingTests
     + cliErrorPresentationTests
+    + interactivePickerTests
+    + listCommandTests
     + discoveryTests
     + parserTests
     + substitutionTests
