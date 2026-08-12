@@ -2102,13 +2102,16 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
             image: "alpine:3.20"
         )
         let volumeListData = try JSONSerialization.data(withJSONObject: [["id": volName]] as [[String: Any]])
+        var containerDeleted = false
         mock.handlers = [
             { args in
                 if args.starts(with: ["list"]) {
-                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    let payload: [Any] = containerDeleted ? [] : [entry]
+                    let data = try! JSONSerialization.data(withJSONObject: payload)
                     return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
                 }
                 if args.first == "delete" {
+                    containerDeleted = true
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
                 if args == ["volume", "list", "--format", "json"] {
@@ -2151,13 +2154,16 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
             ["id": "cfg-vol-b"],
             ["id": wsVol]
         ] as [[String: Any]])
+        var containerDeleted = false
         mock.handlers = [
             { args in
                 if args.starts(with: ["list"]) {
-                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    let payload: [Any] = containerDeleted ? [] : [entry]
+                    let data = try! JSONSerialization.data(withJSONObject: payload)
                     return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
                 }
                 if args.first == "delete" {
+                    containerDeleted = true
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
                 if args == ["volume", "list", "--format", "json"] {

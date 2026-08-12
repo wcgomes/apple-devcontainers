@@ -578,6 +578,8 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(mock.calls.contains {
             $0.arguments.starts(with: ["delete"]) && $0.arguments.contains(resolved.containerName)
         })
+        // Ordinary delete remains container-only (no volume deletes / no force-volumes).
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.starts(with: ["volume", "delete"]) })
     }),
     ("inspectAfterUpShape", {
         let workspace = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
@@ -651,13 +653,17 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
             ["id": "vol-b"]
         ]
         let volumeListData = try JSONSerialization.data(withJSONObject: volumeList)
+        var containerDeleted = false
         mock.handlers = [
             { args in
                 if args.starts(with: ["list"]) {
-                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    // After target delete, attachment inspection must not see the target.
+                    let payload: [Any] = containerDeleted ? [] : [entry]
+                    let data = try! JSONSerialization.data(withJSONObject: payload)
                     return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
                 }
                 if args.first == "delete" {
+                    containerDeleted = true
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
                 if args == ["volume", "list", "--format", "json"] {
@@ -761,8 +767,450 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         }) { error in
             try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.containerNotFound)
         }
+    }),
+    ("prunePreservesVolumeMountedByAnotherRunningContainer", {
+        let targetID = "adev-target-prune"
+        let otherID = "other"
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelConfigVolumes: "shared-data"
+        ]
+        let target = MockProcessRunner.containerListJSON(
+            id: targetID, state: "stopped", labels: labels, image: "alpine:3.20"
+        )
+        let other = pruneAttachedContainerJSON(
+            id: otherID, state: "running", volumes: ["shared-data"]
+        )
+        let volumeListData = try JSONSerialization.data(withJSONObject: [["id": "shared-data"]] as [[String: Any]])
+        var containerDeleted = false
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let payload: [Any] = containerDeleted ? [other] : [target]
+                    let data = try! JSONSerialization.data(withJSONObject: payload)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "delete" {
+                    containerDeleted = true
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: volumeListData, stderr: Data())
+                }
+                if args.starts(with: ["volume", "delete"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.starts(with: ["image", "delete"]) || args.starts(with: ["image", "rm"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let code = try PruneCommand.run(name: targetID, runtime: runtime)
+        try MiniTest.expectEqual(code, 0)
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" })
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments == ["volume", "delete", "shared-data"] },
+            "shared volume must not be deleted while another container mounts it"
+        )
+        let preserve = warnings.first { $0.contains("Preserving volume 'shared-data'") }
+        try MiniTest.expect(preserve != nil, "expected preserve-because-referenced warning")
+        try MiniTest.expect(preserve!.contains("referenced by containers:"))
+        try MiniTest.expect(preserve!.contains(otherID))
+    }),
+    ("prunePreservesVolumeMountedByStoppedContainer", {
+        let targetID = "adev-target-stopped-share"
+        let otherID = "stopped-other"
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelConfigVolumes: "v1"
+        ]
+        let target = MockProcessRunner.containerListJSON(
+            id: targetID, state: "stopped", labels: labels, image: "alpine:3.20"
+        )
+        let other = pruneAttachedContainerJSON(
+            id: otherID, state: "stopped", volumes: ["v1"]
+        )
+        let volumeListData = try JSONSerialization.data(withJSONObject: [["id": "v1"]] as [[String: Any]])
+        var containerDeleted = false
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let payload: [Any] = containerDeleted ? [other] : [target]
+                    let data = try! JSONSerialization.data(withJSONObject: payload)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "delete" {
+                    containerDeleted = true
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: volumeListData, stderr: Data())
+                }
+                if args.starts(with: ["volume", "delete"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.starts(with: ["image", "delete"]) || args.starts(with: ["image", "rm"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let code = try PruneCommand.run(name: targetID, runtime: runtime)
+        try MiniTest.expectEqual(code, 0)
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments == ["volume", "delete", "v1"] },
+            "stopped attachments still protect the volume"
+        )
+        try MiniTest.expect(warnings.contains { $0.contains("Preserving volume 'v1'") && $0.contains(otherID) })
+    }),
+    ("pruneDeletesUnreferencedAmongMixedAttachments", {
+        let targetID = "adev-target-mixed"
+        let otherID = "peer"
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelConfigVolumes: "vol-shared,vol-only"
+        ]
+        let target = MockProcessRunner.containerListJSON(
+            id: targetID, state: "stopped", labels: labels, image: "alpine:3.20"
+        )
+        let other = pruneAttachedContainerJSON(
+            id: otherID, state: "running", volumes: ["vol-shared"]
+        )
+        let volumeListData = try JSONSerialization.data(withJSONObject: [
+            ["id": "vol-shared"],
+            ["id": "vol-only"]
+        ] as [[String: Any]])
+        var containerDeleted = false
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let payload: [Any] = containerDeleted ? [other] : [target]
+                    let data = try! JSONSerialization.data(withJSONObject: payload)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "delete" {
+                    containerDeleted = true
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: volumeListData, stderr: Data())
+                }
+                if args.starts(with: ["volume", "delete"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.starts(with: ["image", "delete"]) || args.starts(with: ["image", "rm"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let code = try PruneCommand.run(name: targetID, runtime: runtime)
+        try MiniTest.expectEqual(code, 0)
+        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "delete", "vol-only"] })
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments == ["volume", "delete", "vol-shared"] }
+        )
+        try MiniTest.expect(warnings.contains {
+            $0.contains("Preserving volume 'vol-shared'") && $0.contains(otherID)
+        })
+    }),
+    ("prunePreservesSharedWorkspaceVolumeAndRemovesUnreferenced", {
+        let targetID = "adev-ws-share-target"
+        let otherID = "ws-peer"
+        let wsVol = "adev-app-sharetest-ws"
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
+            ContainerIdentity.labelWorkspaceVolume: wsVol
+        ]
+        let target = MockProcessRunner.containerListJSON(
+            id: targetID, state: "stopped", labels: labels, image: "alpine:3.20"
+        )
+        let other = pruneAttachedContainerJSON(
+            id: otherID, state: "running", volumes: [wsVol]
+        )
+        let volumeListData = try JSONSerialization.data(withJSONObject: [["id": wsVol]] as [[String: Any]])
+        var containerDeleted = false
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let payload: [Any] = containerDeleted ? [other] : [target]
+                    let data = try! JSONSerialization.data(withJSONObject: payload)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "delete" {
+                    containerDeleted = true
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: volumeListData, stderr: Data())
+                }
+                if args.starts(with: ["volume", "delete"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.starts(with: ["image", "delete"]) || args.starts(with: ["image", "rm"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let code = try PruneCommand.run(name: targetID, runtime: runtime)
+        try MiniTest.expectEqual(code, 0)
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments == ["volume", "delete", wsVol] },
+            "shared workspace volume must be preserved"
+        )
+        try MiniTest.expect(warnings.contains {
+            $0.contains("Preserving volume '\(wsVol)'") && $0.contains(otherID)
+        })
+    }),
+    ("pruneContainerDeleteFailureBlocksAllVolumeDeletes", {
+        let targetID = "adev-target-delete-fail"
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelConfigVolumes: "vol-a,vol-b"
+        ]
+        let target = MockProcessRunner.containerListJSON(
+            id: targetID, state: "stopped", labels: labels, image: "alpine:3.20"
+        )
+        let volumeListData = try JSONSerialization.data(withJSONObject: [
+            ["id": "vol-a"],
+            ["id": "vol-b"]
+        ] as [[String: Any]])
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [target])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "delete" {
+                    return ProcessResult(
+                        exitCode: 1,
+                        stdout: Data(),
+                        stderr: Data("delete refused".utf8)
+                    )
+                }
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: volumeListData, stderr: Data())
+                }
+                if args.starts(with: ["volume", "delete"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.starts(with: ["image", "delete"]) || args.starts(with: ["image", "rm"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let code = try PruneCommand.run(name: targetID, runtime: runtime)
+        try MiniTest.expect(code != 0)
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.starts(with: ["volume", "delete"]) },
+            "container delete failure must skip the entire volume-delete loop"
+        )
+    }),
+    ("pruneAttachmentInspectionFailurePreservesVolumeAndFails", {
+        let targetID = "adev-target-attach-fail"
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelConfigVolumes: "risky-vol"
+        ]
+        let target = MockProcessRunner.containerListJSON(
+            id: targetID, state: "stopped", labels: labels, image: "alpine:3.20"
+        )
+        // Missing mounts metadata → containersAttached fails closed.
+        let brokenOther: [String: Any] = [
+            "id": "broken-peer",
+            "configuration": [
+                "id": "broken-peer",
+                "labels": [:] as [String: String]
+            ] as [String: Any],
+            "status": ["state": "running"] as [String: Any]
+        ]
+        let volumeListData = try JSONSerialization.data(withJSONObject: [["id": "risky-vol"]] as [[String: Any]])
+        var containerDeleted = false
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let payload: [Any] = containerDeleted ? [brokenOther] : [target]
+                    let data = try! JSONSerialization.data(withJSONObject: payload)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "delete" {
+                    containerDeleted = true
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: volumeListData, stderr: Data())
+                }
+                if args.starts(with: ["volume", "delete"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.starts(with: ["image", "delete"]) || args.starts(with: ["image", "rm"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let code = try PruneCommand.run(name: targetID, runtime: runtime)
+        try MiniTest.expect(code != 0)
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments == ["volume", "delete", "risky-vol"] },
+            "must not delete volume when attachment inspection fails"
+        )
+    }),
+    ("pruneVolumeDeleteRejectionIsHardFailure", {
+        let targetID = "adev-target-vol-reject"
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelConfigVolumes: "doomed-vol"
+        ]
+        let target = MockProcessRunner.containerListJSON(
+            id: targetID, state: "stopped", labels: labels, image: "alpine:3.20"
+        )
+        let volumeListData = try JSONSerialization.data(withJSONObject: [["id": "doomed-vol"]] as [[String: Any]])
+        var containerDeleted = false
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let payload: [Any] = containerDeleted ? [] : [target]
+                    let data = try! JSONSerialization.data(withJSONObject: payload)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "delete" {
+                    containerDeleted = true
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: volumeListData, stderr: Data())
+                }
+                if args.starts(with: ["volume", "delete"]) {
+                    return ProcessResult(
+                        exitCode: 1,
+                        stdout: Data(),
+                        stderr: Data("volume in use".utf8)
+                    )
+                }
+                if args.starts(with: ["image", "delete"]) || args.starts(with: ["image", "rm"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let code = try PruneCommand.run(name: targetID, runtime: runtime)
+        try MiniTest.expect(code != 0)
+        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "delete", "doomed-vol"] })
+    }),
+    ("pruneOnlyDeletesLabeledCandidatesNotHostExtras", {
+        let targetID = "adev-target-labels-only"
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelConfigVolumes: "from-label"
+        ]
+        let target = MockProcessRunner.containerListJSON(
+            id: targetID, state: "stopped", labels: labels, image: "alpine:3.20"
+        )
+        // Host has both the labeled volume and an unlabeled extra.
+        let volumeListData = try JSONSerialization.data(withJSONObject: [
+            ["id": "from-label"],
+            ["id": "other-vol"]
+        ] as [[String: Any]])
+        var containerDeleted = false
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let payload: [Any] = containerDeleted ? [] : [target]
+                    let data = try! JSONSerialization.data(withJSONObject: payload)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "delete" {
+                    containerDeleted = true
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: volumeListData, stderr: Data())
+                }
+                if args.starts(with: ["volume", "delete"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.starts(with: ["image", "delete"]) || args.starts(with: ["image", "rm"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let code = try PruneCommand.run(name: targetID, runtime: runtime)
+        try MiniTest.expectEqual(code, 0)
+        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "delete", "from-label"] })
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments == ["volume", "delete", "other-vol"] },
+            "volumes not in labels must never be deleted"
+        )
     })
 ]
+
+/// Container list JSON with real volume mounts (RecoveryHelperTests shape) for prune attachment mocks.
+private func pruneAttachedContainerJSON(
+    id: String,
+    state: String,
+    volumes: [String],
+    destinationPrefix: String = "/data"
+) -> [String: Any] {
+    let mounts: [[String: Any]] = volumes.enumerated().map { index, volume in
+        [
+            "source": "/var/lib/container/volumes/\(volume).img",
+            "destination": "\(destinationPrefix)/\(index)",
+            "options": [] as [String],
+            "type": ["volume": ["name": volume]] as [String: Any]
+        ]
+    }
+    return [
+        "id": id,
+        "configuration": [
+            "id": id,
+            "labels": [:] as [String: String],
+            "mounts": mounts
+        ] as [String: Any],
+        "status": ["state": state] as [String: Any]
+    ]
+}
 
 nonisolated(unsafe) let phase1Tests: [(String, () throws -> Void)] = [
     ("envUserWorkspaceFolderOnCreateRequest", {
