@@ -93,6 +93,60 @@ private enum VSCodeCustCmdSupport {
             return nil
         }
     }
+
+    /// True when guest `extensions.json` lists `id` (case-insensitive identifier).
+    static func registryLists(_ guest: MockVSCodeGuest, id: String) -> Bool {
+        let path = VSCodeCustomizationsApply.extensionsRegistryPath(home: guest.home)
+        guard let text = guest.files[path],
+              let data = text.data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return false }
+        let want = id.lowercased()
+        return arr.contains { entry in
+            let ident = entry["identifier"] as? [String: Any]
+            return (ident?["id"] as? String)?.lowercased() == want
+        }
+    }
+
+    static func startRuntimeMock(
+        resolved: ResolvedWorkspace,
+        state: String,
+        extraLabels: [String: String] = [:]
+    ) -> MockProcessRunner {
+        var labels = resolved.labels
+        labels[ContainerIdentity.labelManaged] = ContainerIdentity.managedValue
+        labels[ContainerIdentity.labelWorkspaceFolder] = resolved.config.workspaceFolder
+        labels[ContainerIdentity.labelLocalFolder] = resolved.workspacePath
+        labels[ContainerIdentity.labelConfigFile] = resolved.configPath
+        for (k, v) in extraLabels { labels[k] = v }
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName,
+            state: state,
+            labels: labels,
+            image: "alpine:3.20"
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "start" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "inspect" {
+                    let data = try! JSONSerialization.data(withJSONObject: entry)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        return mock
+    }
 }
 
 nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws -> Void)] = [
@@ -121,14 +175,19 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
         )
         try MiniTest.expectEqual(result.outcome, "success")
         try MiniTest.expectEqual(launcher.calls.count, 0)
-        try MiniTest.expectEqual(dl.calls.count, 0)
         let settingsPath = VSCodeCustomizationsApply.settingsPath(home: guest.home)
         try MiniTest.expect(guest.files[settingsPath] != nil)
         let obj = try JSONSerialization.jsonObject(with: Data(guest.files[settingsPath]!.utf8)) as! [String: Any]
         try MiniTest.expectEqual(obj["editor.tabSize"] as? Int, 2)
-        // Extensions pending → no full marker
+        // Extensions also apply without --vscode; full payload finalizes the marker.
+        try MiniTest.expectEqual(dl.calls, ["pub.name"])
+        try MiniTest.expectEqual(guest.unpackCalls.count, 1)
+        try MiniTest.expect(VSCodeCustCmdSupport.registryLists(guest, id: "pub.name"))
         let markerPath = VSCodeCustomizationsApply.markerPath(home: guest.home)
-        try MiniTest.expect(guest.files[markerPath] == nil)
+        try MiniTest.expectEqual(
+            guest.files[markerPath]?.trimmingCharacters(in: .whitespacesAndNewlines),
+            VSCodeCustomizationsPayload.from(config: resolved.config).contentHash
+        )
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
     }),
 
@@ -188,7 +247,7 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
 
     ("upReuseRepairsSettingsOnMarkerDrift", {
         let ws = try TestRepo.makeTempWorkspace(
-            configJSON: VSCodeCustCmdSupport.configJSON(settings: true, extensions: false)
+            configJSON: VSCodeCustCmdSupport.configJSON(settings: true, extensions: true)
         )
         defer { try? FileManager.default.removeItem(at: ws) }
         let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
@@ -210,7 +269,121 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
         ]
         let guest = MockVSCodeGuest()
         guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)] = "stale"
-        let restoreApply = VSCodeCustCmdSupport.installApply(guest: guest)
+        let dl = MockVSCodeDownloader()
+        let restoreApply = VSCodeCustCmdSupport.installApply(guest: guest, downloader: dl)
+        defer { restoreApply() }
+        let launcher = MockVSCodeLauncher()
+        let restoreOpen = VSCodeCustCmdSupport.installOpen(launcher: launcher)
+        defer { restoreOpen() }
+
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true, openVSCode: false),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(launcher.calls.count, 0)
+        let settingsPath = VSCodeCustomizationsApply.settingsPath(home: guest.home)
+        try MiniTest.expect(guest.files[settingsPath] != nil)
+        try MiniTest.expectEqual(dl.calls, ["pub.name"])
+        try MiniTest.expectEqual(guest.unpackCalls.count, 1)
+        try MiniTest.expect(VSCodeCustCmdSupport.registryLists(guest, id: "pub.name"))
+        let newHash = VSCodeCustomizationsPayload.from(config: resolved.config).contentHash
+        try MiniTest.expectEqual(
+            guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            newHash
+        )
+    }),
+
+    ("upStartStoppedAppliesPendingCustomizationsWithoutVSCode", {
+        let ws = try TestRepo.makeTempWorkspace(
+            configJSON: VSCodeCustCmdSupport.configJSON(settings: true, extensions: true)
+        )
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName,
+            state: "stopped",
+            labels: resolved.labels,
+            image: "alpine:3.20"
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "start" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let guest = MockVSCodeGuest()
+        guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)] = "stale"
+        let dl = MockVSCodeDownloader()
+        let restoreApply = VSCodeCustCmdSupport.installApply(guest: guest, downloader: dl)
+        defer { restoreApply() }
+        let launcher = MockVSCodeLauncher()
+        let restoreOpen = VSCodeCustCmdSupport.installOpen(launcher: launcher)
+        defer { restoreOpen() }
+
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true, openVSCode: false),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(launcher.calls.count, 0)
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "start" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+        let settingsPath = VSCodeCustomizationsApply.settingsPath(home: guest.home)
+        try MiniTest.expect(guest.files[settingsPath] != nil)
+        try MiniTest.expectEqual(dl.calls, ["pub.name"])
+        try MiniTest.expectEqual(guest.unpackCalls.count, 1)
+        try MiniTest.expect(VSCodeCustCmdSupport.registryLists(guest, id: "pub.name"))
+        let newHash = VSCodeCustomizationsPayload.from(config: resolved.config).contentHash
+        try MiniTest.expectEqual(
+            guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            newHash
+        )
+    }),
+
+    ("upReuseMatchingMarkerSkipsApplyWithoutVSCode", {
+        let ws = try TestRepo.makeTempWorkspace(
+            configJSON: VSCodeCustCmdSupport.configJSON(settings: true, extensions: true)
+        )
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName,
+            state: "running",
+            labels: resolved.labels,
+            image: "alpine:3.20"
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let guest = MockVSCodeGuest()
+        let payload = VSCodeCustomizationsPayload.from(config: resolved.config)
+        guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)] = payload.contentHash
+        let dl = MockVSCodeDownloader()
+        let restoreApply = VSCodeCustCmdSupport.installApply(guest: guest, downloader: dl)
         defer { restoreApply() }
 
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
@@ -220,13 +393,13 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
             localEnv: [:]
         )
         try MiniTest.expectEqual(result.outcome, "success")
-        let settingsPath = VSCodeCustomizationsApply.settingsPath(home: guest.home)
-        try MiniTest.expect(guest.files[settingsPath] != nil)
-        let newHash = VSCodeCustomizationsPayload.from(config: resolved.config).contentHash
+        try MiniTest.expectEqual(dl.calls.count, 0)
+        try MiniTest.expectEqual(guest.unpackCalls.count, 0)
+        try MiniTest.expect(guest.files[VSCodeCustomizationsApply.settingsPath(home: guest.home)] == nil)
         try MiniTest.expectEqual(
             guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)]?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
-            newHash
+            payload.contentHash
         )
     }),
 
@@ -301,7 +474,7 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
         try MiniTest.expectEqual(marker, VSCodeCustomizationsPayload.from(config: resolved.config).contentHash)
     }),
 
-    ("upExtensionsSkippedWithoutVSCode", {
+    ("upExtensionsInstallWithoutVSCode", {
         let ws = try TestRepo.makeTempWorkspace(
             configJSON: VSCodeCustCmdSupport.configJSON(settings: false, extensions: true)
         )
@@ -323,8 +496,14 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
             localEnv: [:]
         )
         try MiniTest.expectEqual(result.outcome, "success")
-        try MiniTest.expectEqual(dl.calls.count, 0)
-        try MiniTest.expectEqual(guest.unpackCalls.count, 0)
+        try MiniTest.expectEqual(launcher.calls.count, 0)
+        try MiniTest.expectEqual(dl.calls, ["pub.name"])
+        try MiniTest.expectEqual(guest.unpackCalls.count, 1)
+        try MiniTest.expect(VSCodeCustCmdSupport.registryLists(guest, id: "pub.name"))
+        let marker = guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try MiniTest.expectEqual(marker, VSCodeCustomizationsPayload.from(config: resolved.config).contentHash)
+        try MiniTest.expect(!VSCodeCustCmdSupport.shellBodies(from: mock).contains { $0.contains("postAttach") })
     }),
 
     ("upExtensionsApplyWhenOpenSoftFails", {
@@ -349,7 +528,7 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
             localEnv: [:]
         )
         try MiniTest.expectEqual(result.outcome, "success")
-        // Extensions gate is --vscode only; open soft-fail must not block install.
+        // Extensions apply is not gated on open success; open soft-fail must not block install.
         try MiniTest.expectEqual(dl.calls, ["pub.name"])
         try MiniTest.expectEqual(guest.unpackCalls.count, 1)
         let marker = guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)]?
@@ -480,41 +659,19 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
         try MiniTest.expectEqual(guest.unpackCalls.count, 0)
     }),
 
-    ("startWithVSCodeAppliesPendingExtensions", {
+    ("startWithVSCodeOpensWithoutApplyingCustomizations", {
         let ws = try TestRepo.makeTempWorkspace(
-            configJSON: VSCodeCustCmdSupport.configJSON(settings: true, extensions: true)
+            configJSON: VSCodeCustCmdSupport.configJSON(
+                settings: true,
+                extensions: true,
+                postAttach: "echo postAttach-ran"
+            )
         )
         defer { try? FileManager.default.removeItem(at: ws) }
         let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
-        var labels = resolved.labels
-        labels[ContainerIdentity.labelManaged] = ContainerIdentity.managedValue
-        labels[ContainerIdentity.labelWorkspaceFolder] = resolved.config.workspaceFolder
-        labels[ContainerIdentity.labelLocalFolder] = resolved.workspacePath
-        labels[ContainerIdentity.labelConfigFile] = resolved.configPath
-        let entry = MockProcessRunner.containerListJSON(
-            id: resolved.containerName,
-            state: "stopped",
-            labels: labels,
-            image: "alpine:3.20"
-        )
-        let mock = MockProcessRunner()
-        mock.handlers = [
-            { args in
-                if args.starts(with: ["list"]) {
-                    let data = try! JSONSerialization.data(withJSONObject: [entry])
-                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
-                }
-                if args.first == "start" {
-                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
-                }
-                if args.first == "inspect" {
-                    let data = try! JSONSerialization.data(withJSONObject: entry)
-                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
-                }
-                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
-            }
-        ]
+        let mock = VSCodeCustCmdSupport.startRuntimeMock(resolved: resolved, state: "stopped")
         let guest = MockVSCodeGuest()
+        guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)] = "stale"
         let dl = MockVSCodeDownloader()
         let restoreApply = VSCodeCustCmdSupport.installApply(guest: guest, downloader: dl)
         defer { restoreApply() }
@@ -527,55 +684,93 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
             options: StartOptions(name: resolved.containerName, openVSCode: true),
             runtime: runtime
         )
-        try MiniTest.expectEqual(dl.calls, ["pub.name"])
-        try MiniTest.expectEqual(guest.unpackCalls.count, 1)
-        // Settings repair also attempted
-        try MiniTest.expect(
-            guest.files[VSCodeCustomizationsApply.settingsPath(home: guest.home)] != nil
+        try MiniTest.expectEqual(launcher.calls.count, 1)
+        try MiniTest.expect(VSCodeCustCmdSupport.shellBodies(from: mock).contains("echo postAttach-ran"))
+        try MiniTest.expectEqual(dl.calls.count, 0)
+        try MiniTest.expectEqual(guest.unpackCalls.count, 0)
+        try MiniTest.expect(guest.files[VSCodeCustomizationsApply.settingsPath(home: guest.home)] == nil)
+        try MiniTest.expectEqual(
+            guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            "stale"
         )
     }),
 
     ("startWithoutVSCodeDoesNotInstallExtensions", {
         let ws = try TestRepo.makeTempWorkspace(
-            configJSON: VSCodeCustCmdSupport.configJSON(settings: false, extensions: true)
+            configJSON: VSCodeCustCmdSupport.configJSON(settings: true, extensions: true)
         )
         defer { try? FileManager.default.removeItem(at: ws) }
         let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
-        var labels = resolved.labels
-        labels[ContainerIdentity.labelManaged] = ContainerIdentity.managedValue
-        labels[ContainerIdentity.labelLocalFolder] = resolved.workspacePath
-        labels[ContainerIdentity.labelConfigFile] = resolved.configPath
-        let entry = MockProcessRunner.containerListJSON(
-            id: resolved.containerName,
-            state: "running",
-            labels: labels,
-            image: "alpine:3.20"
-        )
-        let mock = MockProcessRunner()
-        mock.handlers = [
-            { args in
-                if args.starts(with: ["list"]) {
-                    let data = try! JSONSerialization.data(withJSONObject: [entry])
-                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
-                }
-                if args.first == "inspect" {
-                    let data = try! JSONSerialization.data(withJSONObject: entry)
-                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
-                }
-                return nil
-            }
-        ]
+        let mock = VSCodeCustCmdSupport.startRuntimeMock(resolved: resolved, state: "running")
         let guest = MockVSCodeGuest()
+        guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)] = "stale"
         let dl = MockVSCodeDownloader()
         let restoreApply = VSCodeCustCmdSupport.installApply(guest: guest, downloader: dl)
         defer { restoreApply() }
+        let launcher = MockVSCodeLauncher()
+        let restoreOpen = VSCodeCustCmdSupport.installOpen(launcher: launcher)
+        defer { restoreOpen() }
 
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         try StartCommand.run(
             options: StartOptions(name: resolved.containerName, openVSCode: false),
             runtime: runtime
         )
+        try MiniTest.expectEqual(launcher.calls.count, 0)
         try MiniTest.expectEqual(dl.calls.count, 0)
+        try MiniTest.expectEqual(guest.unpackCalls.count, 0)
+        try MiniTest.expect(guest.files[VSCodeCustomizationsApply.settingsPath(home: guest.home)] == nil)
+        try MiniTest.expectEqual(
+            guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            "stale"
+        )
+        try MiniTest.expect(!VSCodeCustCmdSupport.shellBodies(from: mock).contains { $0.contains("postStart") })
+        try MiniTest.expect(!VSCodeCustCmdSupport.shellBodies(from: mock).contains { $0.contains("postAttach") })
+    }),
+
+    ("startPostAttachSkippedWithoutVSCode", {
+        let ws = try TestRepo.makeTempWorkspace(
+            configJSON: VSCodeCustCmdSupport.configJSON(
+                settings: true,
+                extensions: true,
+                postAttach: "exit 99"
+            )
+        )
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let mock = VSCodeCustCmdSupport.startRuntimeMock(resolved: resolved, state: "stopped")
+        let guest = MockVSCodeGuest()
+        guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)] = "stale"
+        let dl = MockVSCodeDownloader()
+        let restoreApply = VSCodeCustCmdSupport.installApply(guest: guest, downloader: dl)
+        defer { restoreApply() }
+        let launcher = MockVSCodeLauncher()
+        let restoreOpen = VSCodeCustCmdSupport.installOpen(launcher: launcher)
+        defer { restoreOpen() }
+
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let stderr = try withEnabledStatusStderr {
+            try StartCommand.run(
+                options: StartOptions(name: resolved.containerName, openVSCode: false),
+                runtime: runtime
+            )
+        }
+        try MiniTest.expectEqual(launcher.calls.count, 0)
+        try MiniTest.expect(!VSCodeCustCmdSupport.shellBodies(from: mock).contains { $0.contains("exit 99") })
+        try MiniTest.expect(
+            stderr.contains("postAttach skipped") && stderr.contains("(no attach hook)"),
+            "start without --vscode must emit postAttach skip status when postAttach is present"
+        )
+        try MiniTest.expectEqual(dl.calls.count, 0)
+        try MiniTest.expectEqual(guest.unpackCalls.count, 0)
+        try MiniTest.expect(guest.files[VSCodeCustomizationsApply.settingsPath(home: guest.home)] == nil)
+        try MiniTest.expectEqual(
+            guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            "stale"
+        )
     }),
 
     ("cloneWithVSCodeAppliesExtensions", {
@@ -609,6 +804,118 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
         try MiniTest.expectEqual(dl.calls, ["pub.name"])
         try MiniTest.expect(
             guest.files[VSCodeCustomizationsApply.settingsPath(home: guest.home)] != nil
+        )
+    }),
+
+    ("cloneWithoutVSCodeAppliesExtensions", {
+        let restoreFeatures = CloneGitFeatureTestSupport.installOverrides()
+        defer { restoreFeatures() }
+        let git = MockGitClient()
+        git.configJSONToWrite = VSCodeCustCmdSupport.configJSON(settings: true, extensions: true)
+        let mock = MockProcessRunner()
+        mock.handlers = CloneRuntimeMock.handlers()
+        let guest = MockVSCodeGuest()
+        let dl = MockVSCodeDownloader()
+        let restoreApply = VSCodeCustCmdSupport.installApply(guest: guest, downloader: dl)
+        defer { restoreApply() }
+        let launcher = MockVSCodeLauncher()
+        let restoreOpen = VSCodeCustCmdSupport.installOpen(launcher: launcher)
+        defer { restoreOpen() }
+
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try CloneCommand.run(
+            options: CloneOptions(
+                gitURL: "https://github.com/org/clone-vsc-ext-no-flag.git",
+                skipPull: true,
+                openVSCode: false
+            ),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(launcher.calls.count, 0)
+        try MiniTest.expectEqual(dl.calls, ["pub.name"])
+        try MiniTest.expectEqual(guest.unpackCalls.count, 1)
+        try MiniTest.expect(VSCodeCustCmdSupport.registryLists(guest, id: "pub.name"))
+        try MiniTest.expect(
+            guest.files[VSCodeCustomizationsApply.settingsPath(home: guest.home)] != nil
+        )
+        let marker = guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try MiniTest.expect(marker != nil && !(marker ?? "").isEmpty)
+        try MiniTest.expect(!VSCodeCustCmdSupport.shellBodies(from: mock).contains { $0.contains("postAttach") })
+    }),
+
+    ("usageAndCommandHelpDoNotGateApplyOnVSCode", {
+        let usage = CommandSurface.usageText()
+        let up = CommandSurface.commandHelpText("up") ?? ""
+        let clone = CommandSurface.commandHelpText("clone") ?? ""
+        let start = CommandSurface.commandHelpText("start") ?? ""
+        let rebuild = CommandSurface.commandHelpText("rebuild") ?? ""
+
+        for (label, text) in [
+            ("usage", usage),
+            ("up help", up),
+            ("clone help", clone),
+            ("start help", start),
+            ("rebuild help", rebuild)
+        ] {
+            try MiniTest.expect(
+                !text.contains("installed when --vscode is set"),
+                "\(label) must not gate extensions on --vscode"
+            )
+            try MiniTest.expect(
+                !text.contains("applies extensions + gates postAttach"),
+                "\(label) must not claim --vscode applies extensions"
+            )
+            try MiniTest.expect(
+                !text.contains("Extensions gate is the flag only"),
+                "\(label) must not say the extensions gate is the flag"
+            )
+            try MiniTest.expect(
+                !text.contains("Extensions run when the flag is set"),
+                "\(label) must not say extensions run only when the flag is set"
+            )
+            try MiniTest.expect(
+                !text.contains("pending extensions when the flag is set"),
+                "\(label) must not say start applies pending extensions"
+            )
+            try MiniTest.expect(
+                !text.contains("Settings repair on marker drift does not require the flag"),
+                "\(label) must not say start repairs settings"
+            )
+        }
+
+        try MiniTest.expect(
+            usage.contains("apply by default on up") || usage.contains("apply by default on `up`"),
+            "usage states apply-by-default on up/clone/rebuild"
+        )
+        try MiniTest.expect(
+            usage.lowercased().contains("start does not apply")
+                || usage.contains("start never applies"),
+            "usage states start does not apply customizations"
+        )
+        try MiniTest.expect(
+            up.contains("apply by default") || up.contains("apply on create-path"),
+            "up help states apply is default"
+        )
+        try MiniTest.expect(
+            up.contains("open") && up.contains("postAttach") && !up.contains("Extensions run when the flag is set"),
+            "up help keeps --vscode as open + postAttach"
+        )
+        try MiniTest.expect(
+            clone.contains("apply by default") || clone.contains("apply after create-path"),
+            "clone help states apply is default"
+        )
+        try MiniTest.expect(
+            start.contains("does not apply settings or extensions"),
+            "start help MUST say start does not apply settings or extensions"
+        )
+        try MiniTest.expect(
+            rebuild.contains("apply by default") || rebuild.contains("apply on the new"),
+            "rebuild help states apply is default"
         )
     }),
 

@@ -55,7 +55,7 @@ public enum UpCommand {
                     hint: "Run 'adevcontainer rebuild' (managed selection: --name or auto) to force-rebuild from current config"
                 )
             } else if existing.isRunning {
-                // Reuse running: no feature fetch/build; settings repair on marker drift; postAttach gated after open.
+                // Reuse running: no feature fetch/build; settings+extensions repair on marker drift; postAttach gated after open.
                 StatusPrinter.status("Reusing running container", item: existing.name)
                 let reuseConfig = configForReuse(resolved.config, labels: existing.labels)
                 _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
@@ -233,7 +233,7 @@ public enum UpCommand {
         )
     }
 
-    /// Extensions apply (`--vscode` only) → open (optional) → postAttach gate → Ready.
+    /// Extensions apply (not flag-gated) → open (optional) → postAttach gate → Ready.
     /// postAttach is never before open when `--vscode`. Extensions never fold into postAttachCommand.
     private static func finish(
         options: UpOptions,
@@ -244,14 +244,12 @@ public enum UpCommand {
         runtime: AppleContainerRuntime
     ) throws -> UpResult {
         let result = successResult(id: id, name: name, config: config)
-        // Extensions gated on `--vscode` only (not open success) so first attach sees the registry.
-        if options.openVSCode {
-            _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
-                containerId: id,
-                config: config,
-                runtime: runtime
-            )
-        }
+        // Extensions apply when pending (not gated on `--vscode` or open success).
+        _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
+            containerId: id,
+            config: config,
+            runtime: runtime
+        )
         let openOutcome = VSCodeOpen.openIfRequested(
             options.openVSCode,
             target: VSCodeOpenTarget(

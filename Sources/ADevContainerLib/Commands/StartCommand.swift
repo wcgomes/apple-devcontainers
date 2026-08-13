@@ -37,7 +37,7 @@ public enum StartCommand {
 
         StatusPrinter.status("Starting container", item: info.id)
         try runtime.start(nameOrId: info.id)
-        // Bare start: no create-path / postStart. Extensions via --vscode; postAttach via open gate.
+        // Bare start: no create-path / postStart. No settings or extensions apply. postAttach via open gate.
         print("Started \(info.id)")
         try openAndPostAttach(options: options, nameOrId: info.id, runtime: runtime, picker: picker)
         SuccessPresentation.emitConnectionHintsIfNeeded(
@@ -46,7 +46,8 @@ public enum StartCommand {
         )
     }
 
-    /// Open (optional) then postAttach gate. Loads config from stamped labels when needed.
+    /// Open (optional) then postAttach gate. Loads config from stamped labels for postAttach only.
+    /// `start` never applies settings or extensions.
     private static func openAndPostAttach(
         options: StartOptions,
         nameOrId: String,
@@ -70,9 +71,8 @@ public enum StartCommand {
 
         let image = (payload.image ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Resolve config from labels (bind host paths or volume cat) for postAttach + vscode apply.
+        // Resolve config from labels for postAttach only — never for settings/extensions apply.
         // Load must not fail start after container is already up — treat errors as absent.
-        // Config load precedes extensions/open so install-before-open can use the payload.
         let config: ResolvedDevContainerConfig?
         do {
             config = try PostAttachConfigLoader.load(
@@ -86,22 +86,6 @@ public enum StartCommand {
                 "postAttach config unavailable (\(error.localizedDescription))"
             )
             config = nil
-        }
-        if let config {
-            // Settings repair on marker drift (not gated on --vscode).
-            _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
-                containerId: payload.containerId,
-                config: config,
-                runtime: runtime
-            )
-            // Extensions gated on `--vscode` only (not open success).
-            if options.openVSCode {
-                _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
-                    containerId: payload.containerId,
-                    config: config,
-                    runtime: runtime
-                )
-            }
         }
 
         let openOutcome: VSCodeOpenOutcome
@@ -127,6 +111,6 @@ public enum StartCommand {
                 runtime: runtime
             )
         }
-        // nil config → treat postAttach / customizations apply as absent (start success preserved).
+        // nil config → treat postAttach as absent (start success preserved).
     }
 }

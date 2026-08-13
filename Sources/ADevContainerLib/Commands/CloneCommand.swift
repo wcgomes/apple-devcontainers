@@ -352,14 +352,12 @@ public enum CloneCommand {
             gitUrl: identity.normalizedGitURL,
             workspaceVolume: identity.workspaceVolumeName
         )
-        // Extensions (`--vscode` only) → open → postAttach (never before open when --vscode).
-        if options.openVSCode {
-            _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
-                containerId: id,
-                config: effectiveConfig,
-                runtime: runtime
-            )
-        }
+        // Extensions apply when pending (not gated on `--vscode`) → open → postAttach.
+        _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
+            containerId: id,
+            config: effectiveConfig,
+            runtime: runtime
+        )
         let openOutcome = VSCodeOpen.openIfRequested(
             options.openVSCode,
             target: VSCodeOpenTarget(

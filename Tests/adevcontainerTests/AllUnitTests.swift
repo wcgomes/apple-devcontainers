@@ -1963,6 +1963,77 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(mock.lastStreamStderr == true)
         try MiniTest.expect(mock.lastTeeStdoutToStderr == true)
     }),
+    ("lifecycleRunnerStatusUsesFullPropertyName", {
+        let previousEnabled = StatusPrinter.enabled
+        let previousWrite = StatusPrinter.writeStderr
+        let previousPhase = StatusPrinter.hasEmittedPhase
+        let previousColor = TerminalStyle.colorOverride
+        defer {
+            StatusPrinter.enabled = previousEnabled
+            StatusPrinter.writeStderr = previousWrite
+            StatusPrinter.hasEmittedPhase = previousPhase
+            TerminalStyle.colorOverride = previousColor
+        }
+        TerminalStyle.colorOverride = false
+        StatusPrinter.enabled = true
+        var buffer = Data()
+        StatusPrinter.writeStderr = { buffer.append($0) }
+
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/app",
+            postCreateCommand: .shell("true")
+        )
+        let cases = [
+            "onCreateCommand",
+            "updateContentCommand",
+            "postCreateCommand",
+            "postStartCommand",
+            "postAttachCommand",
+            "postCreateCommand (feature)",
+            "postStartCommand (setup)",
+            "postCreateCommand (feature 2)",
+        ]
+        for property in cases {
+            buffer = Data()
+            StatusPrinter.resetSectionState()
+            try LifecycleRunner.runIfPresent(
+                property: property,
+                command: config.postCreateCommand,
+                containerId: "ctr-event",
+                config: config,
+                runtime: runtime,
+                failurePolicy: .failKeepContainer
+            )
+            let out = String(data: buffer, encoding: .utf8) ?? ""
+            try MiniTest.expect(
+                out.contains("==> Running \(property)\n"),
+                "status for \(property)"
+            )
+        }
+
+        buffer = Data()
+        StatusPrinter.resetSectionState()
+        try LifecycleRunner.runIfPresent(
+            property: "postAttachCommand",
+            command: nil,
+            containerId: "ctr-event-absent",
+            config: config,
+            runtime: runtime,
+            failurePolicy: .failKeepContainer
+        )
+        try MiniTest.expectEqual(String(data: buffer, encoding: .utf8) ?? "", "")
+    }),
     ("isBuilderRunningParsesStatusJSON", {
         let mock = MockProcessRunner()
         mock.handlers = [

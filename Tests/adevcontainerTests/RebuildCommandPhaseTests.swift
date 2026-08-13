@@ -1857,6 +1857,49 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(guest.writes.contains { $0.contains("settings.json") }, "settings applied without --vscode")
     }),
 
+    ("rebuildExtensionsApplyWithoutVSCode", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "customizations": {
+            "vscode": {
+              "settings": { "editor.fontSize": 14 },
+              "extensions": ["sample.one"]
+            }
+          }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "old-id",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.install()
+        let launcher = MockVSCodeLauncher()
+        let restore = RebuildOpenSupport.install(launcher: launcher, resolverPath: "/usr/local/bin/code")
+        defer { restore() }
+        let guest = RecordingGuestOps()
+        try withRebuildCustomizationsOverrides(guest: guest) {
+            _ = try RebuildCommand.run(options: RebuildOptions(openVSCode: false), runtime: s.runtime)
+        }
+        try MiniTest.expectEqual(launcher.calls.count, 0, "must not open without --vscode")
+        try MiniTest.expect(
+            guest.writes.contains { $0.contains("extensions.json") },
+            "extensions applied on rebuild without --vscode"
+        )
+        try MiniTest.expect(
+            guest.writes.contains { $0.contains("settings.json") },
+            "settings still applied without --vscode"
+        )
+        let postAttachIdx = s.mock.calls.firstIndex { $0.arguments.last?.contains("postAttach") == true }
+        try MiniTest.expect(postAttachIdx == nil, "postAttach skipped without --vscode")
+    }),
+
     ("rebuildVscodeExtensionsThenOpenThenPostAttach", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
         {

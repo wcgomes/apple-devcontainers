@@ -13,7 +13,7 @@ This repo ships `.devcontainer/devcontainer.json` for **Linux Swift tooling** an
 | Keep-alive | product default (`/bin/sleep infinity`) — not overridden in config |
 | `runArgs` | omitted (none) |
 | `hostRequirements` | `cpus: 4`, `memory: "8gb"` — minimum floor; comfortable optional ~6–8 CPUs / 12–16gb |
-| Customizations | `customizations.vscode.extensions`: `swiftlang.swift-vscode`; `settings`: `editor.mouseWheelZoom: false`, `files.autoGuessEncoding: false` — VS Code defaults kept only to test the CLI’s settings-apply path. CLI applies settings on create-path and extensions when `--vscode` (before open; Apple attach does not auto-install). Hard dep `llvm-vs-code-extensions.lldb-dap` comes via Swift’s `extensionDependencies` (BFS auto-install) — not necessarily listed in config. See [architecture.md — VS Code flow](../architecture.md#vs-code-flow) |
+| Customizations | `customizations.vscode.extensions`: `swiftlang.swift-vscode`; `settings`: `editor.mouseWheelZoom: false`, `files.autoGuessEncoding: false` — VS Code defaults kept only to test the CLI’s settings-apply path. CLI applies settings+extensions by default on `up`/`clone`/`rebuild` (not `--vscode`-gated; not on `start`; Apple attach does not auto-install). Hard dep `llvm-vs-code-extensions.lldb-dap` comes via Swift’s `extensionDependencies` (BFS auto-install) — not necessarily listed in config. See [architecture.md — VS Code flow](../architecture.md#vs-code-flow) |
 
 ### Features
 
