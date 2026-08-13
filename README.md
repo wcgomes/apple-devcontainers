@@ -56,6 +56,8 @@ adevcontainer up
 adevcontainer exec -it
 ```
 
+> **Tip:** Apple Containers works differently from other container runtimes: it uses a lightweight VM per container instead of sharing one super VM, but its default resources can be low or insufficient for dev containers; if a container is unresponsive, consider setting `hostRequirements` in `devcontainer.json`.
+
 To use another local directory, run `adevcontainer up -w <path>`.
 
 ### Clone into a named volume

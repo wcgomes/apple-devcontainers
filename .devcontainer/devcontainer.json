@@ -22,10 +22,29 @@
             "divisions": "engineering,testing,security"
         }
     },
+    "hostRequirements": {
+        "cpus": 4,
+        "memory": "8gb"
+    },
     "runArgs": [
-        "--cap-add=SYS_PTRACE",
-        "--security-opt",
-        "seccomp=unconfined"
+        "--cap-add=SYS_PTRACE"
+    ],
+    "mounts": [
+        {
+            "source": "opencode-config",
+            "target": "/home/vscode/.config/opencode",
+            "type": "volume"
+        },
+        {
+            "source": "opencode-data",
+            "target": "/home/vscode/.local/share/opencode",
+            "type": "volume"
+        },
+        {
+            "source": "opencode-state",
+            "target": "/home/vscode/.local/state/opencode",
+            "type": "volume"
+        }
     ],
     "postCreateCommand": "bash .devcontainer/install-tools.sh && swift package resolve",
     // Configure tool-specific properties.
