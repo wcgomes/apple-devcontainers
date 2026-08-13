@@ -31,18 +31,13 @@
     ],
     "mounts": [
         {
-            "source": "opencode-config",
+            "source": "adevcontainer-opencode-config",
             "target": "/home/vscode/.config/opencode",
             "type": "volume"
         },
         {
-            "source": "opencode-data",
+            "source": "adevcontainer-opencode-data",
             "target": "/home/vscode/.local/share/opencode",
-            "type": "volume"
-        },
-        {
-            "source": "opencode-state",
-            "target": "/home/vscode/.local/state/opencode",
             "type": "volume"
         }
     ],
