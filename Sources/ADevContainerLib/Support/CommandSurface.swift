@@ -197,7 +197,7 @@ public enum CommandSurface {
           --name <container>       Managed container name/id (exec/start/stop/delete/prune/rebuild/inspect)
           --json                   Machine-readable output (up, clone, list, rebuild)
           --skip-pull              Skip image pull on up/clone/rebuild
-          --vscode                 Best-effort open VS Code; applies extensions + gates postAttach
+          --vscode                 Best-effort open VS Code; gates postAttach (not apply)
           -h, --help               Show help
 
         Identity:
@@ -210,15 +210,18 @@ public enum CommandSurface {
           - Best-effort open of a new window on the resolved remote workspace folder.
           - Requires host VS Code with Remote - Containers and a discoverable `code` CLI.
           - Missing `code` or launch failure warns on stderr; open alone does not fail lifecycle.
-          - Order with --vscode: extensions apply → open → postAttach (postAttach only after
-            successful open). Extensions gate is the flag only (not open success).
+          - customizations.vscode.settings and extensions apply by default on up / clone /
+            rebuild (fresh create-path, up reuse, and up start-stopped). Soft-fail; marker
+            idempotency; Server extensions.json + transitive extensionDependencies ∪
+            extensionPack. Not gated on --vscode or open success.
+          - adevcontainer start does not apply settings or extensions (with or without
+            --vscode) and does not run postStart.
+          - Order with --vscode on up / clone / rebuild: apply (if pending) → open →
+            postAttach (postAttach only after successful open).
           - postAttachCommand runs only after successful open; skipped without flag or on open
             soft-fail (status when present). postAttach non-zero fails command but keeps container.
-          - customizations.vscode.settings: merged on create-path (not gated on --vscode).
-          - customizations.vscode.extensions: installed when --vscode is set
-            (soft-fail; marker idempotency; Server extensions.json + transitive
-            extensionDependencies ∪ extensionPack). Manual attach without flag does not install.
-          - CLI attach approximation only — not IDE remote-ready. Not full extension parity.
+          - Manual attach without a CLI apply command does not install. CLI attach
+            approximation only — not IDE remote-ready. Not full extension parity.
 
         Clone notes:
           - Requires host git on PATH (config fetch + HTTPS credential fill)
@@ -265,13 +268,14 @@ public enum CommandSurface {
 
             --vscode: best-effort open a new VS Code window on the remote workspace folder
             (requires VS Code with Remote - Containers and a `code` CLI). Soft-fails with
-            a stderr warning; open alone does not fail up.
-            Order: extensions apply → open → postAttach. Extensions run when the flag is
-            set (not gated on open success); postAttach only after successful open.
-            postAttach skipped without flag / open soft-fail; postAttach failure fails up
-            but keeps the container.
-            customizations.vscode.settings apply on create-path (not gated on open);
-            extensions soft-fail with marker skip when matched.
+            a stderr warning; open alone does not fail up. --vscode gates open and
+            postAttach only, not apply.
+            Settings and extensions from customizations.vscode apply by default after
+            create-path hooks (and on reuse / start-stopped when the marker is pending).
+            Order with --vscode: apply → open → postAttach. postAttach only after
+            successful open; skipped without flag / open soft-fail; postAttach failure
+            fails up but keeps the container.
+            Apply is soft-fail with marker skip when matched.
             Not full Dev Containers parity — manual attach remains valid.
             """
         case "clone":
@@ -292,8 +296,9 @@ public enum CommandSurface {
             Default human mode prints an indented key/value digest after Ready.
 
             --vscode: best-effort open VS Code on the resolved remote folder after
-            success (same prereqs/soft-fail/extensions-then-open/postAttach gate as up).
-            Settings from customizations.vscode still apply on create-path without the flag.
+            success (same prereqs/soft-fail/open/postAttach gate as up). Settings and
+            extensions from customizations.vscode apply by default after create-path
+            hooks (not gated on the flag).
             Not full extension parity.
             """
         case "list":
@@ -311,9 +316,9 @@ public enum CommandSurface {
             (no lifecycle hooks). Already running is success no-op.
 
             --vscode: best-effort open VS Code on the labeled remote workspace folder after
-            start (inspect for id/image/folder). Soft-fail open. Order matches up: pending
-            extensions when the flag is set, then open, then postAttach after open success.
-            Settings repair on marker drift does not require the flag. Not full extension parity.
+            start (inspect for id/image/folder). Soft-fail open. postAttach after open
+            success. start does not apply settings or extensions (with or without
+            --vscode) and does not run postStart. Not full extension parity.
             """
         case "exec":
             return """
@@ -375,8 +380,9 @@ public enum CommandSurface {
               - Named rebuild --name retry skips the Y/n prompt.
 
             --vscode: best-effort open VS Code on the resolved remote folder after
-            success (same soft-fail/extensions-then-open/postAttach gate as up --vscode).
-            customizations.vscode.settings apply on create-path without the flag.
+            success (open + postAttach only; same soft-fail/open/postAttach gate as up).
+            customizations.vscode settings and extensions apply by default on the new
+            container after create-path hooks (not gated on the flag).
             --json: machine-readable success output (up-shape; volume mode may add
             gitUrl/workspaceVolume). Failures exit non-zero with a structured error.
             v1 limitation: volume-mode rebuild fetches OCI features only — the host

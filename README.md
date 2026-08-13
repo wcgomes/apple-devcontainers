@@ -90,13 +90,13 @@ The cloned source remains in a named volume. You can work, commit, and push from
 
 ## Visual Studio Code integration
 
-Make sure the [Remote - Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) is installed and the `code` CLI is available. Then add `--vscode` to `up`, `clone`, `start`, or `rebuild`:
+`up`, `clone`, and `rebuild` apply supported `customizations.vscode.settings` and `customizations.vscode.extensions` from `devcontainer.json` by default (soft-fail; not full Dev Containers extension parity). `start` does not apply settings or extensions.
+
+`--vscode` only opens a new VS Code window on the remote workspace and gates `postAttachCommand`. Install the [Remote - Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) and make sure the `code` CLI is available:
 
 ```bash
 adevcontainer up --vscode
 ```
-
-The CLI applies supported VS Code settings and extensions from `devcontainer.json`, then opens the remote workspace so the first attach can see the installed registry.
 
 <img src="assets/vscode-integration.png" alt="VSCode integration">
 
