@@ -587,7 +587,7 @@ enum RecoveryE2ESupport {
             .appendingPathComponent("Tests/Fixtures/features-sample/git").path
         // Apple `container build` cannot reliably transfer build context from
         // /var/folders TemporaryDirectory (context transfers as ~31B). Use the
-        // product cache root under ~/Library/Caches so COPY feature-N works.
+        // product cache root under ~/Library/Caches so COPY feature-<id> works.
         let cache = FeatureCache.defaultRoot()
             + "/rec-e2e-\(UUID().uuidString.lowercased())"
         let prevRebuildFetcher = RebuildCommand.featuresFetcherOverride
