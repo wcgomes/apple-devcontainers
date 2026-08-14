@@ -243,10 +243,8 @@ nonisolated(unsafe) let recoveryConfigSessionTests: [(String, () throws -> Void)
             try MiniTest.expectEqual((error as? CLIError)?.code, CLIErrorCode.recoveryUnavailable)
         })
 
-        let outside = target.directoryURL.deletingLastPathComponent()
-            .deletingLastPathComponent()
+        let outside = target.directoryURL
             .appendingPathComponent("\(RecoveryConfigSession.directoryPrefix)outside", isDirectory: true)
-        try? FileManager.default.removeItem(at: outside)
         try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: outside) }
         try MiniTest.expectThrows({

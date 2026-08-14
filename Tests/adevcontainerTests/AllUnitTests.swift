@@ -3203,17 +3203,137 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         )
         let contents = ctx.dockerfileContents
         try MiniTest.expect(contents.contains("FROM alpine:3.20"))
-        try MiniTest.expect(contents.contains("COPY feature-0 /tmp/adev-feature-0"))
-        try MiniTest.expect(contents.contains("chmod -R 0755 /tmp/adev-feature-0"))
+        try MiniTest.expect(contents.contains("# Feature: \(FeaturesTestSupport.refA)"))
+        try MiniTest.expect(contents.contains("COPY feature-sample-a /tmp/adev-feature-sample-a"))
+        try MiniTest.expect(contents.contains("chmod -R 0755 /tmp/adev-feature-sample-a"))
         try MiniTest.expect(contents.contains("./install.sh"))
         // Must not only chmod install.sh — lifecycle scripts need +x too.
-        try MiniTest.expect(!contents.contains("chmod +x /tmp/adev-feature-0/install.sh"))
+        try MiniTest.expect(!contents.contains("chmod +x /tmp/adev-feature-sample-a/install.sh"))
+        try MiniTest.expect(!contents.contains("feature-0"))
+        try MiniTest.expect(!contents.contains("/tmp/adev-feature-0"))
+        try MiniTest.expect(
+            FileManager.default.fileExists(
+                atPath: (ctxDir as NSString).appendingPathComponent("feature-sample-a/install.sh")
+            )
+        )
         try MiniTest.expect(contents.contains("USER root"))
         try MiniTest.expect(contents.contains("USER node"))
         // Final USER is base user, not lingering install root.
         let lastUserLine = contents.split(separator: "\n").last(where: { $0.hasPrefix("USER ") })
         try MiniTest.expectEqual(lastUserLine.map(String.init), "USER node")
         try MiniTest.expect(FileManager.default.fileExists(atPath: ctx.dockerfilePath))
+    }),
+    ("featureDockerfileGeneratorUsesRefSegmentWhenIdEmpty", {
+        let ctxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-df-idless-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: ctxDir) }
+        let pkgDir = (ctxDir as NSString).appendingPathComponent("pkg")
+        try FileManager.default.createDirectory(atPath: pkgDir, withIntermediateDirectories: true)
+        try #"{"id":""}"#.write(
+            toFile: (pkgDir as NSString).appendingPathComponent("devcontainer-feature.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "#!/bin/sh\n".write(
+            toFile: (pkgDir as NSString).appendingPathComponent("install.sh"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let ref = "ghcr.io/devcontainers/features/node:1"
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: ref),
+                metadata: FeatureMetadata(id: "")
+            )
+        ]
+        let ctx = try FeatureDockerfileGenerator.write(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            packages: [FetchedFeaturePackage(reference: ref, directoryPath: pkgDir)],
+            contextDirectory: ctxDir,
+            baseUser: "root"
+        )
+        try MiniTest.expect(ctx.dockerfileContents.contains("# Feature: \(ref)"))
+        try MiniTest.expect(ctx.dockerfileContents.contains("COPY feature-node /tmp/adev-feature-node"))
+        try MiniTest.expect(ctx.dockerfileContents.contains("chmod -R 0755 /tmp/adev-feature-node"))
+        try MiniTest.expect(!ctx.dockerfileContents.contains("/tmp/adev-feature-0"))
+    }),
+    ("featureDockerfileGeneratorSanitizesAndDisambiguatesLayerNames", {
+        let messy = FeatureOrder.OrderedFeature(
+            admitted: AdmittedFeature(reference: "ghcr.io/example/features/foo/bar:1"),
+            metadata: FeatureMetadata(id: "Foo/Bar:Baz")
+        )
+        let nodeA = FeatureOrder.OrderedFeature(
+            admitted: AdmittedFeature(reference: "ghcr.io/devcontainers/features/node:1"),
+            metadata: FeatureMetadata(id: "node")
+        )
+        let nodeB = FeatureOrder.OrderedFeature(
+            admitted: AdmittedFeature(reference: "./local/node"),
+            metadata: FeatureMetadata(id: "node")
+        )
+        let empty = FeatureOrder.OrderedFeature(
+            admitted: AdmittedFeature(reference: ":::"),
+            metadata: FeatureMetadata(id: "   ")
+        )
+        let names = FeatureDockerfileGenerator.layerDirectoryNames(for: [messy, nodeA, nodeB, empty])
+        try MiniTest.expectEqual(names, [
+            "feature-foo-bar-baz",
+            "feature-node",
+            "feature-node-2",
+            "feature-feature"
+        ])
+        for name in names {
+            try MiniTest.expect(!name.contains("/"))
+            try MiniTest.expect(!name.contains(":"))
+        }
+        try MiniTest.expectEqual(Set(names).count, names.count)
+
+        let ctxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-df-collide-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: ctxDir) }
+        func writePkg(_ name: String) throws -> String {
+            let dir = (ctxDir as NSString).appendingPathComponent(name)
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try #"{"id":"node"}"#.write(
+                toFile: (dir as NSString).appendingPathComponent("devcontainer-feature.json"),
+                atomically: true,
+                encoding: .utf8
+            )
+            try "#!/bin/sh\n".write(
+                toFile: (dir as NSString).appendingPathComponent("install.sh"),
+                atomically: true,
+                encoding: .utf8
+            )
+            return dir
+        }
+        let pkgA = try writePkg("pkg-a")
+        let pkgB = try writePkg("pkg-b")
+        let ctx = try FeatureDockerfileGenerator.write(
+            baseImage: "alpine:3.20",
+            ordered: [nodeA, nodeB],
+            packages: [
+                FetchedFeaturePackage(reference: nodeA.admitted.reference, directoryPath: pkgA),
+                FetchedFeaturePackage(reference: nodeB.admitted.reference, directoryPath: pkgB)
+            ],
+            contextDirectory: ctxDir,
+            baseUser: "root"
+        )
+        try MiniTest.expect(ctx.dockerfileContents.contains("# Feature: \(nodeA.admitted.reference)"))
+        try MiniTest.expect(ctx.dockerfileContents.contains("# Feature: \(nodeB.admitted.reference)"))
+        try MiniTest.expect(ctx.dockerfileContents.contains("COPY feature-node /tmp/adev-feature-node"))
+        try MiniTest.expect(ctx.dockerfileContents.contains("COPY feature-node-1 /tmp/adev-feature-node-1"))
+        try MiniTest.expect(ctx.dockerfileContents.contains("chmod -R 0755 /tmp/adev-feature-node "))
+        try MiniTest.expect(ctx.dockerfileContents.contains("chmod -R 0755 /tmp/adev-feature-node-1 "))
+        try MiniTest.expect(
+            FileManager.default.fileExists(
+                atPath: (ctxDir as NSString).appendingPathComponent("feature-node/install.sh")
+            )
+        )
+        try MiniTest.expect(
+            FileManager.default.fileExists(
+                atPath: (ctxDir as NSString).appendingPathComponent("feature-node-1/install.sh")
+            )
+        )
     }),
     ("featureDockerfileGeneratorRestoresRootWhenBaseUserEmpty", {
         let metaA = try FeatureMetadata.parse(
@@ -3635,7 +3755,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!mockProc.calls.contains { $0.arguments.first == "build" })
     }),
     ("derivedImageTagRecipeVersionBumpedForUserRestore", {
-        try MiniTest.expectEqual(DerivedImageTag.recipeVersion, "6")
+        try MiniTest.expectEqual(DerivedImageTag.recipeVersion, "7")
         let metaA = try FeatureMetadata.parse(
             data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
                 .appendingPathComponent("devcontainer-feature.json")),
@@ -3647,25 +3767,25 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
                 metadata: metaA
             )
         ]
-        let v5 = DerivedImageTag.compute(
-            baseImage: "alpine:3.20",
-            ordered: ordered,
-            nameBase: "x",
-            recipeVersion: "5"
-        )
         let v6 = DerivedImageTag.compute(
             baseImage: "alpine:3.20",
             ordered: ordered,
             nameBase: "x",
             recipeVersion: "6"
         )
-        try MiniTest.expect(v5 != v6, "recipeVersion bump must change derived tag")
+        let v7 = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            nameBase: "x",
+            recipeVersion: "7"
+        )
+        try MiniTest.expect(v6 != v7, "recipeVersion bump must change derived tag")
         let product = DerivedImageTag.compute(
             baseImage: "alpine:3.20",
             ordered: ordered,
             nameBase: "x"
         )
-        try MiniTest.expectEqual(product, v6)
+        try MiniTest.expectEqual(product, v7)
     }),
     ("tomlMergeBuildRosettaFalsePreservesKeys", {
         let input = """
@@ -4157,7 +4277,9 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             try MiniTest.expect(contents.contains("FROM alpine:3.20"))
             try MiniTest.expect(contents.contains("install.sh"))
             // Recursive +x so feature lifecycle scripts copied by install.sh stay executable.
-            try MiniTest.expect(contents.contains("chmod -R 0755 /tmp/adev-feature-0"))
+            try MiniTest.expect(contents.contains("chmod -R 0755 /tmp/adev-feature-sample-a"))
+            try MiniTest.expect(contents.contains("# Feature: \(FeaturesTestSupport.refA)"))
+            try MiniTest.expect(!contents.contains("/tmp/adev-feature-0"))
         }
     }),
     ("featuresRunnerReusesExistingTag", {

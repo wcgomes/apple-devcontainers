@@ -2,6 +2,8 @@ import Foundation
 @testable import ADevContainerLib
 #if canImport(Darwin)
 import Darwin
+#elseif canImport(Glibc)
+import Glibc
 #endif
 
 private func editorChecker(_ usable: Set<String>) -> (String) -> Bool {
@@ -147,7 +149,7 @@ nonisolated(unsafe) let recoveryEditorTests: [(String, () throws -> Void)] = [
                 sys.exit(10 + fd)
         sys.exit(0)
         """
-        #if canImport(Darwin)
+        #if canImport(Darwin) || canImport(Glibc)
         func fdIdentity(_ fd: Int32) -> String {
             var st = stat()
             guard fstat(fd, &st) == 0 else { return "missing" }
@@ -239,6 +241,9 @@ nonisolated(unsafe) let recoveryEditorTests: [(String, () throws -> Void)] = [
         // ADEVCONTAINER_TTY_RESTORE_PROBE=1. The probe runs InteractiveProcessRunner against a
         // short child, then prints a post-exit line and exits 0 only if it still owns the FG
         // group and was not stopped. Requires `script` (macOS) + a built test binary path.
+        #if !canImport(Darwin)
+        try MiniTest.skip("PTY restore probe requires Darwin")
+        #endif
         let probe = InteractiveTTYRestoreProbe.launchUnderPTY()
         try MiniTest.expectEqual(
             probe.exitCode,
@@ -255,6 +260,9 @@ nonisolated(unsafe) let recoveryEditorTests: [(String, () throws -> Void)] = [
         // Freeze regression: shell can look correct (right user) but accept no keyboard when
         // helpers stay SIGTTIN-stopped. Sleep-only probes miss that — child must read stdin.
         // Launcher uses python pty.fork, writes ADEV_STDIN_OK to the master after claim.
+        #if !canImport(Darwin)
+        try MiniTest.skip("PTY stdin probe requires Darwin")
+        #endif
         let probe = InteractiveTTYRestoreProbe.launchStdinProbeUnderPTY()
         try MiniTest.expectEqual(
             probe.exitCode,
