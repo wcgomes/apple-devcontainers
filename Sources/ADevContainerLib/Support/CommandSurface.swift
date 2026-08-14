@@ -4,17 +4,20 @@ import Foundation
 public struct ParsedArgs: Sendable {
     public var workspace: String?
     public var name: String?
+    public var resume: String?
     public var flags: Set<String>
     public var passthrough: [String]
 
     public init(
         workspace: String? = nil,
         name: String? = nil,
+        resume: String? = nil,
         flags: Set<String> = [],
         passthrough: [String] = []
     ) {
         self.workspace = workspace
         self.name = name
+        self.resume = resume
         self.flags = flags
         self.passthrough = passthrough
     }
@@ -29,6 +32,7 @@ public enum CommandSurface {
     public static func parseArgs(_ args: [String]) throws -> ParsedArgs {
         var workspace: String?
         var name: String?
+        var resume: String?
         var flags = Set<String>()
         var passthrough: [String] = []
         var i = 0
@@ -77,6 +81,39 @@ public enum CommandSurface {
             }
             if a.hasPrefix("--name=") {
                 name = String(a.dropFirst("--name=".count))
+                i += 1
+                continue
+            }
+            if a == "--resume" {
+                guard i + 1 < args.count else {
+                    throw CLIError(
+                        code: CLIErrorCode.usage,
+                        property: a,
+                        message: "--resume requires a config directory argument"
+                    )
+                }
+                let value = args[i + 1]
+                guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw CLIError(
+                        code: CLIErrorCode.usage,
+                        property: a,
+                        message: "--resume requires a config directory argument"
+                    )
+                }
+                resume = value
+                i += 2
+                continue
+            }
+            if a.hasPrefix("--resume=") {
+                let value = String(a.dropFirst("--resume=".count))
+                guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw CLIError(
+                        code: CLIErrorCode.usage,
+                        property: "--resume",
+                        message: "--resume requires a config directory argument"
+                    )
+                }
+                resume = value
                 i += 1
                 continue
             }
@@ -145,7 +182,7 @@ public enum CommandSurface {
             i += 1
         }
 
-        return ParsedArgs(workspace: workspace, name: name, flags: flags, passthrough: passthrough)
+        return ParsedArgs(workspace: workspace, name: name, resume: resume, flags: flags, passthrough: passthrough)
     }
 
     /// Subcommand targeted by a `help <command>` invocation, or nil when `args`
@@ -167,6 +204,14 @@ public enum CommandSurface {
                 hint: "Lifecycle commands use --name (or picker). Create with: adevcontainer up [-w <path>]"
             )
         }
+        if parsed.resume != nil, subcommand != "clone" {
+            throw CLIError(
+                code: CLIErrorCode.usage,
+                property: "--resume",
+                message: "--resume is only valid for clone",
+                hint: "Resume a retained checkout with: adevcontainer clone <git-url> --resume <config-dir>"
+            )
+        }
     }
 
     // MARK: - Usage / help
@@ -183,7 +228,7 @@ public enum CommandSurface {
           up [-w path]        Create/start/reuse bind-mode dev container (host path)
           clone <git-url>     Clone repo into volume-mode dev container (managed)
           list [--json]       List managed dev containers (up + clone)
-          start [--name]      Start a stopped managed dev container (no hooks on volume-mode)
+          start [--name]      Start a stopped managed dev container (no hooks on volume-mode; --json suppresses recovery prompt)
           exec [-it] [--name] [--] [cmd...]  Run a command (or shell) in a managed dev container
           stop [--name]       Stop a managed dev container (name or picker)
           delete [--name]     Remove container only (not workspace volume)
@@ -195,7 +240,9 @@ public enum CommandSurface {
         Options:
           -w, --workspace <path>   Workspace root for `up` only (default: cwd)
           --name <container>       Managed container name/id (exec/start/stop/delete/prune/rebuild/inspect)
-          --json                   Machine-readable output (up, clone, list, rebuild)
+          --resume <config-dir>    Resume clone from a retained config checkout (clone only)
+          --json                   Machine-readable output (up, clone, list, rebuild); on start,
+                                   suppresses the interactive recovery prompt
           --skip-pull              Skip image pull on up/clone/rebuild
           --vscode                 Best-effort open VS Code; gates postAttach (not apply)
           -h, --help               Show help
@@ -230,6 +277,11 @@ public enum CommandSurface {
           - HTTPS: host git credential fill one-shot; guest credential.helper store
           - Auto-adds Features git:1 when config lacks git/common-utils
           - No --branch / PAT CLI / GCM-in-guest
+          - Bring-up recovery: on an eligible failure (resolve/create/start/ownership/
+            populate/hooks), clone retains the fetched config checkout and, in a TTY,
+            prompts to edit the retained devcontainer.json and retry. Non-TTY/--json
+            retains the checkout and prints an exact
+            `adevcontainer clone <git-url> --resume <config-dir>` command.
 
         Rebuild notes:
           - Force-rebuilds a managed container from its CURRENT devcontainer.json,
@@ -277,10 +329,15 @@ public enum CommandSurface {
             fails up but keeps the container.
             Apply is soft-fail with marker skip when matched.
             Not full Dev Containers parity — manual attach remains valid.
+
+            Bring-up recovery: when an existing config fails to resolve or create/start/
+            ownership/create-path hooks fail, a TTY prompts to open the host config and retries
+            from scratch. Decline/EOF fails with the original error. Non-TTY and --json never
+            edit and include the host config edit/retry hint.
             """
         case "clone":
             return """
-            adevcontainer clone <git-url> [--json] [--skip-pull] [--vscode]
+            adevcontainer clone <git-url> [--json] [--skip-pull] [--vscode] [--resume <config-dir>]
 
             Create a volume-mode managed dev container (workspace on a named volume).
             Host git fetches config only; full clone runs inside the container.
@@ -294,6 +351,10 @@ public enum CommandSurface {
             --json: machine-readable success JSON (outcome, containerId, remoteUser,
             remoteWorkspaceFolder, gitUrl, workspaceVolume; optional containerName).
             Default human mode prints an indented key/value digest after Ready.
+
+            --resume <config-dir>: skip the host git config fetch and re-resolve from a
+            retained config checkout (the path printed by a prior non-TTY failure).
+            Used to retry a failed clone after editing the retained devcontainer.json.
 
             --vscode: best-effort open VS Code on the resolved remote folder after
             success (same prereqs/soft-fail/open/postAttach gate as up). Settings and
@@ -310,7 +371,7 @@ public enum CommandSurface {
             """
         case "start":
             return """
-            adevcontainer start [--name <container>] [--vscode]
+            adevcontainer start [--name <container>] [--vscode] [--json]
 
             Start a stopped managed container. Volume-mode: runtime start only
             (no lifecycle hooks). Already running is success no-op.
@@ -318,7 +379,10 @@ public enum CommandSurface {
             --vscode: best-effort open VS Code on the labeled remote workspace folder after
             start (inspect for id/image/folder). Soft-fail open. postAttach after open
             success. start does not apply settings or extensions (with or without
-            --vscode) and does not run postStart. Not full extension parity.
+            --vscode) and does not run postStart. If runtime start fails, a TTY prompts
+            (default Y) and delegates to `rebuild --name <name>`; decline/EOF, non-TTY,
+            and --json fail with that exact rebuild hint. Start never opens an editor or
+            retries start. Not full extension parity.
             """
         case "exec":
             return """

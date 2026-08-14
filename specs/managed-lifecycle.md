@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Unified managed-container selection for non-`up` lifecycle commands, named-volume reuse on `up`, `list`/`start`/`prune`, and related managed lifecycle operations shared by bind-mode and volume-mode workspaces.
+Unified managed-container selection for non-`up` lifecycle commands, named-volume reuse on `up`, `list`/`start`/`prune`, bring-up recovery for `up` and `start`, and related managed lifecycle operations shared by bind-mode and volume-mode workspaces.
 
 ## Requirements
 
@@ -317,4 +317,58 @@ Rationale: clone config may have lived only in a temp directory that is gone aft
 - Given a volume-mode managed container with labels from clone and a config that had `postStartCommand` at create time
 - When the user runs `adevcontainer start --name <that-name>` on a stopped container
 - Then the container starts and **no** lifecycle hooks are executed on this path
+
+---
+
+### Requirement: Bring-up recovery offer on up and clone
+
+`up` and `clone` MUST offer an interactive recovery mode when bringing the container up fails and an editable `devcontainer.json` is available. The trigger set is: config parse/resolve failure on an existing config file, container create, container start, workspace-ownership, in-container workspace populate (`clone`), and create-path hooks (`onCreate`, `updateContent`, `postCreate`, `postStart`). Failures with no editable config — config not found, or `clone` git fetch failure before any config exists — MUST fail normally without a recovery prompt.
+
+#### Scenario: create failure offers recovery in a TTY
+
+- Given `up`/`clone` resolved a `devcontainer.json` and stdin is a TTY with `--json` absent
+- When container create fails (e.g. a `forwardPorts` port already in use)
+- Then the CLI prints the structured failure, prompts to enter recovery mode (default Y), and on affirmative opens the editor and retries; on decline/EOF it fails non-zero with the original error
+
+#### Scenario: create failure without a TTY never prompts
+
+- Given the same failure with a non-TTY stdin or `--json`
+- Then the CLI never prompts or opens an editor and fails with the original error plus an edit/retry hint (up: host config path; clone: retained checkout + exact retry command)
+
+#### Scenario: no editable config falls through
+
+- Given `clone` fails during git fetch before a config exists, or `up` finds no `devcontainer.json`
+- Then the CLI fails with the normal structured error and does not offer recovery
+
+See also: [clone.md](clone.md) **clone volume recovery (retained checkout)** and **Clone recovery persists edited config into workspace**.
+
+---
+
+### Requirement: start failure delegates to rebuild
+
+When `start` fails to start a selected managed container, the CLI MUST offer recovery mode by delegating to `rebuild` for that container rather than re-running `start` (the container's ports/labels are baked at create). In a TTY (without `--json`) it MUST prompt (default Y) and, on affirmative, run `RebuildCommand` for the same container. On decline/EOF, non-TTY, or `--json`, it MUST fail with the original error and a hint to run `adevcontainer rebuild --name <name>`; it MUST NOT open an editor or re-run `start`.
+
+#### Scenario: start failure hands off to rebuild
+
+- Given a selected managed container and `runtime.start` fails
+- When stdin is a TTY and the user affirms the recovery prompt
+- Then the CLI runs `rebuild` for that container (which provides its own recovery); otherwise it fails with a hint to run `adevcontainer rebuild --name <name>`
+
+---
+
+### Requirement: bind up recovery (host config editor)
+
+For an eligible `up` failure in a TTY, recovery MUST print the structured failure, prompt whether to enter recovery (default Y), and on affirmative open the editor on the host `devcontainer.json` path and validate with bind-mode strict resolve rules. Invalid content MUST reopen the editor without retrying; a valid edit MUST retry by re-resolving from the host and re-running the create path. Decline/EOF MUST fail non-zero with the original error. Non-TTY/`--json` MUST never prompt or edit and MUST fail with the original error plus an edit/retry hint for the host config path. `up` recovery MUST NOT create a helper container or a retained checkout (the config already lives on the host).
+
+#### Scenario: bind up recovery edits the host config and retries
+
+- Given `up` failed at create/start/hooks and the config path is the host checkout
+- When the user affirms the prompt and edits the config to a valid state
+- Then the CLI re-resolves from the host config and re-runs the create path; on success it reports success and no helper/checkout is left behind
+
+---
+
+### Requirement: Retry re-executes from scratch
+
+After an edit, the retry MUST re-execute from the resolved config (re-resolve from the host for `up`, from the retained checkout for `clone`) rather than resuming mid-pipeline. A further recoverable failure MUST re-enter the prompt loop. Decline/EOF MUST terminate with a non-zero structured error and, for `clone`, MUST leave the retained checkout available for a later `--resume`.
 

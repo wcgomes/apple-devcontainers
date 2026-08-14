@@ -55,6 +55,10 @@ let allTests: [(String, () throws -> Void)] = []
     + recoveryConfigSessionTests
     + recoveryOrchestratorTests
     + recoveryOutputTests
+    + bringUpRecoveryTests
+    + cloneRecoveryTests
+    + startCommandRecoveryTests
+    + upCommandRecoveryTests
     + integrationTests
 
 // Optional PTY probes: run under a fresh controlling terminal so job-control

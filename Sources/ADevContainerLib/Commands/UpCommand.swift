@@ -32,18 +32,129 @@ public enum UpCommand {
         options: UpOptions,
         runtime: AppleContainerRuntime,
         localEnv: [String: String] = ProcessInfo.processInfo.environment,
-        hostResources: any HostResourceProviding = SystemHostResourceInfo()
+        hostResources: any HostResourceProviding = SystemHostResourceInfo(),
+        isTTY: Bool = AppleContainerConfig.stdinIsTTY(),
+        recoveryEditor: RecoveryEditor? = nil,
+        openEditorPrompt: RecoveryOpenEditorPrompt = .default
+    ) throws -> UpResult {
+        let editor = recoveryEditor ?? RecoveryEditor(environment: localEnv)
+
+        // Discover the host devcontainer.json path up front to build recovery guidance and
+        // decide eligibility. When no editable config exists, `up` fails normally (the ordinary
+        // bring-up path raises the structured "config not found" error; recovery has nothing to
+        // edit). Bind up recovery edits the host config directly — never a helper container or
+        // a retained checkout (the config already lives on the host).
+        let configPath: String
+        do {
+            configPath = try ConfigDiscovery.discover(workspacePath: options.workspacePath)
+        } catch let error as CLIError where error.code == CLIErrorCode.configNotFound {
+            throw error
+        } catch {
+            return try runBringUp(
+                options: options,
+                runtime: runtime,
+                localEnv: localEnv,
+                hostResources: hostResources
+            )
+        }
+        let guidance = BringUpRecovery.Guidance(
+            configPath: configPath,
+            editCommand: editor.command(for: configPath).map(Self.shellQuoteCommand)
+                ?? "recovery editor unavailable",
+            retryCommand: upRetryCommand(options: options)
+        )
+
+        do {
+            return try runBringUp(
+                options: options,
+                runtime: runtime,
+                localEnv: localEnv,
+                hostResources: hostResources
+            )
+        } catch let failure as BringUpRecovery.EligibleFailure {
+            // Each recoverable retry may report a different leftover. Capture the latest
+            // identity so the next runBringUp deletes/recreates that container, not only
+            // the one from the first EligibleFailure.
+            var resetExistingName = failure.resetExistingName
+            return try BringUpRecovery.run(
+                failure: failure,
+                guidance: guidance,
+                isTTY: isTTY,
+                jsonOutput: options.jsonOutput,
+                openEditorPrompt: openEditorPrompt,
+                edit: {
+                    try editUpConfig(
+                        filePath: configPath,
+                        workspacePath: options.workspacePath,
+                        localEnv: localEnv,
+                        editor: editor
+                    )
+                },
+                retry: {
+                    do {
+                        return try runBringUp(
+                            options: options,
+                            runtime: runtime,
+                            localEnv: localEnv,
+                            hostResources: hostResources,
+                            resetExistingName: resetExistingName
+                        )
+                    } catch let next as BringUpRecovery.EligibleFailure {
+                        resetExistingName = next.resetExistingName
+                        throw next
+                    }
+                }
+            )
+        } catch {
+            throw error
+        }
+    }
+
+    /// One full bring-up attempt: resolve from host → reuse/start existing → create path →
+    /// finish. Re-entrant: re-resolves from the host workspace on every entry, so a recovery
+    /// retry never reuses cached resolved state.
+    private static func runBringUp(
+        options: UpOptions,
+        runtime: AppleContainerRuntime,
+        localEnv: [String: String],
+        hostResources: any HostResourceProviding,
+        resetExistingName: String? = nil
     ) throws -> UpResult {
         StatusPrinter.status("Resolving configuration")
-        let resolved = try ConfigResolver.resolve(
-            workspacePath: options.workspacePath,
-            localEnv: localEnv
-        )
+        let resolved: ResolvedWorkspace
+        do {
+            resolved = try ConfigResolver.resolve(
+                workspacePath: options.workspacePath,
+                localEnv: localEnv
+            )
+        } catch let error as CLIError where error.code == CLIErrorCode.configNotFound {
+            throw error
+        } catch {
+            throw BringUpRecovery.eligible(error)
+        }
 
         // hostRequirements: fail up on shortfall/unreadable host; warn gpu; limits applied on create.
         try enforceHostRequirements(config: resolved.config, host: hostResources)
 
-        let existing = try runtime.findByName(resolved.containerName)
+        var existing = try runtime.findByName(resolved.containerName)
+
+        // A stopped existing container may have failed during start, and a running one may
+        // have failed during restart postStart. Recovery must not see either as a successful
+        // reuse on the next attempt: remove it before entering the fresh create path.
+        if let existingContainer = existing, let resetExistingName,
+           resetExistingName == existingContainer.name || resetExistingName == resolved.containerName
+        {
+            StatusPrinter.status("Replacing container", item: existingContainer.name)
+            do {
+                try runtime.delete(nameOrId: existingContainer.id, force: true)
+            } catch {
+                throw BringUpRecovery.eligible(
+                    error,
+                    resetExistingName: resetExistingName
+                )
+            }
+            existing = nil
+        }
 
         if let existing {
             let existingHash = existing.labels[ContainerIdentity.labelConfigHash]
@@ -74,13 +185,27 @@ public enum UpCommand {
             } else {
                 // Start stopped: no rebuild (features already baked on create).
                 StatusPrinter.status("Starting container")
-                try runtime.start(nameOrId: existing.id)
+                do {
+                    try runtime.start(nameOrId: existing.id)
+                } catch {
+                    throw BringUpRecovery.eligible(
+                        error,
+                        resetExistingName: existing.name
+                    )
+                }
                 let reuseConfig = configForReuse(resolved.config, labels: existing.labels)
-                try LifecycleRunner.runRestartPostStart(
-                    containerId: existing.id,
-                    config: reuseConfig,
-                    runtime: runtime
-                )
+                do {
+                    try LifecycleRunner.runRestartPostStart(
+                        containerId: existing.id,
+                        config: reuseConfig,
+                        runtime: runtime
+                    )
+                } catch {
+                    throw BringUpRecovery.eligible(
+                        error,
+                        resetExistingName: existing.name
+                    )
+                }
                 _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
                     containerId: existing.id,
                     config: reuseConfig,
@@ -188,13 +313,18 @@ public enum UpCommand {
         )
 
         StatusPrinter.status("Creating container", item: resolved.containerName)
-        let id = try runtime.create(request: request)
+        let id: String
+        do {
+            id = try runtime.create(request: request)
+        } catch {
+            throw BringUpRecovery.eligible(error)
+        }
         StatusPrinter.status("Starting container")
         do {
             try runtime.start(nameOrId: id)
         } catch {
             try? runtime.delete(nameOrId: id, force: true)
-            throw error
+            throw BringUpRecovery.eligible(error)
         }
 
         // Config named volumes mount root:root; chown targets before hooks as connectionUser.
@@ -207,14 +337,18 @@ public enum UpCommand {
             )
         } catch {
             try? runtime.delete(nameOrId: id, force: true)
-            throw error
+            throw BringUpRecovery.eligible(error)
         }
 
-        try LifecycleRunner.runCreatePath(
-            containerId: id,
-            config: effectiveConfig,
-            runtime: runtime
-        )
+        do {
+            try LifecycleRunner.runCreatePath(
+                containerId: id,
+                config: effectiveConfig,
+                runtime: runtime
+            )
+        } catch {
+            throw BringUpRecovery.eligible(error)
+        }
 
         // Settings apply after create-path hooks; not gated on --vscode.
         _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
@@ -319,5 +453,62 @@ public enum UpCommand {
             return RemoteUserResolution.applyingConnectionUser(stamped, to: config)
         }
         return config
+    }
+
+    /// Open the host devcontainer.json in the recovery editor, re-opening on invalid content
+    /// (validated with bind-mode strict resolve — the explicit host config path, no discovery
+    /// fallback) and throwing on terminal attempts.
+    private static func editUpConfig(
+        filePath: String,
+        workspacePath: String,
+        localEnv: [String: String],
+        editor: RecoveryEditor
+    ) throws {
+        while true {
+            StatusPrinter.status("Opening recovery editor for", item: filePath)
+            let attempt = editor.edit(
+                filePath: filePath,
+                isTTY: true,
+                jsonOutput: false,
+                validate: { _ in
+                    _ = try ConfigResolver.resolve(
+                        workspacePath: workspacePath,
+                        configPath: filePath,
+                        localEnv: localEnv
+                    )
+                }
+            )
+            switch attempt {
+            case .normalExit:
+                return
+            case .invalidConfig(let error):
+                StatusPrinter.warning(error.message)
+                continue
+            case .cancelled, .noExecutable, .launchFailed, .failed:
+                throw attempt.cliError!
+            case .notRun:
+                throw CLIError(
+                    code: CLIErrorCode.recoveryUnavailable,
+                    message: "Recovery editor did not run",
+                    hint: "Re-run up on a TTY without --json, or edit the host config and retry"
+                )
+            }
+        }
+    }
+
+    private static func shellQuoteCommand(_ args: [String]) -> String {
+        args.map(shellQuote).joined(separator: " ")
+    }
+
+    private static func upRetryCommand(options: UpOptions) -> String {
+        var command = "adevcontainer up --workspace \(shellQuote(options.workspacePath))"
+        if options.jsonOutput { command += " --json" }
+        if options.skipPull { command += " --skip-pull" }
+        if options.openVSCode { command += " --vscode" }
+        return command
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

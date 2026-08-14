@@ -1,0 +1,159 @@
+import Foundation
+
+/// Shared bring-up recovery primitive consumed by `up`, `clone`, and `start` wiring.
+///
+/// Drives the "edit config and retry" loop after a bring-up failure with an editable
+/// `devcontainer.json`: print the structured failure, prompt (default Y via the shared
+/// `RecoveryOpenEditorPrompt`), run the caller's edit closure (which opens `RecoveryEditor`
+/// and reopens on invalid content), then re-run the full bring-up path from scratch. A
+/// further recoverable failure re-enters the prompt; decline/EOF throws the current failure
+/// non-zero. Non-TTY / `--json` never prompts or edits and throws the original failure with
+/// an edit/retry hint the caller's output layer surfaces.
+public enum BringUpRecovery {
+    /// Marker used by bring-up callers to distinguish failures that are eligible for the
+    /// edit/retry flow from failures that must be returned normally (for example, a missing
+    /// config, a failed feature build, or a post-attach failure).
+    public struct EligibleFailure: Error {
+        public let cause: Error
+        public let resetExistingName: String?
+
+        public init(cause: Error, resetExistingName: String? = nil) {
+            self.cause = cause
+            self.resetExistingName = resetExistingName
+        }
+    }
+
+    /// Mark a failure from one of the recoverable bring-up stages.
+    public static func eligible(
+        _ error: Error,
+        resetExistingName: String? = nil
+    ) -> EligibleFailure {
+        if let marked = error as? EligibleFailure {
+            return EligibleFailure(
+                cause: marked.cause,
+                resetExistingName: resetExistingName ?? marked.resetExistingName
+            )
+        }
+        return EligibleFailure(cause: error, resetExistingName: resetExistingName)
+    }
+
+    /// Edit/retry guidance a non-interactive caller surfaces in place of a prompt.
+    public struct Guidance: Equatable, Sendable {
+        public let configPath: String
+        public let editCommand: String
+        public let retryCommand: String
+
+        public init(configPath: String, editCommand: String, retryCommand: String) {
+            self.configPath = configPath
+            self.editCommand = editCommand
+            self.retryCommand = retryCommand
+        }
+    }
+
+    /// Run the interactive recovery loop and return the result of the final retry.
+    ///
+    /// - Parameters:
+    ///   - failure: the original bring-up failure (re-thrown on decline/EOF and, with a
+    ///     hint, on the non-interactive path).
+    ///   - guidance: config path + edit/retry commands for the non-interactive hint.
+    ///   - isTTY: whether stdin is a terminal.
+    ///   - jsonOutput: whether machine-readable output was requested.
+    ///   - openEditorPrompt: shared prompt; only consulted in a TTY without `--json`.
+    ///   - edit: opens the editor and validates, re-opening on invalid content; throws on
+    ///     cancellation or editor failure.
+    ///   - retry: re-runs the full bring-up path from scratch.
+    public static func run<T>(
+        failure: Error,
+        guidance: Guidance,
+        isTTY: Bool,
+        jsonOutput: Bool,
+        openEditorPrompt: RecoveryOpenEditorPrompt = .default,
+        edit: () throws -> Void,
+        retry: () throws -> T
+    ) throws -> T {
+        let markedFailure = failure is EligibleFailure
+        let initialFailure = (failure as? EligibleFailure)?.cause ?? failure
+
+        guard isTTY, !jsonOutput else {
+            throw hintError(initialFailure, guidance)
+        }
+
+        var activeFailure = initialFailure
+        while true {
+            emitStructuredFailure(
+                activeFailure,
+                guidance: guidance,
+                writeError: openEditorPrompt.writeError
+            )
+            switch openEditorPrompt.ask() {
+            case .affirmative:
+                break
+            case .decline:
+                throw activeFailure
+            }
+
+            try edit()
+
+            do {
+                return try retry()
+            } catch {
+                guard !markedFailure || error is EligibleFailure else { throw error }
+                activeFailure = (error as? EligibleFailure)?.cause ?? error
+            }
+        }
+    }
+
+    /// Original failure plus an edit/retry hint for non-interactive callers. Preserves the
+    /// original code/message/property so scripts can match on the failure that triggered
+    /// recovery rather than a synthetic wrapper.
+    private static func hintError(_ failure: Error, _ guidance: Guidance) -> CLIError {
+        let path = shellQuote(guidance.configPath)
+        let editor = guidance.editCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        let editorHint = editor.isEmpty || editor == "recovery editor unavailable"
+            ? ""
+            : " using \(editor)"
+        let editRetry = "Edit \(path)\(editorHint), then run \(guidance.retryCommand)"
+        if let cli = failure as? CLIError {
+            return CLIError(
+                code: cli.code,
+                property: cli.property,
+                message: cli.message,
+                hint: cli.hint.map { "\(editRetry) (\($0))" } ?? editRetry,
+                recovery: cli.recovery
+            )
+        }
+        return CLIError(
+            code: CLIErrorCode.runtimeFailed,
+            message: failure.localizedDescription,
+            hint: editRetry
+        )
+    }
+
+    /// Print the structured failure and edit/retry guidance to stderr before the prompt.
+    private static func emitStructuredFailure(
+        _ failure: Error,
+        guidance: Guidance,
+        writeError: (String) -> Void
+    ) {
+        let formatted: String
+        if let cli = failure as? CLIError {
+            formatted = cli.formatted()
+        } else {
+            formatted = TerminalStyle.errorPrefix + failure.localizedDescription
+        }
+        writeError(formatted + "\n")
+        if !guidance.configPath.isEmpty {
+            writeError("  configPath: \(guidance.configPath)\n")
+        }
+        if !guidance.editCommand.isEmpty {
+            writeError("  edit: \(guidance.editCommand)\n")
+        }
+        if !guidance.retryCommand.isEmpty {
+            writeError("  retry: \(guidance.retryCommand)\n")
+        }
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}

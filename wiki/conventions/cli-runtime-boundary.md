@@ -194,9 +194,9 @@ Apple named volumes mount **root:root** ([gaps](../domain/devcontainer-apple-gap
     - **SSH auth:** agent already forwarded via `--ssh` from create.
     - **Author apply:** when **both** name+email from step 4 → guest `git config --local` both; if either missing → warn once, no partial write; no synthetic defaults.
   10. Create-path lifecycle hooks (same order as fresh `up`). On start/populate/hook/ownership failure after create: delete container **and** workspace `*-ws` volume.
-  11. **Always** clean config-fetch temps (success or failure). No host full-clone staging temp on the happy path.
+  11. **Temps:** success or ineligible failure → clean config-fetch temps. Eligible bring-up recovery → retain the checkout (do not delete). Successful recovery/`--resume` overlays the edited `devcontainer.json` into the guest workspace **after populate** (replaces the git-populated original), then removes only a validated managed checkout. No overlay without an editable config. No host full-clone staging temp on the happy path.
 
-`up` remains bind-mode host workspace only (no auto git Feature). Detail: [architecture.md](../architecture.md); contract [`specs/clone.md`](../../specs/clone.md).
+`up` remains bind-mode host workspace only (no auto git Feature). Detail: [architecture.md](../architecture.md); contract [`specs/clone.md`](../../specs/clone.md). Eligible clone recovery: [Bring-up recovery](#bring-up-recovery-bringuprecovery).
 
 ## Managed selection (`list` / lifecycle commands)
 
@@ -204,7 +204,7 @@ Apple named volumes mount **root:root** ([gaps](../domain/devcontainer-apple-gap
 
 - `list [--json]`: client-side filter to `devcontainer.managed=adevcontainer` only.
 - `start` / `exec` / `stop` / `delete` / `prune` / `rebuild` / `inspect`: `--name` or picker among managed; no host workspace path required.
-- `start`: runtime start of a managed container; **volume-mode runs no hooks** (bind start-stopped `postStart` stays on `up` path).
+- `start`: runtime start of a managed container; **volume-mode runs no hooks** (bind start-stopped `postStart` stays on `up` path). Start failure: TTY recovery delegates to `rebuild --name` (does **not** re-run start or open an editor); non-TTY/`--json`/decline → original error + hint `adevcontainer rebuild --name <name>`.
 - `exec`: user/workdir from labels `devcontainer.remote_user` / `devcontainer.workspace_folder` when set (both modes stamp workdir; new creates always stamp non-empty `remote_user` incl. `root`; empty label = legacy omit `-u` — see [Connection user](#connection-user-remoteuser--containeruser)).
 
 ### InteractivePicker (multi-container)
@@ -230,7 +230,18 @@ Presentation / QUIET: [terminal-output.md](terminal-output.md) (picker stays raw
 | `up` create | Fresh bind-mode create when no managed container for identity |
 | `up` reuse / start-stopped | Only when existing container's stamped config hash **equals** current resolve. Running → reuse (no Features re-run); stopped → start + bind `postStart` only |
 | `up` config hash mismatch | Fail closed: `config_hash_mismatch`; **does not** delete or replace. Hint: `adevcontainer rebuild` (managed selection: `--name` or auto) |
-| `rebuild` | **Forced rebuild** (landed; archive [`20260810-rebuild`](../../specs/changes/archive/20260810-rebuild/)): read current stamped config **before** any delete; hostRequirements + Features; then container-only delete old → create same name (bind) or reuse same `adev-*-ws` (volume; ensureVolume, never delete/replace workspace volume; no re-clone). Pre-delete failure leaves old container untouched. Optional `--skip-pull` / `--vscode` / `--json`. Volume-mode rebuild: OCI features only (local-path / host DefaultFeatureFetcher unsupported — fail clean pre-delete). After start: config volume ownership always (soft-fail warn); workspace chown only if connection user ≠ stamped `remote_user` (soft-fail) — see [ownership](#named-volumes-ensure--reuse--ownership). Hard post-delete recovery mode-split (TTY `Open the recovery editor now? [Y/n]` default Y; decline/EOF retain; named retry skips prompt; README + CLI help document UX): [gaps — Failed rebuild recovery](../domain/devcontainer-apple-gaps.md#failed-rebuild-recovery-mode-split) |
+| `rebuild` | **Forced rebuild** (landed; archive [`20260810-rebuild`](../../specs/changes/archive/20260810-rebuild/)): read current stamped config **before** any delete; hostRequirements + Features; then container-only delete old → create same name (bind) or reuse same `adev-*-ws` (volume; ensureVolume, never delete/replace workspace volume; no re-clone). Pre-delete failure leaves old container untouched. Optional `--skip-pull` / `--vscode` / `--json`. Volume-mode rebuild: OCI features only (local-path / host DefaultFeatureFetcher unsupported — fail clean pre-delete). After start: config volume ownership always (soft-fail warn); workspace chown only if connection user ≠ stamped `remote_user` (soft-fail) — see [ownership](#named-volumes-ensure--reuse--ownership). Hard post-delete recovery mode-split (TTY `Open the recovery editor now? [Y/n]` default Y; decline/EOF retain; named retry skips prompt; README + CLI help document UX): [gaps — Failed rebuild recovery](../domain/devcontainer-apple-gaps.md#failed-rebuild-recovery-mode-split). Bring-up (`up`/`clone`/`start`) is a separate primitive — [below](#bring-up-recovery-bringuprecovery) |
+
+## Bring-up recovery (`BringUpRecovery`)
+
+Shared primitive for `up`/`clone` (edit-and-retry) and `start` (rebuild handoff). Rebuild hard post-delete recovery is unchanged. Contract: [`specs/clone.md`](../../specs/clone.md) + [`specs/managed-lifecycle.md`](../../specs/managed-lifecycle.md); archive [`20260814-bring-up-recovery`](../../specs/changes/archive/20260814-bring-up-recovery/). Detail: [architecture](../architecture.md#bring-up-recovery), [gaps](../domain/devcontainer-apple-gaps.md#bring-up-recovery-up--clone--start).
+
+- **Eligible:** existing editable `devcontainer.json`. Triggers: parse/resolve, create, start, ownership, clone populate, create-path hooks.
+- **Not eligible:** config missing; clone fetch fails before config exists; postAttach/settings/open.
+- **TTY:** `Open the recovery editor now? [Y/n]` default **Y**. Non-TTY/`--json`: never prompt; hint only. Decline/EOF → original error.
+- **`up`:** host config editor; retry from scratch (re-resolve + create path); delete leftover containers including after a later retry or `name` change. No helper/checkout. Bind stays host-edit — no guest overlay.
+- **`clone`:** retain product-managed checkout (`~/Library/Application Support/adevcontainer/clone-recovery`, marker `.adevcontainer-retained-checkout`); retry without re-fetch; non-TTY exact `clone --resume <config-dir>`. Resume/remove: managed root + marker only; never delete an external path. Successful TTY retry/`--resume` overlays edited `devcontainer.json` into the guest workspace after populate (replaces git-populated original; in-container write `adevcontainer-clone-persist`). Overlay is clone-recovery only; none when there is no editable config. Rebuild helper write-back unchanged.
+- **`start`:** TTY → `rebuild --name`; never re-run start, open an editor, or write config.
 
 ## `prune` resource set
 
@@ -280,7 +291,7 @@ On `AppleContainerRuntime.build` (Features derived image):
 
 **Fixtures:** `features-node`, `features-triple`, `features-local`, `features-docker-ood`, `features-sample/*`.
 
-**Tests:** suite of record is `swift run adevcontainerTests`. Local E2E when Apple `container` available; OCI E2E opt-in `ADEVCONTAINER_FEATURES_E2E=1`. Recovery remaining gaps only: live non-TTY recovery E2E opt-in `ADEVCONTAINER_RECOVERY_E2E=1` (default suite skips); automated TTY recovery E2E absent (`ADEVCONTAINER_RECOVERY_E2E_TTY=1` surfaces skip guidance only; operator-validated). Recovery E2E bootstraps clone-origin labels/volumes when live `CloneCommand` populate is unreachable (guest DNS / host `file://`). Feature material for rebuild/recovery git inject must use a durable host path such as `~/Library/Caches` — Apple `container build` drops/breaks `/var/folders` temp contexts.
+**Tests:** suite of record is `swift run adevcontainerTests`. Local E2E when Apple `container` available; OCI E2E opt-in `ADEVCONTAINER_FEATURES_E2E=1`. Recovery E2E gate: `ADEVCONTAINER_RECOVERY_E2E=1` (non-TTY) / `ADEVCONTAINER_RECOVERY_E2E_TTY=1` (TTY). Rebuild non-TTY live exists when gated (bootstraps clone-origin stamps when live `CloneCommand` populate is unreachable). Automated TTY recovery E2E absent (TTY env surfaces skip guidance). Bring-up gated case `recoveryE2E_bringUpCommands_gated` still skip-cascades and then always skips — it does not execute live bring-up commands. Feature material for rebuild/recovery git inject must use a durable host path such as `~/Library/Caches` — Apple `container build` drops/breaks `/var/folders` temp contexts.
 
 Progress lines: `==> Resolving features`, `==> Fetching features`, `==> Building features` (or Reusing); `==> Configuring native arm64 builds (build.rosetta=false)` only when changing config.
 
@@ -337,7 +348,7 @@ Each hook property admits **string** | **argv `string[]`** | **object map** `nam
 | `postAttachCommand` | **implemented** on `up`/`start`/`clone`/`rebuild`: after open success (order on apply-commands: apply → open → postAttach) — **RUNS** config then feature postAttach; **SKIP** + status if no flag or open soft-fails (no status line if absent). Not always-skip-forever. Contract: [`specs/vscode.md`](../../specs/vscode.md) + active [`vscode-customizations-up-clone-rebuild`](../../specs/changes/vscode-customizations-up-clone-rebuild/); open archive: [`specs/changes/archive/20260808-vscode-open-flag/`](../../specs/changes/archive/20260808-vscode-open-flag/); apply archive: [`specs/changes/archive/20260808-vscode-customizations-apply/`](../../specs/changes/archive/20260808-vscode-customizations-apply/) |
 
 - Capture exit codes; failed hook fails the command — do not pretend success.
-- **Create-path failure** (any of onCreate / updateContent / postCreate / postStart on fresh create): delete the container **before** returning failure, so reuse cannot treat a half-bootstrapped container as healthy. Customizations apply is **not** part of create-path delete-on-fail.
+- **Create-path failure** (any of onCreate / updateContent / postCreate / postStart on fresh create): delete the container **before** returning failure, so reuse cannot treat a half-bootstrapped container as healthy. Customizations apply is **not** part of create-path delete-on-fail. After delete-on-fail, `up`/`clone` may enter [bring-up recovery](#bring-up-recovery-bringuprecovery) when an editable config exists.
 - **Bind start-stopped `postStartCommand` failure:** fail `up` but **do not** delete.
 - **postAttach failure** (when it runs): fail the command; **do not** delete/stop the container (fail-keep; contrast create-path delete-on-fail). Open soft-fail alone does not fail the command and must not run postAttach; on `up`/`clone`/`rebuild`, apply still runs (not `--vscode`-gated; may complete before open soft-fails). `start` never applies.
 - **customizations apply soft-fail:** warn stderr; never fail lifecycle exit; never delete/stop solely due to settings/extensions apply. Contrasts postAttach fail-keep.
