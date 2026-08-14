@@ -2309,11 +2309,13 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(String(data: buffer, encoding: .utf8) ?? "", "")
     }),
     ("lifecycleObjectMapRunsInParallel", {
-        let secondStarted = DispatchSemaphore(value: 0)
+        let rendezvous = DispatchGroup()
+        rendezvous.enter()
+        rendezvous.enter()
         let lock = NSLock()
-        var firstSawSecond = false
         var inFlight = 0
         var maxInFlight = 0
+        var rendezvousOk = 0
 
         let mock = MockProcessRunner()
         mock.handlers = [
@@ -2328,13 +2330,13 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
                     inFlight -= 1
                     lock.unlock()
                 }
-                if args.contains("first-cmd") {
-                    let wait = secondStarted.wait(timeout: .now() + 2)
-                    firstSawSecond = (wait == .success)
-                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
-                }
-                if args.contains("second-cmd") {
-                    secondStarted.signal()
+                if args.contains("first-cmd") || args.contains("second-cmd") {
+                    rendezvous.leave()
+                    if rendezvous.wait(timeout: .now() + 2) == .success {
+                        lock.lock()
+                        rendezvousOk += 1
+                        lock.unlock()
+                    }
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
                 return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
@@ -2357,7 +2359,7 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
             runtime: runtime,
             failurePolicy: .deleteContainerThenFail
         )
-        try MiniTest.expect(firstSawSecond, "first exec must still be in flight when second starts")
+        try MiniTest.expect(rendezvousOk == 2, "first exec must still be in flight when second starts")
         try MiniTest.expect(maxInFlight >= 2, "object-map entries must overlap")
         let execs = mock.calls.filter { $0.arguments.first == "exec" }
         try MiniTest.expectEqual(execs.count, 2)

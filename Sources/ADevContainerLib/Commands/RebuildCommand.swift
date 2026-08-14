@@ -148,6 +148,7 @@ public enum RebuildCommand {
                 labels: labels,
                 containerId: selected.id,
                 runtime: runtime,
+                localEnv: localEnv,
                 fileManager: fileManager
             )
             resolvedConfig = volumeRead!.config

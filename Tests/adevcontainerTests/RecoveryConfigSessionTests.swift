@@ -140,6 +140,22 @@ nonisolated(unsafe) let recoveryConfigSessionTests: [(String, () throws -> Void)
         try MiniTest.expect(!resolved.workspacePath.hasSuffix("repository"), "private temp basename is not used")
     }),
 
+    ("recoveryValidationSubstitutesHostLocalEnvInMountSource", {
+        let raw = Data("""
+        {
+          "image": "alpine:3.20",
+          "mounts": [
+            "source=${localEnv:HOME}${localEnv:USERPROFILE}/.kube/config,target=/home/vscode/.kube/config,type=bind,readonly"
+          ]
+        }
+        """.utf8)
+        let session = try makeRecoverySession(raw: raw)
+        defer { try? session.cleanup() }
+        let resolved = try session.validateEditedConfig(localEnv: ["HOME": "/Users/you"])
+        try MiniTest.expectEqual(resolved.config.mounts.first?.source, "/Users/you/.kube/config")
+        try MiniTest.expectEqual(resolved.config.workspaceFolder, "/workspaces/repository")
+    }),
+
     ("recoverySessionRejectsConfigPathOutsideWorkspace", {
         for path in ["../../etc/passwd", "/etc/passwd"] {
             try MiniTest.expectThrows({

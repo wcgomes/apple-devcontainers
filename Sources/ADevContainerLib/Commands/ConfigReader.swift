@@ -142,6 +142,7 @@ public enum ConfigReader {
         labels: [String: String],
         containerId: String,
         runtime: AppleContainerRuntime,
+        localEnv: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default
     ) throws -> ResolvedVolumeConfigRead {
         do {
@@ -154,6 +155,7 @@ public enum ConfigReader {
             let config = try resolveRawVolume(
                 raw: raw,
                 labels: labels,
+                localEnv: localEnv,
                 fileManager: fileManager
             )
             return ResolvedVolumeConfigRead(config: config, raw: raw)
@@ -168,7 +170,7 @@ public enum ConfigReader {
     public static func resolveVolumeFile(
         at configPath: String,
         labels: [String: String],
-        localEnv: [String: String] = [:],
+        localEnv: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default
     ) throws -> ResolvedWorkspace {
         guard labels[ContainerIdentity.labelWorkspaceMode] == ContainerIdentity.workspaceModeVolume else {
@@ -249,6 +251,7 @@ public enum ConfigReader {
                 labels: labels,
                 containerId: containerId,
                 runtime: runtime,
+                localEnv: localEnv,
                 fileManager: fileManager
             )
         }
@@ -298,6 +301,7 @@ public enum ConfigReader {
         labels: [String: String],
         containerId: String,
         runtime: AppleContainerRuntime,
+        localEnv: [String: String],
         fileManager: FileManager
     ) throws -> ResolvedDevContainerConfig? {
         let raw = try readVolumeRawOnce(
@@ -307,12 +311,18 @@ public enum ConfigReader {
             fileManager: fileManager
         )
 
-        return try resolveRawVolume(raw: raw, labels: labels, fileManager: fileManager)
+        return try resolveRawVolume(
+            raw: raw,
+            labels: labels,
+            localEnv: localEnv,
+            fileManager: fileManager
+        )
     }
 
     private static func resolveRawVolume(
         raw: RawVolumeConfig,
         labels: [String: String],
+        localEnv: [String: String],
         fileManager: FileManager
     ) throws -> ResolvedDevContainerConfig {
 
@@ -349,7 +359,7 @@ public enum ConfigReader {
         let resolved = try resolveVolumeFile(
             at: tempConfig.path,
             labels: labels,
-            localEnv: [:],
+            localEnv: localEnv,
             fileManager: fileManager
         )
         return resolved.config
