@@ -1,7 +1,5 @@
 # Decisions (ADRs)
 
-| ADR | Summary |
-|-----|---------|
-| [0001](0001-greenfield-swift-cli.md) | Greenfield Swift CLI; sole runtime = Apple container |
-| [0002](0002-reject-docker-ood-privileged-tun.md) | Original reject policy; **superseded in part** by 0003 for optional incompatibles; Compose/unknown still fail-closed |
-| [0003](0003-warn-skip-apple-incompatibles.md) | Warn-skip docker-* features, privileged/device runArgs, privileged/securityOpt metadata; continue `up` |
+- [Greenfield Swift CLI](0001-greenfield-swift-cli.md) — keywords: greenfield, Swift, runtime — Records the project’s greenfield runtime decision.
+- [Apple incompatibles](0002-reject-docker-ood-privileged-tun.md) — keywords: Docker, privileges, rejection — Records the original incompatibility rejection policy.
+- [Warn-skip incompatibles](0003-warn-skip-apple-incompatibles.md) — keywords: Docker, warnings, compatibility — Records the optional incompatibility warning policy.
