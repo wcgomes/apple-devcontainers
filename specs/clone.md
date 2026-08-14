@@ -290,13 +290,14 @@ before returning the structured failure. (Create-path hook runners that already 
 
 **Lifecycle (clone fresh create)**
 
-After successful populate, `clone` MUST run create-path lifecycle hooks with the **same matrix as `up` fresh create**:
+At the start of `clone`, when a host checkout exists, the CLI MUST run host `initializeCommand` per [lifecycle-hooks.md](lifecycle-hooks.md) **initializeCommand host execution**. After successful populate, `clone` MUST run create-path lifecycle hooks with the **same matrix as `up` fresh create**:
 
 `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand`
 
-- Hooks run via AppleContainerRuntime exec (not baked into the image).
-- Non-zero exit of any create-path hook MUST fail `clone` and MUST delete the container **and** the workspace volume before returning failure (clone cleanup; container delete-on-fail aligns with `up` fresh create, plus volume-mode `*-ws` removal).
-- `postAttachCommand` follows the same gated policy as `up` (run only after successful `--vscode` open; skip with status when no attach hook or open soft-failed; failure fails `clone` but MUST NOT delete container/volume solely due to postAttach failure). Create-path hook failure delete policy for onCreate/updateContent/postCreate/postStart is unchanged.
+- In-container hooks run via AppleContainerRuntime exec (not baked into the image).
+- Non-zero exit of any create-path hook MUST fail `clone` and MUST delete the container **and** the workspace volume before returning failure.
+- `postAttachCommand` follows [vscode.md](vscode.md) **postAttachCommand policy (CLI-only)** (CLI attach at the end of successful `clone`; not `--vscode`-gated; failure fails `clone` but MUST NOT delete container/volume solely due to postAttach failure).
+- `waitFor` applies as on `up` fresh create.
 
 **Temp cleanup**
 
@@ -308,6 +309,12 @@ After successful populate, `clone` MUST run create-path lifecycle hooks with the
 - When clone completes create, start, and populate successfully
 - Then create-path hooks run in order and clone reports success
 
+#### Scenario: clone runs postAttach without --vscode
+- Given a successful clone populate and create-path hooks and `postAttachCommand` that exits 0
+- When the user runs `clone` without `--vscode`
+- Then the CLI executes `postAttachCommand`
+- And clone reports success
+
 #### Scenario: Temp dirs always cleaned up
 - Given clone runs to success or to a mid-flow structured failure after temps were created
 - When the command returns
@@ -318,7 +325,7 @@ After successful populate, `clone` MUST run create-path lifecycle hooks with the
 - When clone runs
 - Then clone fails structured, the managed dev container is deleted, the workspace `*-ws` volume is deleted, and temps are cleaned up
 
-See also: [core.md](core.md) **Up lifecycle** and [lifecycle-hooks.md](lifecycle-hooks.md) for the shared create-path hook matrix; [vscode.md](vscode.md) for postAttach gating.
+See also: [core.md](core.md) **Up lifecycle** and [lifecycle-hooks.md](lifecycle-hooks.md) for the shared create-path hook matrix; [vscode.md](vscode.md) for postAttach policy.
 
 ---
 

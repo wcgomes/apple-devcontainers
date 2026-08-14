@@ -211,6 +211,80 @@ nonisolated(unsafe) let startCommandRecoveryTests: [(String, () throws -> Void)]
         try MiniTest.expectEqual(verbs, ["list", "start"], "start recovery only lists and attempts start before delegating")
     }),
 
+    ("startRecoveryViaRebuildDoesNotDoubleRunPostStart", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "postStartCommand": "echo start-recovery-postStart"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeBind,
+            ContainerIdentity.labelLocalFolder: ws.path,
+            ContainerIdentity.labelConfigFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path,
+            ContainerIdentity.labelWorkspaceFolder: "/workspaces/app"
+        ]
+        let mock = MockProcessRunner()
+        let entry = MockProcessRunner.containerListJSON(
+            id: startRecoveryName,
+            state: "stopped",
+            labels: labels
+        )
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: try! JSONSerialization.data(withJSONObject: [entry]),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "start" {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("start failed".utf8))
+                }
+                if args.first == "inspect" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: try! JSONSerialization.data(withJSONObject: entry),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        var rebuildPostStart = 0
+        StartCommand.rebuildOverride = { _ in
+            rebuildPostStart += 1
+            return startRecoveryResult(startRecoveryName)
+        }
+        defer { StartCommand.rebuildOverride = nil }
+
+        try StartCommand.run(
+            options: StartOptions(name: startRecoveryName),
+            runtime: runtime,
+            isTTY: true,
+            openEditorPrompt: startRecoveryPrompt(answers: ["y"])
+        )
+        try MiniTest.expectEqual(rebuildPostStart, 1, "rebuild create-path owns postStart")
+        let startBodies = mock.calls.compactMap { call -> String? in
+            guard call.arguments.first == "exec" else { return nil }
+            if let lc = call.arguments.firstIndex(of: "-lc"), lc + 1 < call.arguments.count {
+                return call.arguments[lc + 1]
+            }
+            return nil
+        }
+        try MiniTest.expect(
+            !startBodies.contains("echo start-recovery-postStart"),
+            "StartCommand must not exec postStart again after rebuild returns"
+        )
+    }),
+
     ("startRecoveryAddsNoConfigWritePath", {
         let (runtime, mock) = startRecoveryRuntime()
         var delegated: RebuildOptions?

@@ -18,6 +18,41 @@ public enum DevContainerMetadataLabel {
         public static let empty = ImageMetadataUsers()
     }
 
+    /// Load contributions and users from a local image inspect. Absence / inspect failure → empty.
+    public static func loadContributions(
+        imageRef: String,
+        runtime: AppleContainerRuntime
+    ) -> (contributions: FeatureContributions, users: ImageMetadataUsers) {
+        guard let labels = try? runtime.imageLabels(ref: imageRef) else {
+            return (.empty, .empty)
+        }
+        warnStripUnsafe(from: labels, imageRef: imageRef)
+        return (parseContributions(from: labels), parseUsers(from: labels))
+    }
+
+    /// Encode feature lifecycle hooks as official-style metadata fragments (JSON array).
+    /// Used to bake `devcontainer.metadata` onto a derived image so resume can remelt.
+    public static func encodeFragments(_ contributions: FeatureContributions) -> String? {
+        var fragments: [[String: Any]] = []
+        func append(_ key: String, _ commands: [LifecycleCommand]) {
+            for cmd in commands {
+                fragments.append([key: cmd.hashEncoding])
+            }
+        }
+        append("onCreateCommand", contributions.onCreateCommands)
+        append("updateContentCommand", contributions.updateContentCommands)
+        append("postCreateCommand", contributions.postCreateCommands)
+        append("postStartCommand", contributions.postStartCommands)
+        append("postAttachCommand", contributions.postAttachCommands)
+        guard !fragments.isEmpty else { return nil }
+        guard JSONSerialization.isValidJSONObject(fragments),
+              let data = try? JSONSerialization.data(withJSONObject: fragments),
+              let s = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return s
+    }
+
     /// Parse label JSON into partial contributions. Absence / parse failure → empty (never fails up alone).
     /// Accepts a top-level JSON object or an array of objects (fragments are union-merged).
     public static func parseContributions(from labels: [String: String]) -> FeatureContributions {

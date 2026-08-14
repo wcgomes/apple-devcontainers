@@ -659,6 +659,157 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
         try MiniTest.expectEqual(guest.unpackCalls.count, 0)
     }),
 
+    ("startStoppedBindRunsPostStart", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "postStartCommand": "echo bind-postStart",
+          "customizations": {
+            "vscode": {
+              "extensions": ["pub.name"],
+              "settings": { "editor.tabSize": 2 }
+            }
+          }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let mock = VSCodeCustCmdSupport.startRuntimeMock(resolved: resolved, state: "stopped")
+        let guest = MockVSCodeGuest()
+        guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)] = "stale"
+        let dl = MockVSCodeDownloader()
+        let restoreApply = VSCodeCustCmdSupport.installApply(guest: guest, downloader: dl)
+        defer { restoreApply() }
+        let launcher = MockVSCodeLauncher()
+        let restoreOpen = VSCodeCustCmdSupport.installOpen(launcher: launcher)
+        defer { restoreOpen() }
+
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try StartCommand.run(
+            options: StartOptions(name: resolved.containerName, openVSCode: false),
+            runtime: runtime
+        )
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "start" })
+        try MiniTest.expect(VSCodeCustCmdSupport.shellBodies(from: mock).contains("echo bind-postStart"))
+        try MiniTest.expectEqual(dl.calls.count, 0)
+        try MiniTest.expectEqual(guest.unpackCalls.count, 0)
+        try MiniTest.expect(guest.files[VSCodeCustomizationsApply.settingsPath(home: guest.home)] == nil)
+        try MiniTest.expectEqual(
+            guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            "stale"
+        )
+    }),
+
+    ("startAlreadyRunningDoesNotRunPostStart", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "postStartCommand": "echo already-running-postStart",
+          "customizations": {
+            "vscode": {
+              "extensions": ["pub.name"],
+              "settings": { "editor.tabSize": 2 }
+            }
+          }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let mock = VSCodeCustCmdSupport.startRuntimeMock(resolved: resolved, state: "running")
+        let guest = MockVSCodeGuest()
+        guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)] = "stale"
+        let dl = MockVSCodeDownloader()
+        let restoreApply = VSCodeCustCmdSupport.installApply(guest: guest, downloader: dl)
+        defer { restoreApply() }
+
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try StartCommand.run(
+            options: StartOptions(name: resolved.containerName, openVSCode: false),
+            runtime: runtime
+        )
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "start" })
+        try MiniTest.expect(
+            !VSCodeCustCmdSupport.shellBodies(from: mock).contains("echo already-running-postStart")
+        )
+        try MiniTest.expectEqual(dl.calls.count, 0)
+        try MiniTest.expect(guest.files[VSCodeCustomizationsApply.settingsPath(home: guest.home)] == nil)
+    }),
+
+    ("startRestartPostStartFailureDoesNotDelete", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "postStartCommand": "exit 5",
+          "customizations": {
+            "vscode": {
+              "extensions": ["pub.name"],
+              "settings": { "editor.tabSize": 2 }
+            }
+          }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        var labels = resolved.labels
+        labels[ContainerIdentity.labelManaged] = ContainerIdentity.managedValue
+        labels[ContainerIdentity.labelWorkspaceFolder] = resolved.config.workspaceFolder
+        labels[ContainerIdentity.labelLocalFolder] = resolved.workspacePath
+        labels[ContainerIdentity.labelConfigFile] = resolved.configPath
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName,
+            state: "stopped",
+            labels: labels,
+            image: "alpine:3.20"
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "start" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "inspect" {
+                    let data = try! JSONSerialization.data(withJSONObject: entry)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "exec" {
+                    if args.contains(LifecycleRunner.userEnvProbeScript) {
+                        return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                    }
+                    return ProcessResult(exitCode: 5, stdout: Data(), stderr: Data("fail\n".utf8))
+                }
+                if args.first == "delete" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let guest = MockVSCodeGuest()
+        guest.files[VSCodeCustomizationsApply.markerPath(home: guest.home)] = "stale"
+        let dl = MockVSCodeDownloader()
+        let restoreApply = VSCodeCustCmdSupport.installApply(guest: guest, downloader: dl)
+        defer { restoreApply() }
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            try StartCommand.run(
+                options: StartOptions(name: resolved.containerName),
+                runtime: runtime
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.lifecycleFailed)
+            try MiniTest.expectEqual(err.property, "postStartCommand")
+        }
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "start" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+        try MiniTest.expectEqual(dl.calls.count, 0)
+        try MiniTest.expect(guest.files[VSCodeCustomizationsApply.settingsPath(home: guest.home)] == nil)
+    }),
+
     ("startWithVSCodeOpensWithoutApplyingCustomizations", {
         let ws = try TestRepo.makeTempWorkspace(
             configJSON: VSCodeCustCmdSupport.configJSON(
@@ -730,12 +881,12 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
         try MiniTest.expect(!VSCodeCustCmdSupport.shellBodies(from: mock).contains { $0.contains("postAttach") })
     }),
 
-    ("startPostAttachSkippedWithoutVSCode", {
+    ("startPostAttachRunsWithoutVSCode", {
         let ws = try TestRepo.makeTempWorkspace(
             configJSON: VSCodeCustCmdSupport.configJSON(
                 settings: true,
                 extensions: true,
-                postAttach: "exit 99"
+                postAttach: "echo start-attach"
             )
         )
         defer { try? FileManager.default.removeItem(at: ws) }
@@ -751,18 +902,12 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
         defer { restoreOpen() }
 
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        let stderr = try withEnabledStatusStderr {
-            try StartCommand.run(
-                options: StartOptions(name: resolved.containerName, openVSCode: false),
-                runtime: runtime
-            )
-        }
-        try MiniTest.expectEqual(launcher.calls.count, 0)
-        try MiniTest.expect(!VSCodeCustCmdSupport.shellBodies(from: mock).contains { $0.contains("exit 99") })
-        try MiniTest.expect(
-            stderr.contains("postAttach skipped") && stderr.contains("(no attach hook)"),
-            "start without --vscode must emit postAttach skip status when postAttach is present"
+        try StartCommand.run(
+            options: StartOptions(name: resolved.containerName, openVSCode: false),
+            runtime: runtime
         )
+        try MiniTest.expectEqual(launcher.calls.count, 0)
+        try MiniTest.expect(VSCodeCustCmdSupport.shellBodies(from: mock).contains("echo start-attach"))
         try MiniTest.expectEqual(dl.calls.count, 0)
         try MiniTest.expectEqual(guest.unpackCalls.count, 0)
         try MiniTest.expect(guest.files[VSCodeCustomizationsApply.settingsPath(home: guest.home)] == nil)
@@ -917,6 +1062,35 @@ nonisolated(unsafe) let vscodeCustomizationsCommandTests: [(String, () throws ->
             rebuild.contains("apply by default") || rebuild.contains("apply on the new"),
             "rebuild help states apply is default"
         )
+
+        for (label, text) in [
+            ("usage", usage),
+            ("up help", up),
+            ("clone help", clone),
+            ("start help", start),
+            ("rebuild help", rebuild)
+        ] {
+            try MiniTest.expect(
+                !text.contains("does not run postStart"),
+                "\(label) must not say start skips postStart"
+            )
+            try MiniTest.expect(
+                !text.contains("gates postAttach"),
+                "\(label) must not say --vscode gates postAttach"
+            )
+            try MiniTest.expect(
+                !text.contains("postAttach only after successful open"),
+                "\(label) must not say postAttach runs only after successful open"
+            )
+            try MiniTest.expect(
+                !text.contains("postAttachCommand runs only after successful open"),
+                "\(label) must not say postAttachCommand is open-gated"
+            )
+            try MiniTest.expect(
+                !text.contains("skipped without flag or on open"),
+                "\(label) must not say postAttach is skipped without --vscode"
+            )
+        }
     }),
 
     ("postAttachConfigLoaderRetainsVscodeFields", {

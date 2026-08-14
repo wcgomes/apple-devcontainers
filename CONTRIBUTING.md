@@ -15,7 +15,7 @@ swift build -c release # binary: .build/release/adevcontainer
 ```
 
 ## Tests
-Plain `swift test` may report “no tests found” on Command Line Tools hosts, which lack `XCTest.framework`; the suite of record is `swift run adevcontainerTests`.
+Plain `swift test` may report “no tests found” on Command Line Tools hosts, which lack `XCTest.framework`; the suite of record is `swift run adevcontainerTests`. On a TTY, clone tests can prompt for git identity; `swift run adevcontainerTests < /dev/null` runs the suite without prompts.
 
 - Integration skips cleanly if Apple `container` is unavailable
 - Override image: `ADEVCONTAINER_TEST_IMAGE`

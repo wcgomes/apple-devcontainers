@@ -17,6 +17,8 @@ public enum StopCommand {
             print("Container \(info.id) already stopped")
             return
         }
+        // Explicit `stop` always stops. `shutdownAction` `none` / omitted / `stopContainer`
+        // do not change this command; last-window-close auto-stop is out of scope.
         StatusPrinter.status("Stopping container", item: info.id)
         try runtime.stop(nameOrId: info.id)
         print("Stopped \(info.id)")

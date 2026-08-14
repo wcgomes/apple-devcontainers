@@ -507,5 +507,168 @@ nonisolated(unsafe) let configReaderTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(config != nil, "loader resolves with metadata label")
         try MiniTest.expectEqual(config?.featurePostAttachCommands.count, 1, "metadata postAttach merged")
         try MiniTest.expectEqual(config?.featurePostAttachCommands.first?.execArguments, ["sh", "-lc", "echo meta-attach"])
+    }),
+
+    ("loaderParityMergeFeaturePostStartFromLabel", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20"}"#)
+        let configFile = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+        var labels = bindLabels(localFolder: ws.path, configFile: configFile)
+        labels[DevContainerMetadataLabel.labelKey] = #"{"postStartCommand":"echo meta-postStart","postAttachCommand":"echo meta-attach"}"#
+        let config = try PostAttachConfigLoader.load(
+            labels: labels,
+            containerId: "c1",
+            imageRef: nil,
+            runtime: mockRuntime(MockProcessRunner())
+        )
+        try MiniTest.expect(config != nil, "loader resolves with metadata label")
+        try MiniTest.expectEqual(config?.featurePostStartCommands.count, 1, "metadata postStart merged")
+        try MiniTest.expectEqual(
+            config?.featurePostStartCommands.first?.execArguments,
+            ["sh", "-lc", "echo meta-postStart"]
+        )
+        try MiniTest.expectEqual(config?.featurePostAttachCommands.count, 1, "metadata postAttach still merged")
+    }),
+
+    ("loaderParityMergeFeaturePostStartFromImageInspect", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20"}"#)
+        let configFile = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+        let labels = bindLabels(localFolder: ws.path, configFile: configFile)
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["image", "inspect"]) {
+                    let obj: [String: Any] = [
+                        "labels": [
+                            DevContainerMetadataLabel.labelKey:
+                                #"{"postStartCommand":"echo image-postStart"}"#
+                        ]
+                    ]
+                    let data = try! JSONSerialization.data(withJSONObject: obj)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let config = try PostAttachConfigLoader.load(
+            labels: labels,
+            containerId: "c1",
+            imageRef: "alpine:3.20",
+            runtime: mockRuntime(mock)
+        )
+        try MiniTest.expectEqual(config?.featurePostStartCommands.count, 1, "image metadata postStart merged")
+        try MiniTest.expectEqual(
+            config?.featurePostStartCommands.first?.execArguments,
+            ["sh", "-lc", "echo image-postStart"]
+        )
+    }),
+
+    ("loaderParityMergeUnionsImagePostStartWhenContainerMetadataLacksIt", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20"}"#)
+        let configFile = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+        var labels = bindLabels(localFolder: ws.path, configFile: configFile)
+        // Container inherited base metadata (remoteUser only) — remelt must still
+        // inspect the image for feature postStart instead of treating the key as complete.
+        labels[DevContainerMetadataLabel.labelKey] = #"{"remoteUser":"vscode"}"#
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["image", "inspect"]) {
+                    let obj: [String: Any] = [
+                        "labels": [
+                            DevContainerMetadataLabel.labelKey:
+                                #"{"postStartCommand":"echo image-union-postStart"}"#
+                        ]
+                    ]
+                    let data = try! JSONSerialization.data(withJSONObject: obj)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let config = try PostAttachConfigLoader.load(
+            labels: labels,
+            containerId: "c1",
+            imageRef: "alpine:3.20",
+            runtime: mockRuntime(mock)
+        )
+        try MiniTest.expectEqual(
+            config?.featurePostStartCommands.first?.execArguments,
+            ["sh", "-lc", "echo image-union-postStart"]
+        )
+    }),
+
+    ("loaderRemeltsMetadataWhenConfigUnreadable", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20"}"#)
+        let missing = ws.appendingPathComponent(".devcontainer/absent.json").path
+        let labels = bindLabels(localFolder: ws.path, configFile: missing)
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["image", "inspect"]) {
+                    let obj: [String: Any] = [
+                        "labels": [
+                            DevContainerMetadataLabel.labelKey:
+                                #"{"postStartCommand":"echo meta-only-postStart","postAttachCommand":"echo meta-only-postAttach"}"#
+                        ]
+                    ]
+                    let data = try! JSONSerialization.data(withJSONObject: obj)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let config = try PostAttachConfigLoader.load(
+            labels: labels,
+            containerId: "c1",
+            imageRef: "alpine:3.20",
+            runtime: mockRuntime(mock)
+        )
+        try MiniTest.expect(config != nil, "unreadable config must still remelt image metadata")
+        try MiniTest.expectEqual(
+            config?.featurePostStartCommands.first?.execArguments,
+            ["sh", "-lc", "echo meta-only-postStart"]
+        )
+        try MiniTest.expectEqual(
+            config?.featurePostAttachCommands.first?.execArguments,
+            ["sh", "-lc", "echo meta-only-postAttach"]
+        )
+        try MiniTest.expect(config?.postStartCommand == nil, "metadata-only stub has no config postStart")
+        try MiniTest.expect(config?.initializeCommand == nil, "initialize stays host/config-only")
+        try MiniTest.expectEqual(config?.userEnvProbe, UserEnvProbe.none, "unreadable config must not invent a probe")
+        try MiniTest.expect(!config!.hasApplyableVscodeCustomizations, "start must not apply vscode from stub")
+    }),
+
+    ("mergeFeaturePostAttachUnionsExistingApplyHooks", {
+        var config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/app",
+            featurePostAttachCommands: [.shell("echo base-attach")]
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["image", "inspect"]) {
+                    let obj: [String: Any] = [
+                        "labels": [
+                            DevContainerMetadataLabel.labelKey:
+                                #"{"postAttachCommand":"echo feature-only-attach"}"#
+                        ]
+                    ]
+                    let data = try! JSONSerialization.data(withJSONObject: obj)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return nil
+            }
+        ]
+        PostAttachConfigLoader.mergeFeaturePostAttach(
+            into: &config,
+            imageRef: "alpine:3.20",
+            runtime: mockRuntime(mock)
+        )
+        try MiniTest.expectEqual(
+            config.featurePostAttachCommands,
+            [.shell("echo base-attach"), .shell("echo feature-only-attach")],
+            "finish remelt must not replace-away apply-unioned base-image postAttach"
+        )
     })
 ]

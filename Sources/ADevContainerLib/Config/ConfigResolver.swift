@@ -186,11 +186,15 @@ public enum ConfigResolver {
             }
         }
 
+        let initialize = try LifecycleCommand.parse(raw["initializeCommand"], property: "initializeCommand")
         let onCreate = try LifecycleCommand.parse(raw["onCreateCommand"], property: "onCreateCommand")
         let updateContent = try LifecycleCommand.parse(raw["updateContentCommand"], property: "updateContentCommand")
         let postCreate = try LifecycleCommand.parse(raw["postCreateCommand"], property: "postCreateCommand")
         let postStart = try LifecycleCommand.parse(raw["postStartCommand"], property: "postStartCommand")
         let postAttach = try LifecycleCommand.parse(raw["postAttachCommand"], property: "postAttachCommand")
+        let waitFor = try WaitFor.parse(raw["waitFor"])
+        let userEnvProbe = try UserEnvProbe.parse(raw["userEnvProbe"])
+        let shutdownAction = try ShutdownAction.parse(raw["shutdownAction"])
 
         let runArgs = try RunArgsAdmission.parse(raw["runArgs"])
         let hostRequirements = try HostRequirements.parse(raw["hostRequirements"])
@@ -214,6 +218,10 @@ public enum ConfigResolver {
             updateContentCommand: updateContent,
             postStartCommand: postStart,
             postAttachCommand: postAttach,
+            initializeCommand: initialize,
+            waitFor: waitFor,
+            userEnvProbe: userEnvProbe,
+            shutdownAction: shutdownAction,
             runArgs: runArgs,
             hostRequirements: hostRequirements,
             hasVscodeCustomizations: vscode.hasVscode,

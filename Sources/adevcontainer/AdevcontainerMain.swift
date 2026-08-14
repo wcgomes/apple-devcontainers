@@ -68,7 +68,10 @@ struct AdevcontainerMain {
             )
             let result = try UpCommand.run(options: opts, runtime: runtime)
             if opts.jsonOutput {
-                print(try result.jsonString())
+                // Success JSON is emitted at the waitFor point inside the command.
+                if !SuccessPresentation.didEmitSuccessJSON {
+                    print(try result.jsonString())
+                }
             } else {
                 SuccessPresentation.emitHumanDigest(result)
             }
@@ -99,7 +102,9 @@ struct AdevcontainerMain {
             )
             let result = try CloneCommand.run(options: opts, runtime: runtime)
             if opts.jsonOutput {
-                print(try result.jsonString())
+                if !SuccessPresentation.didEmitSuccessJSON {
+                    print(try result.jsonString())
+                }
             } else {
                 SuccessPresentation.emitHumanDigest(result)
             }
@@ -175,7 +180,9 @@ struct AdevcontainerMain {
             let opts = parsed.rebuildOptions()
             let result = try RebuildCommand.run(options: opts, runtime: runtime)
             if opts.jsonOutput {
-                print(try result.jsonString())
+                if !SuccessPresentation.didEmitSuccessJSON {
+                    print(try result.jsonString())
+                }
             } else {
                 SuccessPresentation.emitHumanDigest(result)
             }

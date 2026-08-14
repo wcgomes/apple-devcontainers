@@ -120,6 +120,19 @@ public enum FeatureContributionMerge {
         return out
     }
 
+    /// Apply base-image `devcontainer.metadata` when Features did not run (empty features).
+    public static func applyFromImage(
+        imageRef: String,
+        to config: ResolvedDevContainerConfig,
+        runtime: AppleContainerRuntime
+    ) throws -> (config: ResolvedDevContainerConfig, users: DevContainerMetadataLabel.ImageMetadataUsers) {
+        let loaded = DevContainerMetadataLabel.loadContributions(imageRef: imageRef, runtime: runtime)
+        guard loaded.contributions != .empty else {
+            return (config, loaded.users)
+        }
+        return (try apply(contributions: loaded.contributions, to: config), loaded.users)
+    }
+
     private static func isValidCapabilityName(_ name: String) -> Bool {
         !name.isEmpty && !name.hasPrefix("-")
     }

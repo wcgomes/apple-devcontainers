@@ -136,6 +136,15 @@ public enum UpCommand {
         // hostRequirements: fail up on shortfall/unreadable host; warn gpu; limits applied on create.
         try enforceHostRequirements(config: resolved.config, host: hostResources)
 
+        do {
+            try LifecycleRunner.runInitializeCommand(
+                config: resolved.config,
+                hostWorkspace: resolved.workspacePath
+            )
+        } catch {
+            throw BringUpRecovery.eligible(error)
+        }
+
         var existing = try runtime.findByName(resolved.containerName)
 
         // A stopped existing container may have failed during start, and a running one may
@@ -193,7 +202,55 @@ public enum UpCommand {
                         resetExistingName: existing.name
                     )
                 }
-                let reuseConfig = configForReuse(resolved.config, labels: existing.labels)
+                var reuseConfig = configForReuse(resolved.config, labels: existing.labels)
+                PostAttachConfigLoader.mergeFeaturePostAttach(
+                    into: &reuseConfig,
+                    labels: existing.labels,
+                    imageRef: existing.image,
+                    runtime: runtime
+                )
+                if LifecycleRunner.resumeShouldWaitForPostStart(reuseConfig.waitFor) {
+                    do {
+                        try LifecycleRunner.runRestartPostStart(
+                            containerId: existing.id,
+                            config: reuseConfig,
+                            runtime: runtime
+                        )
+                    } catch {
+                        throw BringUpRecovery.eligible(
+                            error,
+                            resetExistingName: existing.name
+                        )
+                    }
+                    _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
+                        containerId: existing.id,
+                        config: reuseConfig,
+                        runtime: runtime
+                    )
+                    return try finish(
+                        options: options,
+                        id: existing.id,
+                        name: existing.name,
+                        config: reuseConfig,
+                        image: existing.image ?? resolved.config.image,
+                        runtime: runtime
+                    )
+                }
+                // Create-path waitFor is already satisfied on resume. Ready/open/postAttach
+                // fire now; this invocation's postStart still runs afterward.
+                _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
+                    containerId: existing.id,
+                    config: reuseConfig,
+                    runtime: runtime
+                )
+                let result = try finish(
+                    options: options,
+                    id: existing.id,
+                    name: existing.name,
+                    config: reuseConfig,
+                    image: existing.image ?? resolved.config.image,
+                    runtime: runtime
+                )
                 do {
                     try LifecycleRunner.runRestartPostStart(
                         containerId: existing.id,
@@ -206,19 +263,7 @@ public enum UpCommand {
                         resetExistingName: existing.name
                     )
                 }
-                _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
-                    containerId: existing.id,
-                    config: reuseConfig,
-                    runtime: runtime
-                )
-                return try finish(
-                    options: options,
-                    id: existing.id,
-                    name: existing.name,
-                    config: reuseConfig,
-                    image: existing.image ?? resolved.config.image,
-                    runtime: runtime
-                )
+                return result
             }
         }
 
@@ -278,9 +323,18 @@ public enum UpCommand {
                 knownOCIUser = featuresResult.baseImageUser
             }
             knownMetadataUsers = featuresResult.metadataUsers
-        } else if !options.skipPull {
-            StatusPrinter.status("Pulling image", item: effectiveConfig.image)
-            try? runtime.pullImage(effectiveConfig.image, platform: platform)
+        } else {
+            if !options.skipPull {
+                StatusPrinter.status("Pulling image", item: effectiveConfig.image)
+                try? runtime.pullImage(effectiveConfig.image, platform: platform)
+            }
+            let applied = try FeatureContributionMerge.applyFromImage(
+                imageRef: effectiveConfig.image,
+                to: effectiveConfig,
+                runtime: runtime
+            )
+            effectiveConfig = applied.config
+            knownMetadataUsers = applied.users
         }
 
         // Expand `${devcontainerId}` in feature/config mounts before volume ensure + create.
@@ -341,7 +395,7 @@ public enum UpCommand {
         }
 
         do {
-            try LifecycleRunner.runCreatePath(
+            try LifecycleRunner.runCreatePathThroughWaitFor(
                 containerId: id,
                 config: effectiveConfig,
                 runtime: runtime
@@ -350,25 +404,52 @@ public enum UpCommand {
             throw BringUpRecovery.eligible(error)
         }
 
-        // Settings apply after create-path hooks; not gated on --vscode.
-        _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
-            containerId: id,
-            config: effectiveConfig,
-            runtime: runtime
-        )
+        // Settings + Ready / JSON / open / postAttach at the waitFor point.
+        // Remaining create-path hooks still run so delete-on-fail and the exit
+        // code stay correct; do not emit a later success JSON if they fail.
+        var readyError: Error?
+        var result: UpResult?
+        do {
+            _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
+                containerId: id,
+                config: effectiveConfig,
+                runtime: runtime
+            )
+            result = try finish(
+                options: options,
+                id: id,
+                name: resolved.containerName,
+                config: effectiveConfig,
+                image: effectiveConfig.image,
+                runtime: runtime
+            )
+        } catch {
+            readyError = error
+        }
 
-        return try finish(
-            options: options,
-            id: id,
-            name: resolved.containerName,
-            config: effectiveConfig,
-            image: effectiveConfig.image,
-            runtime: runtime
-        )
+        do {
+            try LifecycleRunner.runCreatePathAfterWaitFor(
+                containerId: id,
+                config: effectiveConfig,
+                runtime: runtime
+            )
+        } catch {
+            throw BringUpRecovery.eligible(error)
+        }
+        if let readyError { throw readyError }
+        guard let result else {
+            throw CLIError(
+                code: CLIErrorCode.internalError,
+                message: "up finished waitFor without a result"
+            )
+        }
+        return result
     }
 
-    /// Extensions apply (not flag-gated) → open (optional) → postAttach gate → Ready.
-    /// postAttach is never before open when `--vscode`. Extensions never fold into postAttachCommand.
+    /// Extensions apply (not flag-gated) → open (optional) → CLI-attach postAttach → Ready
+    /// (and `--json` success JSON). Called at the `waitFor` point, not after later hooks.
+    /// postAttach is never before open when `--vscode`. Open soft-fail does not skip postAttach.
+    /// Extensions never fold into postAttachCommand.
     private static func finish(
         options: UpOptions,
         id: String,
@@ -403,6 +484,7 @@ public enum UpCommand {
         )
         try LifecycleRunner.applyPostAttachGate(
             openOutcome: openOutcome,
+            kind: .cliAttach,
             containerId: id,
             config: postAttachConfig,
             runtime: runtime
@@ -410,6 +492,10 @@ public enum UpCommand {
         // Connection hints are emitted by the entry point after the human outcome digest
         // so the terminal order is: Ready → outcome fields → blank → connect instructions.
         StatusPrinter.status("Ready")
+        try SuccessPresentation.emitSuccessJSONIfRequested(
+            result.jsonString(),
+            jsonOutput: options.jsonOutput
+        )
         return result
     }
 

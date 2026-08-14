@@ -15,7 +15,7 @@ public struct NamedLifecycleCommand: Equatable, Sendable {
 public enum LifecycleCommand: Equatable, Sendable {
     case shell(String)
     case argv([String])
-    /// Object form: name → string or argv. Spec runs in parallel; product runs sequentially in sorted name order.
+    /// Object form: name → string or argv. Named entries run concurrently.
     case parallel([NamedLifecycleCommand])
 
     public static func parse(_ value: Any?, property: String) throws -> LifecycleCommand? {
@@ -105,6 +105,135 @@ public enum LifecycleCommand: Equatable, Sendable {
     }
 }
 
+/// Official `waitFor` stage (omitted → `updateContentCommand`).
+public enum WaitFor: String, Equatable, Sendable {
+    case initializeCommand
+    case onCreateCommand
+    case updateContentCommand
+    case postCreateCommand
+    case postStartCommand
+
+    public static let officialDefault = WaitFor.updateContentCommand
+
+    /// Host initialize through postCreate — already satisfied on reuse / resume.
+    public var isCreatePathStage: Bool {
+        self != .postStartCommand
+    }
+
+    /// Inclusive index into in-container create-path stages
+    /// (`onCreate` = 0 … `postStart` = 3). Host `initializeCommand` is `-1`
+    /// (already finished before `runCreatePath`).
+    public var createPathInclusiveIndex: Int {
+        switch self {
+        case .initializeCommand: return -1
+        case .onCreateCommand: return 0
+        case .updateContentCommand: return 1
+        case .postCreateCommand: return 2
+        case .postStartCommand: return 3
+        }
+    }
+
+    public static func parse(_ value: Any?, property: String = "waitFor") throws -> WaitFor {
+        guard let value else { return officialDefault }
+        guard let raw = value as? String else {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: property,
+                message: "\(property) must be a string",
+                hint: "Use initializeCommand, onCreateCommand, updateContentCommand, postCreateCommand, or postStartCommand"
+            )
+        }
+        guard let parsed = WaitFor(rawValue: raw) else {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: property,
+                message: "Unknown \(property) value '\(raw)'",
+                hint: "Use initializeCommand, onCreateCommand, updateContentCommand, postCreateCommand, or postStartCommand"
+            )
+        }
+        return parsed
+    }
+}
+
+/// Official `userEnvProbe` (omitted → `loginInteractiveShell`).
+public enum UserEnvProbe: String, Equatable, Sendable {
+    case none
+    case interactiveShell
+    case loginShell
+    case loginInteractiveShell
+
+    public static let officialDefault = UserEnvProbe.loginInteractiveShell
+
+    /// `sh` dash-options for the probe (`-ic` / `-lc` / `-lic`). Nil when probing is skipped.
+    public var shellDashOptions: String? {
+        switch self {
+        case .none: return nil
+        case .interactiveShell: return "-ic"
+        case .loginShell: return "-lc"
+        case .loginInteractiveShell: return "-lic"
+        }
+    }
+
+    public static func parse(_ value: Any?, property: String = "userEnvProbe") throws -> UserEnvProbe {
+        guard let value else { return officialDefault }
+        guard let raw = value as? String else {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: property,
+                message: "\(property) must be a string",
+                hint: "Use none, interactiveShell, loginShell, or loginInteractiveShell"
+            )
+        }
+        guard let parsed = UserEnvProbe(rawValue: raw) else {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: property,
+                message: "Unknown \(property) value '\(raw)'",
+                hint: "Use none, interactiveShell, loginShell, or loginInteractiveShell"
+            )
+        }
+        return parsed
+    }
+}
+
+/// Official `shutdownAction` for this image product (omitted → `stopContainer`).
+/// `stopCompose` is rejected at parse (Compose unsupported).
+public enum ShutdownAction: String, Equatable, Sendable {
+    case none
+    case stopContainer
+
+    public static let officialDefault = ShutdownAction.stopContainer
+
+    public static func parse(_ value: Any?, property: String = "shutdownAction") throws -> ShutdownAction {
+        guard let value else { return officialDefault }
+        guard let raw = value as? String else {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: property,
+                message: "\(property) must be a string",
+                hint: "Use stopContainer or none"
+            )
+        }
+        if raw == "stopCompose" {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: property,
+                message: "Docker Compose configuration is not supported",
+                hint: "Use \"shutdownAction\": \"stopContainer\" or \"none\" — Compose is not supported"
+            )
+        }
+        guard let parsed = ShutdownAction(rawValue: raw) else {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: property,
+                message: "Unknown \(property) value '\(raw)'",
+                hint: "Use stopContainer or none"
+            )
+        }
+        return parsed
+    }
+}
+
 /// Fully resolved devcontainer config ready for runtime mapping.
 public struct ResolvedDevContainerConfig: Equatable {
     public var name: String?
@@ -121,6 +250,10 @@ public struct ResolvedDevContainerConfig: Equatable {
     public var updateContentCommand: LifecycleCommand?
     public var postStartCommand: LifecycleCommand?
     public var postAttachCommand: LifecycleCommand?
+    public var initializeCommand: LifecycleCommand?
+    public var waitFor: WaitFor
+    public var userEnvProbe: UserEnvProbe
+    public var shutdownAction: ShutdownAction
     /// Allowlisted runArgs mapped onto create argv.
     public var runArgs: [AllowlistedRunArg]
     /// Evaluated hostRequirements (nil when absent).
@@ -155,6 +288,10 @@ public struct ResolvedDevContainerConfig: Equatable {
         updateContentCommand: LifecycleCommand? = nil,
         postStartCommand: LifecycleCommand? = nil,
         postAttachCommand: LifecycleCommand? = nil,
+        initializeCommand: LifecycleCommand? = nil,
+        waitFor: WaitFor = .updateContentCommand,
+        userEnvProbe: UserEnvProbe = .loginInteractiveShell,
+        shutdownAction: ShutdownAction = .stopContainer,
         runArgs: [AllowlistedRunArg] = [],
         hostRequirements: HostRequirements? = nil,
         hasVscodeCustomizations: Bool = false,
@@ -181,6 +318,10 @@ public struct ResolvedDevContainerConfig: Equatable {
         self.updateContentCommand = updateContentCommand
         self.postStartCommand = postStartCommand
         self.postAttachCommand = postAttachCommand
+        self.initializeCommand = initializeCommand
+        self.waitFor = waitFor
+        self.userEnvProbe = userEnvProbe
+        self.shutdownAction = shutdownAction
         self.runArgs = runArgs
         self.hostRequirements = hostRequirements
         self.hasVscodeCustomizations = hasVscodeCustomizations
@@ -257,7 +398,10 @@ public struct ResolvedDevContainerConfig: Equatable {
         if let updateContentCommand { m["updateContentCommand"] = updateContentCommand.hashEncoding }
         if let postCreateCommand { m["postCreateCommand"] = postCreateCommand.hashEncoding }
         if let postStartCommand { m["postStartCommand"] = postStartCommand.hashEncoding }
-        // postAttach does not affect create identity; omit from hash.
+        if let initializeCommand { m["initializeCommand"] = initializeCommand.hashEncoding }
+        if waitFor != .updateContentCommand { m["waitFor"] = waitFor.rawValue }
+        if userEnvProbe != .loginInteractiveShell { m["userEnvProbe"] = userEnvProbe.rawValue }
+        // postAttach / shutdownAction do not affect create identity; omit from hash.
         if !runArgs.isEmpty {
             m["runArgs"] = runArgs.map { $0.hashEncoding as Any }
         }

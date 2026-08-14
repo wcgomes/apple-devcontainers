@@ -228,7 +228,7 @@ public enum CommandSurface {
           up [-w path]        Create/start/reuse bind-mode dev container (host path)
           clone <git-url>     Clone repo into volume-mode dev container (managed)
           list [--json]       List managed dev containers (up + clone)
-          start [--name]      Start a stopped managed dev container (no hooks on volume-mode; --json suppresses recovery prompt)
+          start [--name]      Start a stopped managed container (initialize + postStart on real start; --json suppresses recovery prompt)
           exec [-it] [--name] [--] [cmd...]  Run a command (or shell) in a managed dev container
           stop [--name]       Stop a managed dev container (name or picker)
           delete [--name]     Remove container only (not workspace volume)
@@ -244,7 +244,7 @@ public enum CommandSurface {
           --json                   Machine-readable output (up, clone, list, rebuild); on start,
                                    suppresses the interactive recovery prompt
           --skip-pull              Skip image pull on up/clone/rebuild
-          --vscode                 Best-effort open VS Code; gates postAttach (not apply)
+          --vscode                 Best-effort open VS Code (not apply). postAttach is CLI attach except already-running start
           -h, --help               Show help
 
         Identity:
@@ -262,11 +262,17 @@ public enum CommandSurface {
             idempotency; Server extensions.json + transitive extensionDependencies ∪
             extensionPack. Not gated on --vscode or open success.
           - adevcontainer start does not apply settings or extensions (with or without
-            --vscode) and does not run postStart.
-          - Order with --vscode on up / clone / rebuild: apply (if pending) → open →
-            postAttach (postAttach only after successful open).
-          - postAttachCommand runs only after successful open; skipped without flag or on open
-            soft-fail (status when present). postAttach non-zero fails command but keeps container.
+            --vscode). Real start runs initialize (when a host workspace exists), then
+            config postStart and remelted feature postStart. Already-running is a no-op
+            for those hooks.
+          - Order with --vscode on up / clone / rebuild / real start: apply (if pending;
+            not on start) → open → postAttach. postAttach is CLI attach on those paths
+            (open soft-fail does not skip it). On already-running start, postAttach
+            requires a successful --vscode open.
+          - postAttachCommand runs as CLI attach at the end of up / clone / rebuild and
+            after a real start. Already-running start requires a successful --vscode
+            open (skip status when present and open did not succeed). postAttach non-zero
+            fails command but keeps container.
           - Manual attach without a CLI apply command does not install. CLI attach
             approximation only — not IDE remote-ready. Not full extension parity.
 
@@ -320,13 +326,12 @@ public enum CommandSurface {
 
             --vscode: best-effort open a new VS Code window on the remote workspace folder
             (requires VS Code with Remote - Containers and a `code` CLI). Soft-fails with
-            a stderr warning; open alone does not fail up. --vscode gates open and
-            postAttach only, not apply.
+            a stderr warning; open alone does not fail up. --vscode gates open only, not
+            apply. postAttach is CLI attach after waitFor (not --vscode-gated).
             Settings and extensions from customizations.vscode apply by default after
             create-path hooks (and on reuse / start-stopped when the marker is pending).
-            Order with --vscode: apply → open → postAttach. postAttach only after
-            successful open; skipped without flag / open soft-fail; postAttach failure
-            fails up but keeps the container.
+            Order with --vscode: apply → open → postAttach. Open soft-fail does not skip
+            postAttach. postAttach failure fails up but keeps the container.
             Apply is soft-fail with marker skip when matched.
             Not full Dev Containers parity — manual attach remains valid.
 
@@ -357,7 +362,8 @@ public enum CommandSurface {
             Used to retry a failed clone after editing the retained devcontainer.json.
 
             --vscode: best-effort open VS Code on the resolved remote folder after
-            success (same prereqs/soft-fail/open/postAttach gate as up). Settings and
+            success (same prereqs/soft-fail as up). postAttach is CLI attach after
+            waitFor (not --vscode-gated). Settings and
             extensions from customizations.vscode apply by default after create-path
             hooks (not gated on the flag).
             Not full extension parity.
@@ -373,13 +379,15 @@ public enum CommandSurface {
             return """
             adevcontainer start [--name <container>] [--vscode] [--json]
 
-            Start a stopped managed container. Volume-mode: runtime start only
-            (no lifecycle hooks). Already running is success no-op.
+            Start a stopped managed container. Real start runs host initializeCommand
+            (when a host workspace exists), then config postStartCommand and remelted
+            feature postStart. Already running is success no-op for those hooks.
 
             --vscode: best-effort open VS Code on the labeled remote workspace folder after
-            start (inspect for id/image/folder). Soft-fail open. postAttach after open
-            success. start does not apply settings or extensions (with or without
-            --vscode) and does not run postStart. If runtime start fails, a TTY prompts
+            start (inspect for id/image/folder). Soft-fail open. postAttach runs after a
+            real start even without --vscode; on already-running start it requires a
+            successful --vscode open. start does not apply settings or extensions (with or
+            without --vscode). If runtime start fails, a TTY prompts
             (default Y) and delegates to `rebuild --name <name>`; decline/EOF, non-TTY,
             and --json fail with that exact rebuild hint. Start never opens an editor or
             retries start. Not full extension parity.
@@ -444,7 +452,8 @@ public enum CommandSurface {
               - Named rebuild --name retry skips the Y/n prompt.
 
             --vscode: best-effort open VS Code on the resolved remote folder after
-            success (open + postAttach only; same soft-fail/open/postAttach gate as up).
+            success (open only; same soft-fail as up). postAttach is CLI attach on the
+            new container (not --vscode-gated; open soft-fail does not skip it).
             customizations.vscode settings and extensions apply by default on the new
             container after create-path hooks (not gated on the flag).
             --json: machine-readable success output (up-shape; volume mode may add

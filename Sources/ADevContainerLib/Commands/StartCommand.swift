@@ -20,7 +20,11 @@ public enum StartCommand {
     nonisolated(unsafe) public static var rebuildOverride: ((RebuildOptions) throws -> RebuildResult)?
 
     /// Start a stopped managed container.
-    /// Create-path / postStart hooks stay on `up`/`clone`; postAttach is gated after optional open.
+    /// Host initialize runs on a real start when a host workspace exists; then start;
+    /// then config + remelted feature postStart. Already-running skips those hooks.
+    /// Real start runs postAttach as CLI attach (not `--vscode`-gated). Already-running
+    /// runs postAttach only after successful `--vscode` open. Never applies settings or extensions.
+    /// Hook progress and `==> Ready` use StatusPrinter (stderr); `--json` keeps stdout clean.
     public static func run(
         options: StartOptions,
         runtime: AppleContainerRuntime,
@@ -35,14 +39,30 @@ public enum StartCommand {
         )
 
         if info.isRunning {
-            print("Container \(info.id) already running")
-            try openAndPostAttach(options: options, nameOrId: info.id, runtime: runtime, picker: picker)
+            StatusPrinter.status("Container already running", item: info.id)
+            try openAndPostAttach(
+                options: options,
+                nameOrId: info.id,
+                runtime: runtime,
+                picker: picker,
+                kind: .alreadyRunning
+            )
+            StatusPrinter.status("Ready")
             SuccessPresentation.emitConnectionHintsIfNeeded(
                 openVSCode: options.openVSCode,
                 nameOrId: info.name
             )
             return
         }
+
+        let hostWorkspace = info.labels[ContainerIdentity.labelLocalFolder]
+        // Initialize is host/config-only — do not remelt metadata before start
+        // (start-failure recovery must not inspect the image).
+        var hooksConfig = loadInitializeConfig(info: info, runtime: runtime)
+        try LifecycleRunner.runInitializeCommand(
+            config: hooksConfig,
+            hostWorkspace: hostWorkspace
+        )
 
         StatusPrinter.status("Starting container", item: info.id)
         do {
@@ -59,9 +79,66 @@ public enum StartCommand {
             )
             return
         }
-        // Bare start: no create-path / postStart. No settings or extensions apply. postAttach via open gate.
-        print("Started \(info.id)")
-        try openAndPostAttach(options: options, nameOrId: info.id, runtime: runtime, picker: picker)
+        // Remelt after start for postStart/postAttach. Never run initialize here:
+        // volume config becoming readable must not violate initialize-before-start.
+        if hooksConfig == nil {
+            hooksConfig = loadHooksConfig(info: info, runtime: runtime)
+        } else if var loaded = hooksConfig {
+            // Remelt again after start so image-only metadata and a fresh inspect
+            // (list may omit image ref / inherited labels) are visible.
+            let live = (try? runtime.inspect(nameOrId: info.id)) ?? info
+            PostAttachConfigLoader.mergeFeaturePostAttach(
+                into: &loaded,
+                labels: live.labels,
+                imageRef: live.image ?? info.image,
+                runtime: runtime,
+                workspacePath: hostWorkspace
+            )
+            hooksConfig = loaded
+        }
+        // Resume: create-path waitFor is already satisfied — do not re-exec onCreate /
+        // updateContent / postCreate. Config then remelted feature postStart run via
+        // LifecycleRunner (userEnvProbe merge applies). If waitFor is postStartCommand,
+        // hold open / postAttach until this start's postStart finishes.
+        // Recovery that delegated to rebuild already returned. Never apply settings/extensions.
+        if let config = hooksConfig {
+            if LifecycleRunner.resumeShouldWaitForPostStart(config.waitFor) {
+                try LifecycleRunner.runRestartPostStart(
+                    containerId: info.id,
+                    config: config,
+                    runtime: runtime
+                )
+                try openAndPostAttach(
+                    options: options,
+                    nameOrId: info.id,
+                    runtime: runtime,
+                    picker: picker,
+                    kind: .cliAttach
+                )
+            } else {
+                try openAndPostAttach(
+                    options: options,
+                    nameOrId: info.id,
+                    runtime: runtime,
+                    picker: picker,
+                    kind: .cliAttach
+                )
+                try LifecycleRunner.runRestartPostStart(
+                    containerId: info.id,
+                    config: config,
+                    runtime: runtime
+                )
+            }
+        } else {
+            try openAndPostAttach(
+                options: options,
+                nameOrId: info.id,
+                runtime: runtime,
+                picker: picker,
+                kind: .cliAttach
+            )
+        }
+        StatusPrinter.status("Ready")
         SuccessPresentation.emitConnectionHintsIfNeeded(
             openVSCode: options.openVSCode,
             nameOrId: info.name
@@ -154,13 +231,50 @@ public enum StartCommand {
         )
     }
 
+    /// Host initialize only: stamped config without metadata remelt (no image inspect).
+    private static func loadInitializeConfig(
+        info: ContainerInfo,
+        runtime: AppleContainerRuntime
+    ) -> ResolvedDevContainerConfig? {
+        do {
+            return try ConfigReader.read(
+                labels: info.labels,
+                containerId: info.id,
+                runtime: runtime,
+                mode: .bestEffort
+            )
+        } catch {
+            return nil
+        }
+    }
+
+    /// Hooks/open/postAttach config from stamped labels. Never used to apply settings/extensions.
+    /// Remelts container+image metadata even when the stamped config is unreadable.
+    private static func loadHooksConfig(
+        info: ContainerInfo,
+        runtime: AppleContainerRuntime
+    ) -> ResolvedDevContainerConfig? {
+        do {
+            return try PostAttachConfigLoader.load(
+                labels: info.labels,
+                containerId: info.id,
+                imageRef: info.image,
+                runtime: runtime
+            )
+        } catch {
+            return nil
+        }
+    }
+
     /// Open (optional) then postAttach gate. Loads config from stamped labels for postAttach only.
-    /// `start` never applies settings or extensions.
+    /// `start` never applies settings or extensions. Real start is CLI attach; already-running
+    /// runs postAttach only after successful `--vscode` open.
     private static func openAndPostAttach(
         options: StartOptions,
         nameOrId: String,
         runtime: AppleContainerRuntime,
-        picker: InteractivePicker
+        picker: InteractivePicker,
+        kind: LifecycleRunner.PostAttachKind
     ) throws {
         // id / image / folder / labels from inspect (start has no UpResult).
         let payload: InspectPayload?
@@ -214,6 +328,7 @@ public enum StartCommand {
         if let config {
             try LifecycleRunner.applyPostAttachGate(
                 openOutcome: openOutcome,
+                kind: kind,
                 containerId: payload.containerId,
                 config: config,
                 runtime: runtime

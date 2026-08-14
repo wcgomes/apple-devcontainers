@@ -274,6 +274,15 @@ public enum CloneCommand {
 
         try enforceHostRequirements(config: resolved.config, host: hostResources)
 
+        do {
+            try LifecycleRunner.runInitializeCommand(
+                config: resolved.config,
+                hostWorkspace: checkoutDir
+            )
+        } catch {
+            throw BringUpRecovery.eligible(error)
+        }
+
         // 5. Volume-mode identity (git URL + config rel path — not checkout path)
         let identity = ContainerIdentity.volumeModeIdentity(
             gitURL: url,
@@ -343,9 +352,18 @@ public enum CloneCommand {
                 knownOCIUser = featuresResult.baseImageUser
             }
             knownMetadataUsers = featuresResult.metadataUsers
-        } else if !options.skipPull {
-            StatusPrinter.status("Pulling image", item: effectiveConfig.image)
-            try? runtime.pullImage(effectiveConfig.image, platform: platform)
+        } else {
+            if !options.skipPull {
+                StatusPrinter.status("Pulling image", item: effectiveConfig.image)
+                try? runtime.pullImage(effectiveConfig.image, platform: platform)
+            }
+            let applied = try FeatureContributionMerge.applyFromImage(
+                imageRef: effectiveConfig.image,
+                to: effectiveConfig,
+                runtime: runtime
+            )
+            effectiveConfig = applied.config
+            knownMetadataUsers = applied.users
         }
 
         // Expand `${devcontainerId}` with volume-mode create name (not bind-mode resolve name).
@@ -497,9 +515,9 @@ public enum CloneCommand {
             runtime: runtime
         )
 
-        // 11. Create-path lifecycle hooks (same matrix as up)
+        // 11. Create-path lifecycle hooks (same matrix as up), split at waitFor.
         do {
-            try LifecycleRunner.runCreatePath(
+            try LifecycleRunner.runCreatePathThroughWaitFor(
                 containerId: id,
                 config: effectiveConfig,
                 runtime: runtime
@@ -510,13 +528,6 @@ public enum CloneCommand {
             throw BringUpRecovery.eligible(error)
         }
 
-        // Settings apply after create-path hooks; not gated on --vscode. Soft-fail never deletes.
-        _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
-            containerId: id,
-            config: effectiveConfig,
-            runtime: runtime
-        )
-
         let result = CloneResult(
             outcome: "success",
             containerId: id,
@@ -526,30 +537,57 @@ public enum CloneCommand {
             gitUrl: identity.normalizedGitURL,
             workspaceVolume: identity.workspaceVolumeName
         )
-        // Extensions apply when pending (not gated on `--vscode`) → open → postAttach.
-        _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
-            containerId: id,
-            config: effectiveConfig,
-            runtime: runtime
-        )
-        let openOutcome = VSCodeOpen.openIfRequested(
-            options.openVSCode,
-            target: VSCodeOpenTarget(
-                containerId: result.containerId,
-                image: effectiveConfig.image,
-                remoteWorkspaceFolder: result.remoteWorkspaceFolder,
-                containerName: result.containerName ?? identity.containerName,
-                remoteUser: result.remoteUser
+
+        // Settings + Ready / JSON / open / postAttach at the waitFor point.
+        var readyError: Error?
+        do {
+            _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
+                containerId: id,
+                config: effectiveConfig,
+                runtime: runtime
             )
-        )
-        try LifecycleRunner.applyPostAttachGate(
-            openOutcome: openOutcome,
-            containerId: id,
-            config: effectiveConfig,
-            runtime: runtime
-        )
-        // Connection hints: entry point after success JSON (Ready → JSON → blank → connect).
-        StatusPrinter.status("Ready")
+            _ = VSCodeCustomizationsApply.applyExtensionsIfNeeded(
+                containerId: id,
+                config: effectiveConfig,
+                runtime: runtime
+            )
+            let openOutcome = VSCodeOpen.openIfRequested(
+                options.openVSCode,
+                target: VSCodeOpenTarget(
+                    containerId: result.containerId,
+                    image: effectiveConfig.image,
+                    remoteWorkspaceFolder: result.remoteWorkspaceFolder,
+                    containerName: result.containerName ?? identity.containerName,
+                    remoteUser: result.remoteUser
+                )
+            )
+            try LifecycleRunner.applyPostAttachGate(
+                openOutcome: openOutcome,
+                kind: .cliAttach,
+                containerId: id,
+                config: effectiveConfig,
+                runtime: runtime
+            )
+            StatusPrinter.status("Ready")
+            try SuccessPresentation.emitSuccessJSONIfRequested(
+                result.jsonString(),
+                jsonOutput: options.jsonOutput
+            )
+        } catch {
+            readyError = error
+        }
+
+        do {
+            try LifecycleRunner.runCreatePathAfterWaitFor(
+                containerId: id,
+                config: effectiveConfig,
+                runtime: runtime
+            )
+        } catch {
+            try? runtime.deleteVolume(name: identity.workspaceVolumeName)
+            throw BringUpRecovery.eligible(error)
+        }
+        if let readyError { throw readyError }
         return result
     }
 

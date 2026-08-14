@@ -27,6 +27,7 @@ public enum FeatureDockerfileGenerator {
         remoteUser: String? = nil,
         containerUser: String? = nil,
         baseUser: String? = nil,
+        contributions: FeatureContributions? = nil,
         fileManager: FileManager = .default
     ) throws -> BuildContext {
         try fileManager.createDirectory(atPath: contextDirectory, withIntermediateDirectories: true)
@@ -101,6 +102,14 @@ public enum FeatureDockerfileGenerator {
         lines.append("USER \(restoreUser)")
         lines.append("")
 
+        // Persist unioned lifecycle hooks (base-image metadata + features) so resume remelt
+        // does not require a Features rebuild and does not drop base-image fragments.
+        let baked = contributions ?? (try? FeatureContributionMerge.collect(from: ordered))
+        if let baked, let json = DevContainerMetadataLabel.encodeFragments(baked) {
+            lines.append("LABEL \(DevContainerMetadataLabel.labelKey)=\(dockerfileLabelValue(json))")
+            lines.append("")
+        }
+
         let contents = lines.joined(separator: "\n")
         let dockerfilePath = (contextDirectory as NSString).appendingPathComponent("Dockerfile")
         try contents.write(toFile: dockerfilePath, atomically: true, encoding: .utf8)
@@ -110,6 +119,15 @@ public enum FeatureDockerfileGenerator {
             dockerfilePath: dockerfilePath,
             dockerfileContents: contents
         )
+    }
+
+    /// Dockerfile `LABEL` value: double-quoted, with `\`, `"`, and `$` escaped.
+    private static func dockerfileLabelValue(_ raw: String) -> String {
+        let escaped = raw
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "$", with: "\\$")
+        return "\"\(escaped)\""
     }
 
     private static func copyPackage(from source: String, to dest: String, fileManager: FileManager) throws {

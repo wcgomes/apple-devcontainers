@@ -17,6 +17,33 @@ import Glibc
 /// Open in VS Code with: …
 /// ```
 public enum SuccessPresentation {
+    /// Test seam for success JSON (default: process stdout).
+    nonisolated(unsafe) public static var writeStdout: ((Data) -> Void)?
+
+    /// Set when a command writes success JSON at the `waitFor` point. The entry
+    /// point must not print a second copy — including if a later hook then fails.
+    nonisolated(unsafe) public static var didEmitSuccessJSON = false
+
+    /// Machine-readable success JSON at the `waitFor` connection point (not at process exit).
+    public static func emitSuccessJSON(_ json: String) {
+        let payload = json.hasSuffix("\n") ? json : json + "\n"
+        let data = Data(payload.utf8)
+        if let writeStdout {
+            writeStdout(data)
+        } else {
+            FileHandle.standardOutput.write(data)
+        }
+        #if canImport(Darwin) || canImport(Glibc)
+        fflush(nil)
+        #endif
+        didEmitSuccessJSON = true
+    }
+
+    public static func emitSuccessJSONIfRequested(_ json: String, jsonOutput: Bool) {
+        guard jsonOutput else { return }
+        emitSuccessJSON(json)
+    }
+
     /// Human key/value digest on stdout (not used for `--json`).
     public static func emitHumanDigest(
         outcome: String,
