@@ -305,6 +305,152 @@ nonisolated(unsafe) let configReaderTests: [(String, () throws -> Void)] = [
         })
     }),
 
+    ("strictVolumeReadSubstitutesHostLocalEnvInMountSource", {
+        let configText = """
+        {
+          "image": "alpine:3.20",
+          "mounts": [
+            "source=${localEnv:HOME}${localEnv:USERPROFILE}/.kube/config,target=/home/vscode/.kube/config,type=bind,readonly"
+          ]
+        }
+        """
+        let mock = MockProcessRunner()
+        mock.handlers.append { args in
+            if args.first == "exec", args.dropFirst(2).first == "cat" {
+                return ProcessResult(exitCode: 0, stdout: Data(configText.utf8), stderr: Data())
+            }
+            return nil
+        }
+        let config = try ConfigReader.read(
+            labels: volumeLabels(configFile: ".devcontainer/devcontainer.json", workspaceFolder: "/workspaces/plantsuite"),
+            containerId: "c1",
+            runtime: mockRuntime(mock),
+            localEnv: ["HOME": "/Users/you"],
+            mode: .strict
+        )
+        try MiniTest.expectEqual(config?.mounts.count, 1)
+        try MiniTest.expectEqual(config?.mounts.first?.source, "/Users/you/.kube/config")
+        try MiniTest.expectEqual(config?.mounts.first?.target, "/home/vscode/.kube/config")
+        try MiniTest.expectEqual(config?.workspaceFolder, "/workspaces/plantsuite")
+    }),
+
+    ("strictVolumeReadEmptyLocalEnvCollapsesKubeConfigToRoot", {
+        let configText = """
+        {
+          "image": "alpine:3.20",
+          "mounts": [
+            "source=${localEnv:HOME}${localEnv:USERPROFILE}/.kube/config,target=/home/vscode/.kube/config,type=bind,readonly"
+          ]
+        }
+        """
+        let mock = MockProcessRunner()
+        mock.handlers.append { args in
+            if args.first == "exec", args.dropFirst(2).first == "cat" {
+                return ProcessResult(exitCode: 0, stdout: Data(configText.utf8), stderr: Data())
+            }
+            return nil
+        }
+        let config = try ConfigReader.read(
+            labels: volumeLabels(configFile: ".devcontainer/devcontainer.json", workspaceFolder: "/workspaces/plantsuite"),
+            containerId: "c1",
+            runtime: mockRuntime(mock),
+            localEnv: [:],
+            mode: .strict
+        )
+        try MiniTest.expectEqual(config?.mounts.first?.source, "/.kube/config")
+    }),
+
+    ("readVolumeWithRawSubstitutesHostLocalEnvInMountSource", {
+        let configText = """
+        {
+          "image": "alpine:3.20",
+          "mounts": [
+            "source=${localEnv:HOME}${localEnv:USERPROFILE}/.kube/config,target=/home/vscode/.kube/config,type=bind,readonly"
+          ]
+        }
+        """
+        let mock = MockProcessRunner()
+        mock.handlers.append { args in
+            if args.first == "exec", args.dropFirst(2).first == "cat" {
+                return ProcessResult(exitCode: 0, stdout: Data(configText.utf8), stderr: Data())
+            }
+            return nil
+        }
+        let resolved = try ConfigReader.readVolumeWithRaw(
+            labels: volumeLabels(configFile: ".devcontainer/devcontainer.json", workspaceFolder: "/workspaces/plantsuite"),
+            containerId: "c1",
+            runtime: mockRuntime(mock),
+            localEnv: ["HOME": "/Users/you"]
+        )
+        try MiniTest.expectEqual(resolved.config.mounts.first?.source, "/Users/you/.kube/config")
+        try MiniTest.expectEqual(resolved.config.workspaceFolder, "/workspaces/plantsuite")
+    }),
+
+    ("resolveVolumeFileHostLocalEnvExpandsKubeConfigIdiom", {
+        let json = """
+        {
+          "image": "alpine:3.20",
+          "mounts": [
+            "source=${localEnv:HOME}${localEnv:USERPROFILE}/.kube/config,target=/home/vscode/.kube/config,type=bind,readonly"
+          ]
+        }
+        """
+        let ws = try TestRepo.makeTempWorkspace(configJSON: json)
+        let configFile = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+        let resolved = try ConfigReader.resolveVolumeFile(
+            at: configFile,
+            labels: volumeLabels(configFile: ".devcontainer/devcontainer.json", workspaceFolder: "/workspaces/plantsuite"),
+            localEnv: ["HOME": "/Users/you"]
+        )
+        try MiniTest.expectEqual(resolved.config.mounts.first?.source, "/Users/you/.kube/config")
+        try MiniTest.expectEqual(resolved.config.workspaceFolder, "/workspaces/plantsuite")
+        try MiniTest.expect(
+            (resolved.workspacePath as NSString).lastPathComponent != "plantsuite",
+            "temp guest-config root must not become workspace identity"
+        )
+    }),
+
+    ("resolveVolumeFileEmptyLocalEnvCollapsesKubeConfigToRoot", {
+        let json = """
+        {
+          "image": "alpine:3.20",
+          "mounts": [
+            "source=${localEnv:HOME}${localEnv:USERPROFILE}/.kube/config,target=/home/vscode/.kube/config,type=bind,readonly"
+          ]
+        }
+        """
+        let ws = try TestRepo.makeTempWorkspace(configJSON: json)
+        let configFile = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+        let resolved = try ConfigReader.resolveVolumeFile(
+            at: configFile,
+            labels: volumeLabels(configFile: ".devcontainer/devcontainer.json", workspaceFolder: "/workspaces/plantsuite"),
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(resolved.config.mounts.first?.source, "/.kube/config")
+    }),
+
+    ("strictBindReadSubstitutesLocalEnvInMountSource", {
+        let json = """
+        {
+          "image": "alpine:3.20",
+          "mounts": [
+            "source=${localEnv:HOME}${localEnv:USERPROFILE}/.kube/config,target=/home/vscode/.kube/config,type=bind,readonly"
+          ]
+        }
+        """
+        let ws = try TestRepo.makeTempWorkspace(configJSON: json)
+        let configFile = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+        let config = try ConfigReader.read(
+            labels: bindLabels(localFolder: ws.path, configFile: configFile),
+            containerId: "c1",
+            runtime: mockRuntime(MockProcessRunner()),
+            localEnv: ["HOME": "/Users/you"],
+            mode: .strict
+        )
+        try MiniTest.expectEqual(config?.mounts.first?.source, "/Users/you/.kube/config")
+        try MiniTest.expectEqual(config?.workspaceFolder, "/workspaces/\(ws.lastPathComponent)")
+    }),
+
     ("strictVolumeMissingConfigFileLabelIsConfigNotFound", {
         let mock = MockProcessRunner()
         try MiniTest.expectThrows({

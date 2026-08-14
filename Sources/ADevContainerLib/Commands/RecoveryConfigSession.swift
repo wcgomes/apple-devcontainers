@@ -342,7 +342,7 @@ public final class RecoveryConfigSession: @unchecked Sendable {
     /// `ConfigReader.read`; the private temp directory's basename is never used.
     @discardableResult
     public func validateEditedConfig(
-        localEnv: [String: String] = [:]
+        localEnv: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> ResolvedWorkspace {
         try validateSecureState()
         _ = try readTempBytes()
