@@ -209,6 +209,7 @@ public enum FeaturesRunner {
             remoteUser: remoteUser,
             containerUser: containerUser,
             baseUser: baseUser,
+            contributions: contributions,
             fileManager: deps.fileManager
         )
 

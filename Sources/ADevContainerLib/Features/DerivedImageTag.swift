@@ -12,11 +12,12 @@ public enum DerivedImageTag {
     ///
     /// Bump when `FeatureDockerfileGenerator` install-layer semantics change
     /// so `imageExists` does not reuse images built with the old recipe.
-    /// Current `"5"`: recursive `chmod -R 0755` before install, restore base
-    /// image OCI USER after installs, and install-time feature `containerEnv`
-    /// as Dockerfile `ENV` before each feature’s install `RUN` (so `$PATH`/
-    /// `$VAR` expand; not shell-quoted on the RUN prefix).
-    public static let recipeVersion = "5"
+    /// Current `"6"`: bake unioned lifecycle (base-image metadata + features)
+    /// onto `devcontainer.metadata` so resume remelt does not drop base-image
+    /// hooks. Prior `"5"` reused a features-only LABEL (plus chmod-before-install,
+    /// restore base USER, and feature `containerEnv` as Dockerfile `ENV` before
+    /// each install `RUN`).
+    public static let recipeVersion = "6"
 
     public static func compute(
         baseImage: String,

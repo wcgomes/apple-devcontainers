@@ -1294,7 +1294,13 @@ printf 'RECOVERY_APPLIED:%s\n' "$actual"
             ?? [:]
         var image: String?
         if let imageObj = configuration["image"] as? [String: Any] {
-            image = imageObj["reference"] as? String
+            image = imageObj["reference"] as? String ?? imageObj["id"] as? String
+        }
+        if image == nil {
+            image = configuration["image"] as? String ?? obj["image"] as? String
+        }
+        if let trimmed = image?.trimmingCharacters(in: .whitespacesAndNewlines), trimmed.isEmpty {
+            image = nil
         }
         return ContainerInfo(
             id: id,

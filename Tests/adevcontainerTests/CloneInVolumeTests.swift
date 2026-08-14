@@ -1298,6 +1298,53 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" })
         try MiniTest.expect(mock.calls.contains { $0.arguments.starts(with: ["volume", "delete"]) })
     }),
+    ("cloneRunsInitializeCommandOnHostCheckout", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.configJSONToWrite = """
+        {
+          "image": "alpine:3.20",
+          "initializeCommand": "echo init-clone"
+        }
+        """
+        var events: [String] = []
+        let host = RecordingHostProcessRunner()
+        host.handler = { _ in
+            events.append("initialize")
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restoreHost = RecordingHostProcessRunner.install(host)
+        defer { restoreHost() }
+        let mock = MockProcessRunner()
+        mock.handlers = CloneRuntimeMock.handlers(onCreate: { args in
+            if args.first == "create" {
+                events.append("create")
+            }
+        })
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try CloneCommand.run(
+            options: CloneOptions(gitURL: "https://github.com/org/init-clone.git", skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(events.contains("initialize"))
+        try MiniTest.expect(events.contains("create"))
+        try MiniTest.expectEqual(events.first, "initialize")
+        let initIdx = events.firstIndex(of: "initialize")!
+        let createIdx = events.firstIndex(of: "create")!
+        try MiniTest.expect(initIdx < createIdx, "initializeCommand must run before create")
+        try MiniTest.expectEqual(host.calls.count, 1)
+        try MiniTest.expect(host.calls[0].arguments.contains("echo init-clone"))
+        let checkout = git.fetchConfigCalls[0].directory
+        try MiniTest.expectEqual(
+            (host.calls[0].currentDirectory as NSString?)?.standardizingPath,
+            (checkout as NSString).standardizingPath
+        )
+    }),
     ("cloneHookFailureDeletesContainer", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
@@ -1323,6 +1370,116 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
             )
         }
         try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" })
+        try MiniTest.expect(mock.calls.contains { $0.arguments.starts(with: ["volume", "delete"]) })
+    }),
+    ("cloneRunsPostAttachWithoutVSCode", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.configJSONToWrite = """
+        {
+          "image": "alpine:3.20",
+          "postCreateCommand": "echo postCreate",
+          "postAttachCommand": "echo clone-attach"
+        }
+        """
+        var hookBodies: [String] = []
+        let mock = MockProcessRunner()
+        let baseHandlers = CloneRuntimeMock.handlers()
+        mock.handlers = [
+            { args in
+                if args.first == "exec",
+                   let lc = args.firstIndex(of: "-lc"),
+                   lc + 1 < args.count
+                {
+                    hookBodies.append(args[lc + 1])
+                }
+                for h in baseHandlers {
+                    if let r = h(args) { return r }
+                }
+                return nil
+            }
+        ]
+        let launcher = MockVSCodeLauncher()
+        let prevLauncher = VSCodeOpen.launcherOverride
+        let prevResolver = VSCodeOpen.resolverOverride
+        VSCodeOpen.launcherOverride = launcher
+        VSCodeOpen.resolverOverride = MockVSCodeResolver(path: "/opt/code")
+        defer {
+            VSCodeOpen.launcherOverride = prevLauncher
+            VSCodeOpen.resolverOverride = prevResolver
+        }
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try CloneCommand.run(
+            options: CloneOptions(
+                gitURL: "https://github.com/org/clone-pa-novsc.git",
+                skipPull: true,
+                openVSCode: false
+            ),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(launcher.calls.count, 0)
+        try MiniTest.expect(hookBodies.contains("echo clone-attach"))
+        try MiniTest.expect(hookBodies.contains("echo postCreate"))
+        try MiniTest.expect(!FileManager.default.fileExists(atPath: git.fetchConfigCalls[0].directory))
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+    }),
+    ("clonePostAttachRunsWhenOpenSoftFails", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.configJSONToWrite = """
+        {
+          "image": "alpine:3.20",
+          "postAttachCommand": "echo clone-attach"
+        }
+        """
+        var hookBodies: [String] = []
+        let mock = MockProcessRunner()
+        let baseHandlers = CloneRuntimeMock.handlers()
+        mock.handlers = [
+            { args in
+                if args.first == "exec",
+                   let lc = args.firstIndex(of: "-lc"),
+                   lc + 1 < args.count
+                {
+                    hookBodies.append(args[lc + 1])
+                }
+                for h in baseHandlers {
+                    if let r = h(args) { return r }
+                }
+                return nil
+            }
+        ]
+        let launcher = MockVSCodeLauncher()
+        let prevLauncher = VSCodeOpen.launcherOverride
+        let prevResolver = VSCodeOpen.resolverOverride
+        VSCodeOpen.launcherOverride = launcher
+        VSCodeOpen.resolverOverride = MockVSCodeResolver(path: nil)
+        defer {
+            VSCodeOpen.launcherOverride = prevLauncher
+            VSCodeOpen.resolverOverride = prevResolver
+        }
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try CloneCommand.run(
+            options: CloneOptions(
+                gitURL: "https://github.com/org/clone-pa-soft-vol.git",
+                skipPull: true,
+                openVSCode: true
+            ),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(hookBodies.contains("echo clone-attach"))
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+        try MiniTest.expect(!FileManager.default.fileExists(atPath: git.fetchConfigCalls[0].directory))
     }),
     ("cloneInjectsGitFeatureWhenConfigHasNone", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
@@ -1835,16 +1992,32 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
         let labels = rows.first?["labels"] as? [String: String]
         try MiniTest.expectEqual(labels?[RecoveryHelper.recoveryMarkerLabel], RecoveryHelper.recoveryMarkerValue)
     }),
-    ("startStoppedManagedNoHooks", {
-        let mock = MockProcessRunner()
+    ("startStoppedManagedRunsPostStart", {
+        let configJSON = """
+        {
+          "image": "alpine:3.20",
+          "onCreateCommand": "echo onCreate",
+          "updateContentCommand": "echo updateContent",
+          "postCreateCommand": "echo postCreate",
+          "postStartCommand": "echo config-postStart"
+        }
+        """
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
+            ContainerIdentity.labelLocalFolder: "volume://adev-app-ws",
+            ContainerIdentity.labelConfigFile: ".devcontainer/devcontainer.json",
+            ContainerIdentity.labelWorkspaceFolder: "/workspaces/app",
+            DevContainerMetadataLabel.labelKey: #"{"postStartCommand":"echo feature-postStart"}"#
+        ]
         let entry = MockProcessRunner.containerListJSON(
             id: "adev-app-aaaabbbbcccc",
             state: "stopped",
-            labels: [
-                ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
-                ContainerIdentity.labelWorkspaceMode: "volume"
-            ]
+            labels: labels,
+            image: "alpine:3.20"
         )
+        var execBodies: [String] = []
+        let mock = MockProcessRunner()
         mock.handlers = [
             { args in
                 if args.starts(with: ["list"]) {
@@ -1852,6 +2025,19 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
                     return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
                 }
                 if args.first == "start" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "inspect" {
+                    let data = try! JSONSerialization.data(withJSONObject: entry)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "exec" {
+                    if args.contains("cat") && !args.contains(LifecycleRunner.userEnvProbeScript) {
+                        return ProcessResult(exitCode: 0, stdout: Data(configJSON.utf8), stderr: Data())
+                    }
+                    if let lc = args.firstIndex(of: "-lc"), lc + 1 < args.count {
+                        execBodies.append(args[lc + 1])
+                    }
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
                 return nil
@@ -1863,21 +2049,192 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
             runtime: runtime
         )
         try MiniTest.expect(mock.calls.contains { $0.arguments == ["start", "adev-app-aaaabbbbcccc"] })
-        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "exec" })
+        try MiniTest.expectEqual(execBodies, ["echo config-postStart", "echo feature-postStart"])
+        try MiniTest.expect(!execBodies.contains("echo onCreate"))
+        try MiniTest.expect(!execBodies.contains("echo updateContent"))
+        try MiniTest.expect(!execBodies.contains("echo postCreate"))
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
     }),
-    ("startAlreadyRunningNoOp", {
-        let mock = MockProcessRunner()
+    ("volumeModeStartWithoutHostWorkspaceSkipsInitializeCommand", {
+        let host = RecordingHostProcessRunner()
+        let restoreHost = RecordingHostProcessRunner.install(host)
+        defer { restoreHost() }
+        let previous = StatusPrinter.onWarning
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+        defer { StatusPrinter.onWarning = previous }
+        let configJSON = """
+        { "image": "alpine:3.20", "initializeCommand": "echo init-volume" }
+        """
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
+            ContainerIdentity.labelLocalFolder: "volume://adev-app-ws",
+            ContainerIdentity.labelConfigFile: ".devcontainer/devcontainer.json",
+            ContainerIdentity.labelWorkspaceFolder: "/workspaces/app"
+        ]
         let entry = MockProcessRunner.containerListJSON(
             id: "adev-app-aaaabbbbcccc",
-            state: "running",
-            labels: [ContainerIdentity.labelManaged: ContainerIdentity.managedValue]
+            state: "stopped",
+            labels: labels
         )
+        let mock = MockProcessRunner()
         mock.handlers = [
             { args in
                 if args.starts(with: ["list"]) {
                     let data = try! JSONSerialization.data(withJSONObject: [entry])
                     return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "start" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "inspect" {
+                    let data = try! JSONSerialization.data(withJSONObject: entry)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "exec", args.contains("cat") {
+                    return ProcessResult(exitCode: 0, stdout: Data(configJSON.utf8), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try StartCommand.run(
+            options: StartOptions(name: "adev-app-aaaabbbbcccc"),
+            runtime: runtime
+        )
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "start" })
+        try MiniTest.expect(host.calls.isEmpty, "volume-mode start must not run host initialize")
+        try MiniTest.expect(
+            warnings.contains { $0.lowercased().contains("initializecommand") && $0.lowercased().contains("host") },
+            "must warn that the host command cannot run"
+        )
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+    }),
+    ("volumeModeStartDoesNotInitializeAfterStartWhenGuestConfigBecomesReadable", {
+        // Clone-origin: usable host checkout exists, but guest config is only
+        // readable after start. Initialize after start would violate
+        // initialize-before-start / failure-must-not-start.
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "image": "alpine:3.20" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let host = RecordingHostProcessRunner()
+        let restoreHost = RecordingHostProcessRunner.install(host)
+        defer { restoreHost() }
+        let configJSON = """
+        {
+          "image": "alpine:3.20",
+          "initializeCommand": "echo init-after-start",
+          "postStartCommand": "echo config-postStart"
+        }
+        """
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
+            ContainerIdentity.labelLocalFolder: ws.path,
+            ContainerIdentity.labelConfigFile: ".devcontainer/devcontainer.json",
+            ContainerIdentity.labelWorkspaceFolder: "/workspaces/app"
+        ]
+        let entry = MockProcessRunner.containerListJSON(
+            id: "adev-app-aaaabbbbcccc",
+            state: "stopped",
+            labels: labels,
+            image: "alpine:3.20"
+        )
+        var started = false
+        var execBodies: [String] = []
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "start" {
+                    started = true
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "inspect" {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "exec" {
+                    if args.contains("cat") && !args.contains(LifecycleRunner.userEnvProbeScript) {
+                        if !started {
+                            return ProcessResult(
+                                exitCode: 1,
+                                stdout: Data(),
+                                stderr: Data("container not running".utf8)
+                            )
+                        }
+                        return ProcessResult(exitCode: 0, stdout: Data(configJSON.utf8), stderr: Data())
+                    }
+                    if let lc = args.firstIndex(of: "-lc"), lc + 1 < args.count {
+                        execBodies.append(args[lc + 1])
+                    }
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try StartCommand.run(
+            options: StartOptions(name: "adev-app-aaaabbbbcccc"),
+            runtime: runtime
+        )
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "start" })
+        try MiniTest.expect(
+            host.calls.isEmpty,
+            "must not run initialize after start when guest config becomes readable"
+        )
+        try MiniTest.expect(
+            execBodies.contains("echo config-postStart"),
+            "after-start remelt/postStart must still run"
+        )
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+    }),
+    ("startAlreadyRunningNoOp", {
+        let host = RecordingHostProcessRunner()
+        let restoreHost = RecordingHostProcessRunner.install(host)
+        defer { restoreHost() }
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "initializeCommand": "echo init-already-running",
+          "postStartCommand": "echo postStart-already-running"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeBind,
+            ContainerIdentity.labelLocalFolder: ws.path,
+            ContainerIdentity.labelConfigFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path,
+            ContainerIdentity.labelWorkspaceFolder: "/workspaces/app"
+        ]
+        let entry = MockProcessRunner.containerListJSON(
+            id: "adev-app-aaaabbbbcccc",
+            state: "running",
+            labels: labels
+        )
+        var execBodies: [String] = []
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "inspect" {
+                    let data = try! JSONSerialization.data(withJSONObject: entry)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "exec" {
+                    if let lc = args.firstIndex(of: "-lc"), lc + 1 < args.count {
+                        execBodies.append(args[lc + 1])
+                    }
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
                 return nil
             }
@@ -1888,6 +2245,11 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
             runtime: runtime
         )
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "start" })
+        try MiniTest.expect(host.calls.isEmpty, "already-running start must not run initialize")
+        try MiniTest.expect(
+            !execBodies.contains("echo postStart-already-running"),
+            "already-running start must not run postStart"
+        )
     }),
     ("startInteractivePickerWhenMultiple", {
         let mock = MockProcessRunner()

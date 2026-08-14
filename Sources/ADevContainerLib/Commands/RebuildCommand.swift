@@ -5,7 +5,9 @@ import Foundation
 /// volume). Two phases split at the delete of the old container:
 ///
 /// - Phase A (non-destructive gate): selection → stamps → (volume, stopped) bare runtime
-///   start → strict config read → hostRequirements preflight → Features gate
+///   start → strict config read → hostRequirements preflight → host initialize
+///   (volume-mode with no usable host workspace stages guest `.devcontainer/` /
+///   root `.devcontainer.json` onto a temp cwd) → Features gate
 ///   (rosetta consent, pull/skip-pull, derived-tag reuse). Any failure here fails
 ///   `rebuild` with the old container untouched.
 /// - Phase B (destructive create path): container-only delete of the old container →
@@ -192,6 +194,16 @@ public enum RebuildCommand {
         // hostRequirements preflight (same gate as up/clone; before pull/build).
         try enforceHostRequirements(config: resolvedConfig, host: hostResources)
 
+        try runHostInitialize(
+            config: resolvedConfig,
+            labels: labels,
+            isVolumeMode: isVolumeMode,
+            containerId: selected.id,
+            volumeRead: volumeRead,
+            runtime: runtime,
+            fileManager: fileManager
+        )
+
         var effectiveConfig = resolvedConfig
         let platform = ContainerPlatform.defaultLinuxPlatform
 
@@ -252,9 +264,18 @@ public enum RebuildCommand {
                 knownOCIUser = featuresResult.baseImageUser
             }
             knownMetadataUsers = featuresResult.metadataUsers
-        } else if !options.skipPull {
-            StatusPrinter.status("Pulling image", item: effectiveConfig.image)
-            try? runtime.pullImage(effectiveConfig.image, platform: platform)
+        } else {
+            if !options.skipPull {
+                StatusPrinter.status("Pulling image", item: effectiveConfig.image)
+                try? runtime.pullImage(effectiveConfig.image, platform: platform)
+            }
+            let applied = try FeatureContributionMerge.applyFromImage(
+                imageRef: effectiveConfig.image,
+                to: effectiveConfig,
+                runtime: runtime
+            )
+            effectiveConfig = applied.config
+            knownMetadataUsers = applied.users
         }
 
         // Expand `${devcontainerId}` with the reused create name before hash / volume ensure.
@@ -571,19 +592,13 @@ public enum RebuildCommand {
             )
         }
 
-        // Create-path hooks (delete-on-fail of the new container).
-        do {
-            try LifecycleRunner.runCreatePath(
-                containerId: id,
-                config: effectiveConfig,
-                runtime: runtime
-            )
-        } catch {
-            // Delete-on-fail must run exactly once. runCreatePath already deletes the
-            // new container when a create-path hook exits non-zero; only an exec-level
-            // failure (the hook could not run at all) leaves it in place. Deleting an
-            // already-removed container a second time would stream a spurious runtime
-            // notFound error to stderr before the warning below.
+        // Create-path hooks split at waitFor (delete-on-fail of the new container).
+        // Delete-on-fail must run exactly once. runCreatePath already deletes the
+        // new container when a create-path hook exits non-zero; only an exec-level
+        // failure (the hook could not run at all) leaves it in place. Deleting an
+        // already-removed container a second time would stream a spurious runtime
+        // notFound error to stderr before the warning below.
+        func handleCreatePathFailure(_ error: Error) throws -> RebuildResult {
             if allowRecovery, let recovery = recoveryContext {
                 StatusPrinter.status("Create-path hook failed; entering recovery")
                 return try RecoveryOrchestrator.recover(
@@ -639,15 +654,26 @@ public enum RebuildCommand {
             throw error
         }
 
-        // Settings apply after create-path hooks; not gated on --vscode.
-        _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
-            containerId: id,
-            config: effectiveConfig,
-            runtime: runtime
-        )
-
-        let result: RebuildResult
         do {
+            try LifecycleRunner.runCreatePathThroughWaitFor(
+                containerId: id,
+                config: effectiveConfig,
+                runtime: runtime
+            )
+        } catch {
+            return try handleCreatePathFailure(error)
+        }
+
+        // Settings + Ready / JSON / open / postAttach at the waitFor point.
+        // postAttach failure must not start recovery.
+        var readyError: Error?
+        var result: RebuildResult?
+        do {
+            _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
+                containerId: id,
+                config: effectiveConfig,
+                runtime: runtime
+            )
             result = try finish(
                 options: options,
                 id: id,
@@ -658,10 +684,29 @@ public enum RebuildCommand {
                 runtime: runtime
             )
         } catch {
+            readyError = error
+        }
+
+        do {
+            try LifecycleRunner.runCreatePathAfterWaitFor(
+                containerId: id,
+                config: effectiveConfig,
+                runtime: runtime
+            )
+        } catch {
+            return try handleCreatePathFailure(error)
+        }
+        if let readyError {
             // Open/postAttach failures are terminal non-recovery outcomes. Do not leak the
             // prepared session after the delete boundary.
             if let recoveryContext { try? recoveryContext.session.cleanup() }
-            throw error
+            throw readyError
+        }
+        guard let result else {
+            throw CLIError(
+                code: CLIErrorCode.internalError,
+                message: "rebuild finished waitFor without a result"
+            )
         }
         if let recovery = recoveryContext {
             if recoveryEndpointID != nil {
@@ -777,8 +822,10 @@ public enum RebuildCommand {
 
     // MARK: - Finish (extensions → open → postAttach gate), up parity
 
-    /// Extensions apply (not flag-gated) → open (optional) → postAttach gate → Ready.
-    /// postAttach is never before open when `--vscode`. Extensions never fold into postAttachCommand.
+    /// Extensions apply (not flag-gated) → open (optional) → CLI-attach postAttach → Ready
+    /// (and `--json` success JSON). Called at the `waitFor` point, not after later hooks.
+    /// postAttach is never before open when `--vscode`. Open soft-fail does not skip postAttach.
+    /// Extensions never fold into postAttachCommand.
     private static func finish(
         options: RebuildOptions,
         id: String,
@@ -817,16 +864,22 @@ public enum RebuildCommand {
         var postAttachConfig = config
         PostAttachConfigLoader.mergeFeaturePostAttach(
             into: &postAttachConfig,
+            labels: imagesLabels,
             imageRef: config.image.isEmpty ? nil : config.image,
             runtime: runtime
         )
         try LifecycleRunner.applyPostAttachGate(
             openOutcome: openOutcome,
+            kind: .cliAttach,
             containerId: id,
             config: postAttachConfig,
             runtime: runtime
         )
         StatusPrinter.status("Ready")
+        try SuccessPresentation.emitSuccessJSONIfRequested(
+            result.jsonString(),
+            jsonOutput: options.jsonOutput
+        )
         return result
     }
 
@@ -847,6 +900,186 @@ public enum RebuildCommand {
             message: evaluation.hardFailures.joined(separator: "; "),
             hint: "Reduce hostRequirements or run on a host with sufficient memory/CPUs"
         )
+    }
+
+    /// Host `initializeCommand` before old-container delete / new create.
+    /// Usable stamped / retained host path wins. Volume-mode with no host workspace
+    /// stages the live guest config directory/files onto a temp root (not a full checkout).
+    private static func runHostInitialize(
+        config: ResolvedDevContainerConfig,
+        labels: [String: String],
+        isVolumeMode: Bool,
+        containerId: String,
+        volumeRead: ResolvedVolumeConfigRead?,
+        runtime: AppleContainerRuntime,
+        fileManager: FileManager
+    ) throws {
+        guard config.initializeCommand != nil else { return }
+        let stamped = stampedLocalFolder(labels)
+        if let durable = LifecycleRunner.usableHostWorkspace(stamped, fileManager: fileManager) {
+            try LifecycleRunner.runInitializeCommand(
+                config: config,
+                hostWorkspace: durable,
+                fileManager: fileManager
+            )
+            return
+        }
+        if isVolumeMode, let volumeRead {
+            let staged = try stageGuestInitializeWorkspace(
+                containerId: containerId,
+                raw: volumeRead.raw,
+                runtime: runtime,
+                fileManager: fileManager
+            )
+            defer { removeStagedInitializeRoot(staged, fileManager: fileManager) }
+            try LifecycleRunner.runInitializeCommand(
+                config: config,
+                hostWorkspace: staged.path,
+                fileManager: fileManager
+            )
+            return
+        }
+        try LifecycleRunner.runInitializeCommand(
+            config: config,
+            hostWorkspace: stamped,
+            fileManager: fileManager
+        )
+    }
+
+    /// Place the current guest `.devcontainer/` (when present) and/or root
+    /// `.devcontainer.json` onto a host temp workspace root. Not a full checkout.
+    private static func stageGuestInitializeWorkspace(
+        containerId: String,
+        raw: RawVolumeConfig,
+        runtime: AppleContainerRuntime,
+        fileManager: FileManager
+    ) throws -> URL {
+        let tempDir = fileManager.temporaryDirectory
+            .appendingPathComponent("adev-init-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        } catch {
+            throw CLIError(
+                code: CLIErrorCode.lifecycleFailed,
+                property: "initializeCommand",
+                message: "Failed to stage guest config for initializeCommand",
+                hint: "Ensure the invoking user can write its temporary directory"
+            )
+        }
+
+        do {
+            let guestDir = (raw.workspaceFolder as NSString).appendingPathComponent(".devcontainer")
+            let dirCheck: ProcessResult
+            do {
+                dirCheck = try runtime.exec(
+                    nameOrId: containerId,
+                    command: ["test", "-d", guestDir]
+                )
+            } catch {
+                throw CLIError(
+                    code: CLIErrorCode.lifecycleFailed,
+                    property: "initializeCommand",
+                    message: "Failed to inspect guest .devcontainer for initializeCommand",
+                    hint: "The container must be running so rebuild can stage the guest config directory"
+                )
+            }
+            if dirCheck.succeeded {
+                try extractGuestDevcontainerArchive(
+                    containerId: containerId,
+                    workspaceFolder: raw.workspaceFolder,
+                    dest: tempDir,
+                    runtime: runtime,
+                    fileManager: fileManager
+                )
+            }
+
+            let configName = (raw.pathInContainer as NSString).lastPathComponent
+            let configParent = (raw.pathInContainer as NSString).deletingLastPathComponent
+            if configName == ConfigDiscovery.rootRelativePath,
+               (configParent as NSString).standardizingPath
+                == (raw.workspaceFolder as NSString).standardizingPath
+            {
+                try raw.bytes.write(
+                    to: tempDir.appendingPathComponent(ConfigDiscovery.rootRelativePath)
+                )
+            }
+            return tempDir
+        } catch {
+            try? fileManager.removeItem(at: tempDir)
+            throw error
+        }
+    }
+
+    /// `exec tar cf -` of guest `.devcontainer/` then host `tar xf`. Not `container cp`.
+    private static func extractGuestDevcontainerArchive(
+        containerId: String,
+        workspaceFolder: String,
+        dest: URL,
+        runtime: AppleContainerRuntime,
+        fileManager: FileManager
+    ) throws {
+        let archive: ProcessResult
+        do {
+            archive = try runtime.exec(
+                nameOrId: containerId,
+                command: ["tar", "cf", "-", "-C", workspaceFolder, ".devcontainer"]
+            )
+        } catch {
+            throw CLIError(
+                code: CLIErrorCode.lifecycleFailed,
+                property: "initializeCommand",
+                message: "Failed to archive guest .devcontainer for initializeCommand",
+                hint: "The container must be running and tar must be available in the image"
+            )
+        }
+        guard archive.succeeded, !archive.stdout.isEmpty else {
+            throw CLIError(
+                code: CLIErrorCode.lifecycleFailed,
+                property: "initializeCommand",
+                message: "Failed to archive guest .devcontainer for initializeCommand",
+                hint: "The container must be running and tar must be available in the image"
+            )
+        }
+
+        let tarURL = fileManager.temporaryDirectory
+            .appendingPathComponent("adev-init-archive-\(UUID().uuidString).tar")
+        do {
+            try archive.stdout.write(to: tarURL)
+        } catch {
+            throw CLIError(
+                code: CLIErrorCode.lifecycleFailed,
+                property: "initializeCommand",
+                message: "Failed to stage guest .devcontainer archive for initializeCommand",
+                hint: "Ensure the invoking user can write its temporary directory"
+            )
+        }
+        defer { try? fileManager.removeItem(at: tarURL) }
+
+        let extract = try FoundationProcessRunner().run(
+            executable: "/usr/bin/tar",
+            arguments: ["xf", tarURL.path, "-C", dest.path],
+            environment: nil,
+            currentDirectory: nil
+        )
+        guard extract.succeeded else {
+            throw CLIError(
+                code: CLIErrorCode.lifecycleFailed,
+                property: "initializeCommand",
+                message: "Failed to extract guest .devcontainer for initializeCommand",
+                hint: "Ensure /usr/bin/tar is available"
+            )
+        }
+    }
+
+    private static func removeStagedInitializeRoot(_ url: URL, fileManager: FileManager) {
+        guard fileManager.fileExists(atPath: url.path) else { return }
+        do {
+            try fileManager.removeItem(at: url)
+        } catch {
+            StatusPrinter.warning(
+                "Failed to remove temp directory \(url.path): \(error.localizedDescription)"
+            )
+        }
     }
 
     private static func stampedLocalFolder(_ labels: [String: String]) -> String {

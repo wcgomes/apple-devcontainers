@@ -27,9 +27,16 @@ enum TestRepo {
         )
         return ws
     }
+
+    static func resolveConfig(_ json: String) throws -> ResolvedDevContainerConfig {
+        let ws = try makeTempWorkspace(configJSON: json)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        return try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:]).config
+    }
 }
 
 final class MockProcessRunner: StreamTeeingProcessRunning, @unchecked Sendable {
+    private let stateLock = NSLock()
     var calls: [MockProcessCall] = []
     var results: [ProcessResult] = []
     var handlers: [([String]) -> ProcessResult?] = []
@@ -63,14 +70,14 @@ final class MockProcessRunner: StreamTeeingProcessRunning, @unchecked Sendable {
         currentDirectory: String?,
         stdinData: Data?
     ) throws -> ProcessResult {
-        calls.append(MockProcessCall(
+        recordCall(
             executable: executable,
             arguments: arguments,
             stdinData: stdinData,
             environment: environment,
             streamStderr: nil,
             teeStdoutToStderr: nil
-        ))
+        )
         return try dispatch(arguments: arguments, stdinData: stdinData)
     }
 
@@ -83,8 +90,33 @@ final class MockProcessRunner: StreamTeeingProcessRunning, @unchecked Sendable {
         streamStderr: Bool,
         teeStdoutToStderr: Bool
     ) throws -> ProcessResult {
-        lastStreamStderr = streamStderr
-        lastTeeStdoutToStderr = teeStdoutToStderr
+        recordCall(
+            executable: executable,
+            arguments: arguments,
+            stdinData: stdinData,
+            environment: environment,
+            streamStderr: streamStderr,
+            teeStdoutToStderr: teeStdoutToStderr
+        )
+        return try dispatch(arguments: arguments, stdinData: stdinData)
+    }
+
+    private func recordCall(
+        executable: String,
+        arguments: [String],
+        stdinData: Data?,
+        environment: [String: String]?,
+        streamStderr: Bool?,
+        teeStdoutToStderr: Bool?
+    ) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        if let streamStderr {
+            lastStreamStderr = streamStderr
+        }
+        if let teeStdoutToStderr {
+            lastTeeStdoutToStderr = teeStdoutToStderr
+        }
         calls.append(MockProcessCall(
             executable: executable,
             arguments: arguments,
@@ -93,7 +125,6 @@ final class MockProcessRunner: StreamTeeingProcessRunning, @unchecked Sendable {
             streamStderr: streamStderr,
             teeStdoutToStderr: teeStdoutToStderr
         ))
-        return try dispatch(arguments: arguments, stdinData: stdinData)
     }
 
     private func dispatch(arguments: [String], stdinData: Data?) throws -> ProcessResult {
@@ -250,6 +281,52 @@ final class MockProcessRunner: StreamTeeingProcessRunning, @unchecked Sendable {
             ] as [String: Any],
             "status": ["state": state] as [String: Any]
         ]
+    }
+}
+
+final class RecordingHostProcessRunner: ProcessRunning, @unchecked Sendable {
+    struct Call: Equatable {
+        var executable: String
+        var arguments: [String]
+        var currentDirectory: String?
+    }
+
+    private let lock = NSLock()
+    private var storedCalls: [Call] = []
+    var exitCode: Int32 = 0
+    var handler: ((Call) -> ProcessResult)?
+
+    var calls: [Call] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedCalls
+    }
+
+    func run(
+        executable: String,
+        arguments: [String],
+        environment: [String: String]?,
+        currentDirectory: String?,
+        stdinData: Data?
+    ) throws -> ProcessResult {
+        let call = Call(
+            executable: executable,
+            arguments: arguments,
+            currentDirectory: currentDirectory
+        )
+        lock.lock()
+        storedCalls.append(call)
+        lock.unlock()
+        if let handler {
+            return handler(call)
+        }
+        return ProcessResult(exitCode: exitCode, stdout: Data(), stderr: Data())
+    }
+
+    static func install(_ runner: RecordingHostProcessRunner) -> () -> Void {
+        let previous = LifecycleRunner.hostProcessRunnerOverride
+        LifecycleRunner.hostProcessRunnerOverride = runner
+        return { LifecycleRunner.hostProcessRunnerOverride = previous }
     }
 }
 
@@ -915,9 +992,186 @@ nonisolated(unsafe) let admissionTests: [(String, () throws -> Void)] = [
         try ConfigAdmissions.admit(raw)
     }),
     ("unknownPropertyFails", {
-        let raw: [String: Any] = ["image": "alpine:3.20", "shutdownAction": "none"]
+        let raw: [String: Any] = ["image": "alpine:3.20", "notARealProperty": true]
         try MiniTest.expectThrows({ try ConfigAdmissions.admit(raw) }) { error in
+            try MiniTest.expectEqual((error as! CLIError).property, "notARealProperty")
+        }
+    }),
+    ("shutdownActionPresenceDoesNotFailParse", {
+        try ConfigAdmissions.admit([
+            "image": "alpine:3.20",
+            "shutdownAction": "stopContainer"
+        ])
+        try ConfigAdmissions.admit([
+            "image": "alpine:3.20",
+            "shutdownAction": "none"
+        ])
+        let stop = try TestRepo.resolveConfig("""
+        { "image": "alpine:3.20", "shutdownAction": "stopContainer" }
+        """)
+        try MiniTest.expectEqual(stop.shutdownAction, .stopContainer)
+        let none = try TestRepo.resolveConfig("""
+        { "image": "alpine:3.20", "shutdownAction": "none" }
+        """)
+        try MiniTest.expectEqual(none.shutdownAction, .none)
+    }),
+    ("initializeCommandWaitForUserEnvProbeShutdownActionAdmit", {
+        try ConfigAdmissions.admit([
+            "image": "alpine:3.20",
+            "initializeCommand": "echo init",
+            "waitFor": "updateContentCommand",
+            "userEnvProbe": "loginInteractiveShell",
+            "shutdownAction": "stopContainer"
+        ])
+
+        let full = try TestRepo.resolveConfig("""
+        {
+          "image": "alpine:3.20",
+          "initializeCommand": "echo init",
+          "waitFor": "postCreateCommand",
+          "userEnvProbe": "loginShell",
+          "shutdownAction": "stopContainer"
+        }
+        """)
+        try MiniTest.expectEqual(full.initializeCommand, .shell("echo init"))
+        try MiniTest.expectEqual(full.waitFor, .postCreateCommand)
+        try MiniTest.expectEqual(full.userEnvProbe, .loginShell)
+        try MiniTest.expectEqual(full.shutdownAction, .stopContainer)
+
+        let argv = try TestRepo.resolveConfig("""
+        { "image": "alpine:3.20", "initializeCommand": ["echo", "init"] }
+        """)
+        try MiniTest.expectEqual(argv.initializeCommand, .argv(["echo", "init"]))
+
+        let objectMap = try TestRepo.resolveConfig("""
+        {
+          "image": "alpine:3.20",
+          "initializeCommand": {
+            "one": "echo a",
+            "two": ["echo", "b"]
+          }
+        }
+        """)
+        guard case .parallel(let named) = objectMap.initializeCommand else {
+            throw MiniTest.Failure(message: "expected initializeCommand object-map")
+        }
+        try MiniTest.expectEqual(named.count, 2)
+        try MiniTest.expectEqual(named[0].name, "one")
+        try MiniTest.expectEqual(named[0].command, LifecycleCommand.shell("echo a"))
+        try MiniTest.expectEqual(named[1].name, "two")
+        try MiniTest.expectEqual(named[1].command, LifecycleCommand.argv(["echo", "b"]))
+
+        let emptyMap = try TestRepo.resolveConfig("""
+        { "image": "alpine:3.20", "initializeCommand": {} }
+        """)
+        try MiniTest.expect(emptyMap.initializeCommand == nil)
+
+        let omitted = try TestRepo.resolveConfig(#"{ "image": "alpine:3.20" }"#)
+        try MiniTest.expect(omitted.initializeCommand == nil)
+        try MiniTest.expectEqual(omitted.waitFor, .updateContentCommand)
+        try MiniTest.expectEqual(omitted.userEnvProbe, .loginInteractiveShell)
+        try MiniTest.expectEqual(omitted.shutdownAction, .stopContainer)
+
+        for stage in [
+            "initializeCommand",
+            "onCreateCommand",
+            "updateContentCommand",
+            "postCreateCommand",
+            "postStartCommand"
+        ] {
+            let resolved = try TestRepo.resolveConfig("""
+            { "image": "alpine:3.20", "waitFor": "\(stage)" }
+            """)
+            try MiniTest.expectEqual(resolved.waitFor.rawValue, stage)
+        }
+        for probe in ["none", "interactiveShell", "loginShell", "loginInteractiveShell"] {
+            let resolved = try TestRepo.resolveConfig("""
+            { "image": "alpine:3.20", "userEnvProbe": "\(probe)" }
+            """)
+            try MiniTest.expectEqual(resolved.userEnvProbe.rawValue, probe)
+        }
+    }),
+    ("lifecycleRunArgsHostRequirementsPropertySetDoesNotHardError", {
+        let raw: [String: Any] = [
+            "image": "alpine:3.20",
+            "name": "app",
+            "initializeCommand": "echo init",
+            "onCreateCommand": "echo on",
+            "updateContentCommand": "echo update",
+            "postCreateCommand": "echo post",
+            "postStartCommand": "echo start",
+            "postAttachCommand": "echo attach",
+            "waitFor": "updateContentCommand",
+            "userEnvProbe": "loginInteractiveShell",
+            "shutdownAction": "stopContainer",
+            "runArgs": ["--init"],
+            "hostRequirements": ["cpus": 1] as [String: Any]
+        ]
+        try ConfigAdmissions.admit(raw)
+        let resolved = try TestRepo.resolveConfig("""
+        {
+          "image": "alpine:3.20",
+          "name": "app",
+          "initializeCommand": "echo init",
+          "onCreateCommand": "echo on",
+          "updateContentCommand": "echo update",
+          "postCreateCommand": "echo post",
+          "postStartCommand": "echo start",
+          "postAttachCommand": "echo attach",
+          "waitFor": "updateContentCommand",
+          "userEnvProbe": "loginInteractiveShell",
+          "shutdownAction": "stopContainer",
+          "runArgs": ["--init"],
+          "hostRequirements": { "cpus": 1 }
+        }
+        """)
+        try MiniTest.expectEqual(resolved.initializeCommand, .shell("echo init"))
+        try MiniTest.expectEqual(resolved.runArgs, [.initFlag])
+        try MiniTest.expectEqual(resolved.hostRequirements?.cpus, 1.0)
+    }),
+    ("shutdownActionStopComposeFailsClosed", {
+        try ConfigAdmissions.admit([
+            "image": "alpine:3.20",
+            "shutdownAction": "stopCompose"
+        ])
+        try MiniTest.expectThrows({
+            _ = try TestRepo.resolveConfig("""
+            { "image": "alpine:3.20", "shutdownAction": "stopCompose" }
+            """)
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.property, "shutdownAction")
+            try MiniTest.expect(err.message.lowercased().contains("compose"))
+        }
+    }),
+    ("unknownLifecycleValuesFailResolve", {
+        try MiniTest.expectThrows({
+            _ = try TestRepo.resolveConfig("""
+            { "image": "alpine:3.20", "waitFor": "notAStage" }
+            """)
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).property, "waitFor")
+        }
+        try MiniTest.expectThrows({
+            _ = try TestRepo.resolveConfig("""
+            { "image": "alpine:3.20", "userEnvProbe": "notAProbe" }
+            """)
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).property, "userEnvProbe")
+        }
+        try MiniTest.expectThrows({
+            _ = try TestRepo.resolveConfig("""
+            { "image": "alpine:3.20", "shutdownAction": "notAnAction" }
+            """)
+        }) { error in
             try MiniTest.expectEqual((error as! CLIError).property, "shutdownAction")
+        }
+        try MiniTest.expectThrows({
+            _ = try TestRepo.resolveConfig("""
+            { "image": "alpine:3.20", "initializeCommand": 42 }
+            """)
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).property, "initializeCommand")
         }
     }),
     ("phaseFixturesAdmit", {
@@ -1335,6 +1589,26 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         base.postAttachCommand = .shell("echo attach")
         let h3 = ContainerIdentity.configHash(from: base.hashMaterial())
         try MiniTest.expectEqual(h1, h3)
+
+        var withInit = base
+        withInit.initializeCommand = .shell("echo init")
+        let hInit = ContainerIdentity.configHash(from: withInit.hashMaterial())
+        try MiniTest.expect(h1 != hInit)
+
+        var withWait = base
+        withWait.waitFor = .postCreateCommand
+        let hWait = ContainerIdentity.configHash(from: withWait.hashMaterial())
+        try MiniTest.expect(h1 != hWait)
+
+        var withProbe = base
+        withProbe.userEnvProbe = .none
+        let hProbe = ContainerIdentity.configHash(from: withProbe.hashMaterial())
+        try MiniTest.expect(h1 != hProbe)
+
+        var withShutdown = base
+        withShutdown.shutdownAction = .none
+        let hShutdown = ContainerIdentity.configHash(from: withShutdown.hashMaterial())
+        try MiniTest.expectEqual(h1, hShutdown)
     })
 ]
 
@@ -2033,6 +2307,99 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
             failurePolicy: .failKeepContainer
         )
         try MiniTest.expectEqual(String(data: buffer, encoding: .utf8) ?? "", "")
+    }),
+    ("lifecycleObjectMapRunsInParallel", {
+        let secondStarted = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var firstSawSecond = false
+        var inFlight = 0
+        var maxInFlight = 0
+
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                guard args.first == "exec" else { return nil }
+                lock.lock()
+                inFlight += 1
+                maxInFlight = max(maxInFlight, inFlight)
+                lock.unlock()
+                defer {
+                    lock.lock()
+                    inFlight -= 1
+                    lock.unlock()
+                }
+                if args.contains("first-cmd") {
+                    let wait = secondStarted.wait(timeout: .now() + 2)
+                    firstSawSecond = (wait == .success)
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.contains("second-cmd") {
+                    secondStarted.signal()
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/app",
+            onCreateCommand: .parallel([
+                NamedLifecycleCommand(name: "alpha", command: .shell("first-cmd")),
+                NamedLifecycleCommand(name: "beta", command: .shell("second-cmd"))
+            ])
+        )
+        try LifecycleRunner.runIfPresent(
+            property: "onCreateCommand",
+            command: config.onCreateCommand,
+            containerId: "ctr-parallel",
+            config: config,
+            runtime: runtime,
+            failurePolicy: .deleteContainerThenFail
+        )
+        try MiniTest.expect(firstSawSecond, "first exec must still be in flight when second starts")
+        try MiniTest.expect(maxInFlight >= 2, "object-map entries must overlap")
+        let execs = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execs.count, 2)
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+    }),
+    ("lifecycleObjectMapStageFailsIfAnyEntryFails", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.first == "exec", args.contains("false") {
+                    return ProcessResult(exitCode: 7, stdout: Data(), stderr: Data("bad-entry\n".utf8))
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "delete" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/app",
+            postStartCommand: .parallel([
+                NamedLifecycleCommand(name: "ok", command: .shell("true")),
+                NamedLifecycleCommand(name: "bad", command: .shell("false"))
+            ])
+        )
+        try MiniTest.expectThrows({
+            try LifecycleRunner.runRestartPostStart(
+                containerId: "ctr-parallel-fail",
+                config: config,
+                runtime: runtime
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.lifecycleFailed)
+            try MiniTest.expect(err.property?.contains("postStartCommand") == true)
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
     }),
     ("isBuilderRunningParsesStatusJSON", {
         let mock = MockProcessRunner()
@@ -2911,6 +3278,133 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(ctx.dockerfileContents.contains("_REMOTE_USER=node"))
         try MiniTest.expect(ctx.dockerfileContents.contains("_CONTAINER_USER=node"))
     }),
+    ("featureDockerfileGeneratorBakesPostStartMetadataLabel", {
+        let meta = FeatureMetadata(
+            id: "hook-feature",
+            postStartCommand: .shell("echo baked-postStart"),
+            postAttachCommand: .shell("echo baked-postAttach")
+        )
+        let ctxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-df-meta-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: ctxDir) }
+        let pkgDir = (ctxDir as NSString).appendingPathComponent("pkg")
+        try FileManager.default.createDirectory(atPath: pkgDir, withIntermediateDirectories: true)
+        try #"{"id":"hook-feature"}"#.write(
+            toFile: (pkgDir as NSString).appendingPathComponent("devcontainer-feature.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "#!/bin/sh\n".write(
+            toFile: (pkgDir as NSString).appendingPathComponent("install.sh"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: "./hook-feature", options: [:]),
+                metadata: meta
+            )
+        ]
+        let packages = [
+            FetchedFeaturePackage(reference: "./hook-feature", directoryPath: pkgDir)
+        ]
+        let ctx = try FeatureDockerfileGenerator.write(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            packages: packages,
+            contextDirectory: ctxDir,
+            baseUser: "root"
+        )
+        try MiniTest.expect(
+            ctx.dockerfileContents.contains("LABEL \(DevContainerMetadataLabel.labelKey)="),
+            "derived image must bake devcontainer.metadata for remelt"
+        )
+        let encoded = DevContainerMetadataLabel.encodeFragments(
+            try FeatureContributionMerge.collect(from: ordered)
+        )
+        try MiniTest.expect(encoded != nil, "lifecycle fragments must encode")
+        let parsed = DevContainerMetadataLabel.parseContributions(from: [
+            DevContainerMetadataLabel.labelKey: encoded!
+        ])
+        try MiniTest.expectEqual(parsed.postStartCommands, [.shell("echo baked-postStart")])
+        try MiniTest.expectEqual(parsed.postAttachCommands, [.shell("echo baked-postAttach")])
+    }),
+    ("featureDockerfileGeneratorBakesUnionedBaseAndFeatureMetadata", {
+        // Derived LABEL must persist base-image hooks, not overwrite with features-only.
+        let meta = FeatureMetadata(
+            id: "hook-feature",
+            postStartCommand: .shell("echo feature-postStart"),
+            postAttachCommand: .shell("echo feature-postAttach")
+        )
+        let ctxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-df-union-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: ctxDir) }
+        let pkgDir = (ctxDir as NSString).appendingPathComponent("pkg")
+        try FileManager.default.createDirectory(atPath: pkgDir, withIntermediateDirectories: true)
+        try #"{"id":"hook-feature"}"#.write(
+            toFile: (pkgDir as NSString).appendingPathComponent("devcontainer-feature.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "#!/bin/sh\n".write(
+            toFile: (pkgDir as NSString).appendingPathComponent("install.sh"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: "./hook-feature", options: [:]),
+                metadata: meta
+            )
+        ]
+        let packages = [
+            FetchedFeaturePackage(reference: "./hook-feature", directoryPath: pkgDir)
+        ]
+        var unioned = try FeatureContributionMerge.collect(from: ordered)
+        unioned.postStartCommands.insert(.shell("echo base-postStart"), at: 0)
+        unioned.postAttachCommands.insert(.shell("echo base-postAttach"), at: 0)
+        let ctx = try FeatureDockerfileGenerator.write(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            packages: packages,
+            contextDirectory: ctxDir,
+            baseUser: "root",
+            contributions: unioned
+        )
+        try MiniTest.expect(
+            ctx.dockerfileContents.contains("LABEL \(DevContainerMetadataLabel.labelKey)="),
+            "derived image must bake unioned devcontainer.metadata"
+        )
+        let encoded = DevContainerMetadataLabel.encodeFragments(unioned)
+        try MiniTest.expect(encoded != nil, "unioned lifecycle fragments must encode")
+        try MiniTest.expect(
+            ctx.dockerfileContents.contains("echo base-postStart"),
+            "baked LABEL must include base-image postStart"
+        )
+        try MiniTest.expect(
+            ctx.dockerfileContents.contains("echo base-postAttach"),
+            "baked LABEL must include base-image postAttach"
+        )
+        try MiniTest.expect(
+            ctx.dockerfileContents.contains("echo feature-postStart"),
+            "baked LABEL must include feature postStart"
+        )
+        try MiniTest.expect(
+            ctx.dockerfileContents.contains("echo feature-postAttach"),
+            "baked LABEL must include feature postAttach"
+        )
+        let parsed = DevContainerMetadataLabel.parseContributions(from: [
+            DevContainerMetadataLabel.labelKey: encoded!
+        ])
+        try MiniTest.expectEqual(
+            parsed.postStartCommands,
+            [.shell("echo base-postStart"), .shell("echo feature-postStart")]
+        )
+        try MiniTest.expectEqual(
+            parsed.postAttachCommands,
+            [.shell("echo base-postAttach"), .shell("echo feature-postAttach")]
+        )
+    }),
     ("featureDockerfileGeneratorInstallSeesContainerEnv", {
         // Feature metadata containerEnv (e.g. DOTNET_ROOT) must reach install.sh.
         var meta = try FeatureMetadata.parse(
@@ -3139,7 +3633,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!mockProc.calls.contains { $0.arguments.first == "build" })
     }),
     ("derivedImageTagRecipeVersionBumpedForUserRestore", {
-        try MiniTest.expectEqual(DerivedImageTag.recipeVersion, "5")
+        try MiniTest.expectEqual(DerivedImageTag.recipeVersion, "6")
         let metaA = try FeatureMetadata.parse(
             data: try Data(contentsOf: URL(fileURLWithPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"))
                 .appendingPathComponent("devcontainer-feature.json")),
@@ -3151,25 +3645,25 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
                 metadata: metaA
             )
         ]
-        let v4 = DerivedImageTag.compute(
-            baseImage: "alpine:3.20",
-            ordered: ordered,
-            nameBase: "x",
-            recipeVersion: "4"
-        )
         let v5 = DerivedImageTag.compute(
             baseImage: "alpine:3.20",
             ordered: ordered,
             nameBase: "x",
             recipeVersion: "5"
         )
-        try MiniTest.expect(v4 != v5, "recipeVersion bump must change derived tag")
+        let v6 = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            nameBase: "x",
+            recipeVersion: "6"
+        )
+        try MiniTest.expect(v5 != v6, "recipeVersion bump must change derived tag")
         let product = DerivedImageTag.compute(
             baseImage: "alpine:3.20",
             ordered: ordered,
             nameBase: "x"
         )
-        try MiniTest.expectEqual(product, v5)
+        try MiniTest.expectEqual(product, v6)
     }),
     ("tomlMergeBuildRosettaFalsePreservesKeys", {
         let input = """
@@ -3703,6 +4197,71 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expect(result.reusedExistingImage)
         try MiniTest.expect(!mockProc.calls.contains { $0.arguments.first == "build" })
+    }),
+    ("featuresRunnerBakesUnionedBaseImageMetadataLabel", {
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-bake-union-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+        let pkgDir = (cache as NSString).appendingPathComponent("hook-pkg")
+        try FileManager.default.createDirectory(atPath: pkgDir, withIntermediateDirectories: true)
+        try """
+        {"id":"hook-feature","postStartCommand":"echo feature-postStart","postAttachCommand":"echo feature-postAttach"}
+        """.write(
+            toFile: (pkgDir as NSString).appendingPathComponent("devcontainer-feature.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "#!/bin/sh\n".write(
+            toFile: (pkgDir as NSString).appendingPathComponent("install.sh"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let mockFetch = MockFeatureFetcher(packagesByRef: ["./hook-feature": pkgDir])
+        let mockProc = MockProcessRunner()
+        let baseLabels = [
+            DevContainerMetadataLabel.labelKey:
+                #"[{"postStartCommand":"echo base-postStart"},{"postAttachCommand":"echo base-postAttach"}]"#
+        ]
+        mockProc.handlers = [
+            MockProcessRunner.imageInspectHandler(baseUser: "root", labels: baseLabels),
+            { args in
+                if args.starts(with: ["image", "list"]) {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+                }
+                if args.first == "build" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mockProc)
+        _ = try FeaturesRunner.run(
+            features: [AdmittedFeature(reference: "./hook-feature", options: [:])],
+            baseImage: "alpine:3.20",
+            deps: FeaturesRunner.Dependencies(
+                fetcher: mockFetch,
+                runtime: runtime,
+                cacheRoot: cache,
+                platform: "linux/arm64"
+            )
+        )
+        guard let buildCall = mockProc.calls.first(where: { $0.arguments.first == "build" }),
+              let fIdx = buildCall.arguments.firstIndex(of: "-f"),
+              fIdx + 1 < buildCall.arguments.count
+        else {
+            throw MiniTest.Failure(message: "expected Features build Dockerfile")
+        }
+        let contents = try String(contentsOfFile: buildCall.arguments[fIdx + 1], encoding: .utf8)
+        try MiniTest.expect(
+            contents.contains("echo base-postStart"),
+            "derived LABEL must include base-image postStart after Features build"
+        )
+        try MiniTest.expect(
+            contents.contains("echo base-postAttach"),
+            "derived LABEL must include base-image postAttach after Features build"
+        )
+        try MiniTest.expect(contents.contains("echo feature-postStart"))
+        try MiniTest.expect(contents.contains("echo feature-postAttach"))
     }),
     ("featureInstallerCpAndExecAsRoot", {
         // Helper retained; up path uses build. Still cover cp/exec mechanics.

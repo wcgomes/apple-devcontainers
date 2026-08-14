@@ -32,8 +32,6 @@ public enum ExecCommand {
         let user = (labeledUser?.isEmpty == false) ? labeledUser : nil
         let labeledWorkdir = info.labels[ContainerIdentity.labelWorkspaceFolder]
         let workdir = (labeledWorkdir?.isEmpty == false) ? labeledWorkdir : nil
-        // containerEnv not stored on labels; Features PATH was baked at create.
-        let env: [String: String] = [:]
 
         guard info.isRunning else {
             throw CLIError(
@@ -41,6 +39,24 @@ public enum ExecCommand {
                 message: "Container \(info.id) is not running (state: \(info.state))",
                 hint: "Run 'adevcontainer start --name \(info.name)' or 'adevcontainer up' to start it"
             )
+        }
+
+        // Exec is not attach — probe (unless none) and merge; never run postAttach.
+        var env: [String: String] = [:]
+        if var loaded = try ConfigReader.read(
+            labels: info.labels,
+            containerId: info.id,
+            runtime: runtime,
+            mode: .bestEffort
+        ) {
+            if let user { loaded.remoteUser = user }
+            if let workdir { loaded.workspaceFolder = workdir }
+            try LifecycleRunner.applyUserEnvProbe(
+                containerId: info.id,
+                config: &loaded,
+                runtime: runtime
+            )
+            env = loaded.containerEnv
         }
 
         let cmd = options.command.isEmpty ? ["bash"] : options.command

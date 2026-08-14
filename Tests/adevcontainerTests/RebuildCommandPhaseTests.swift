@@ -45,6 +45,10 @@ final class RebuildScenario {
     var newContainerId = "new-id-created"
     /// exec script substrings that should exit non-zero.
     var failingExecSubstrings: [String] = []
+    /// Volume-mode guest `.devcontainer/` presence for initialize staging.
+    var guestDevcontainerExists = true
+    /// `tar cf - -C <workspace> .devcontainer` stdout returned by the mock exec.
+    var guestDevcontainerTar: Data?
 
     var runtime: AppleContainerRuntime {
         AppleContainerRuntime(executablePath: "container", runner: mock)
@@ -168,6 +172,15 @@ final class RebuildScenario {
         if args.contains("cat") {
             return ProcessResult(exitCode: 0, stdout: Data(volumeConfigText.utf8), stderr: Data())
         }
+        if args.contains("test"), args.contains("-d") {
+            let path = args.last ?? ""
+            if path.hasSuffix(".devcontainer") {
+                return guestDevcontainerExists ? ok(Data()) : fail("missing")
+            }
+        }
+        if args.contains("tar"), args.contains("cf") {
+            return ProcessResult(exitCode: 0, stdout: guestDevcontainerTar ?? Data(), stderr: Data())
+        }
         if let script = args.last,
            failingExecSubstrings.contains(where: { script.contains($0) }) {
             return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("script failed".utf8))
@@ -279,6 +292,33 @@ func withRebuildFeatureOverrides(
         RebuildCommand.ensureNativeArmBuildOverride = prevEnsure
     }
     try body()
+}
+
+/// Host-side `tar cf -` of a `.devcontainer/` tree for volume-mode initialize tests.
+func makeGuestDevcontainerArchive(files: [String: String]) throws -> Data {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("adev-init-tar-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let dc = root.appendingPathComponent(".devcontainer", isDirectory: true)
+    try FileManager.default.createDirectory(at: dc, withIntermediateDirectories: true)
+    for (relative, contents) in files {
+        let url = dc.appendingPathComponent(relative)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+    }
+    let result = try FoundationProcessRunner().run(
+        executable: "/usr/bin/tar",
+        arguments: ["cf", "-", "-C", root.path, ".devcontainer"],
+        environment: nil,
+        currentDirectory: nil
+    )
+    guard result.succeeded, !result.stdout.isEmpty else {
+        throw MiniTest.Failure(message: "failed to build guest .devcontainer archive")
+    }
+    return result.stdout
 }
 
 /// Feature overrides for volume-mode scenarios: volume mode injects the git feature,
@@ -1491,6 +1531,349 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(firstExec > createIdx, "hooks run on the NEW container")
     }),
 
+    ("rebuildRunsHostInitializeBeforeCreate", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "initializeCommand": "echo init-rebuild",
+          "onCreateCommand": "echo onCreateBoom",
+          "updateContentCommand": "echo updateContentCustom",
+          "postCreateCommand": "echo postCreateCustom",
+          "postStartCommand": "echo postStartCustom"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        var events: [String] = []
+        let host = RecordingHostProcessRunner()
+        host.handler = { _ in
+            events.append("initialize")
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restoreHost = RecordingHostProcessRunner.install(host)
+        defer { restoreHost() }
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "old-id",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.failingExecSubstrings = ["onCreateBoom"]
+        s.install()
+        defer { try? BindRecoveryResume.cleanup(name: info.name) }
+        try MiniTest.expectThrows({
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(skipPull: true, jsonOutput: true),
+                runtime: s.runtime,
+                isTTY: false
+            )
+        }) { err in
+            let cli = err as? CLIError
+            try MiniTest.expect(
+                cli?.property?.contains("onCreateCommand") == true
+                    || cli?.code == CLIErrorCode.recoveryUnavailable,
+                "create-path hook failure (or bind recovery of that failure)"
+            )
+        }
+        let createIdx = s.mock.calls.firstIndex { $0.arguments.first == "create" }
+        try MiniTest.expect(createIdx != nil, "new container is created after host initialize")
+        try MiniTest.expectEqual(events.first, "initialize")
+        try MiniTest.expectEqual(host.calls.count, 1)
+        try MiniTest.expect(host.calls[0].arguments.contains("echo init-rebuild"))
+        try MiniTest.expectEqual(
+            (host.calls[0].currentDirectory as NSString?)?.standardizingPath,
+            (ws.path as NSString).standardizingPath
+        )
+        try MiniTest.expect(
+            s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.last == s.newContainerId },
+            "first create-path hook failure deletes only the new container"
+        )
+    }),
+
+    ("volumeModeRebuildWithoutHostWorkspaceStillRunsInitializeCommand", {
+        let s = RebuildScenario()
+        let host = RecordingHostProcessRunner()
+        var initCwd: String?
+        var sawDeleteOrCreateDuringInit = false
+        var stagedHasDevcontainer = false
+        var stagedHasSetup = false
+        var stagedHasScripts = false
+        host.handler = { call in
+            initCwd = call.currentDirectory
+            if s.mock.calls.contains(where: {
+                $0.arguments.first == "delete" || $0.arguments.first == "create"
+            }) {
+                sawDeleteOrCreateDuringInit = true
+            }
+            let cwd = call.currentDirectory ?? ""
+            let dc = (cwd as NSString).appendingPathComponent(".devcontainer")
+            var isDir: ObjCBool = false
+            stagedHasDevcontainer = FileManager.default.fileExists(atPath: dc, isDirectory: &isDir) && isDir.boolValue
+            stagedHasSetup = FileManager.default.fileExists(
+                atPath: (dc as NSString).appendingPathComponent("setup.sh")
+            )
+            stagedHasScripts = FileManager.default.fileExists(
+                atPath: (cwd as NSString).appendingPathComponent("scripts")
+            )
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restoreHost = RecordingHostProcessRunner.install(host)
+        defer { restoreHost() }
+        var labels = s.volumeLabels()
+        labels[ContainerIdentity.labelLocalFolder] = "volume://adev-repo-ws"
+        let info = RebuildScenario.container(id: "vol-old", labels: labels)
+        s.containers = [info]
+        s.volumes = ["adev-repo-ws"]
+        s.volumeConfigText = """
+        {
+          "image": "alpine:3.20",
+          "initializeCommand": "bash .devcontainer/setup.sh"
+        }
+        """
+        s.guestDevcontainerTar = try makeGuestDevcontainerArchive(files: [
+            "devcontainer.json": s.volumeConfigText,
+            "setup.sh": "#!/bin/sh\necho staged\n"
+        ])
+        s.install()
+        try withRebuildVolumeOverrides {
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(skipPull: true),
+                runtime: s.runtime
+            )
+        }
+        try MiniTest.expectEqual(host.calls.count, 1, "initializeCommand must run on the host")
+        try MiniTest.expect(host.calls[0].arguments.contains("bash .devcontainer/setup.sh"))
+        try MiniTest.expect(stagedHasDevcontainer, "temp cwd must contain guest .devcontainer/")
+        try MiniTest.expect(stagedHasSetup, "bash .devcontainer/setup.sh must resolve from the temp cwd")
+        try MiniTest.expect(!stagedHasScripts, "temp root is not a full guest workspace checkout")
+        try MiniTest.expect(!sawDeleteOrCreateDuringInit, "initialize runs before old delete / new create")
+        try MiniTest.expect(
+            s.mock.calls.contains { $0.arguments.first == "create" },
+            "new container is created only after initialize succeeds"
+        )
+        try MiniTest.expect(
+            s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.last == "vol-old" },
+            "old container is deleted after initialize"
+        )
+        guard let cwd = initCwd else {
+            throw MiniTest.Failure(message: "initialize cwd was not observed")
+        }
+        try MiniTest.expect(
+            !FileManager.default.fileExists(atPath: cwd),
+            "temporary workspace root is removed after the hook"
+        )
+        try MiniTest.expect(
+            (cwd as NSString).standardizingPath != (s.volumes[0] as NSString).standardizingPath
+        )
+    }),
+
+    ("volumeModeRebuildInitializeTempIsRemovedAfterFailure", {
+        let host = RecordingHostProcessRunner()
+        var initCwd: String?
+        host.handler = { call in
+            initCwd = call.currentDirectory
+            return ProcessResult(exitCode: 9, stdout: Data(), stderr: Data("init failed".utf8))
+        }
+        let restoreHost = RecordingHostProcessRunner.install(host)
+        defer { restoreHost() }
+        let s = RebuildScenario()
+        var labels = s.volumeLabels()
+        labels[ContainerIdentity.labelLocalFolder] = "volume://adev-repo-ws"
+        let info = RebuildScenario.container(id: "vol-old", labels: labels)
+        s.containers = [info]
+        s.volumes = ["adev-repo-ws"]
+        s.volumeConfigText = """
+        {
+          "image": "alpine:3.20",
+          "initializeCommand": "exit 9"
+        }
+        """
+        s.guestDevcontainerTar = try makeGuestDevcontainerArchive(files: [
+            "devcontainer.json": s.volumeConfigText
+        ])
+        s.install()
+        try MiniTest.expectThrows({
+            try withRebuildVolumeOverrides {
+                _ = try RebuildCommand.run(
+                    options: RebuildOptions(skipPull: true),
+                    runtime: s.runtime
+                )
+            }
+        }) { err in
+            let cli = err as? CLIError
+            try MiniTest.expectEqual(cli?.property, "initializeCommand")
+            try MiniTest.expectEqual(cli?.code, CLIErrorCode.lifecycleFailed)
+        }
+        try MiniTest.expectEqual(host.calls.count, 1)
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "create" }, "must not create the new container")
+        try MiniTest.expect(
+            !s.mock.calls.contains { $0.arguments.first == "delete" },
+            "old container remains"
+        )
+        guard let cwd = initCwd else {
+            throw MiniTest.Failure(message: "initialize cwd was not observed")
+        }
+        try MiniTest.expect(
+            !FileManager.default.fileExists(atPath: cwd),
+            "temporary workspace root is removed after initialize failure"
+        )
+    }),
+
+    ("missingDevcontainerDirectoryDoesNotSkipInitializeCommandOnVolumeRebuild", {
+        let host = RecordingHostProcessRunner()
+        var initCwd: String?
+        let previous = StatusPrinter.onWarning
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+        defer { StatusPrinter.onWarning = previous }
+        var stagedHasRootJson = false
+        var stagedHasDevcontainerDir = false
+        host.handler = { call in
+            initCwd = call.currentDirectory
+            let cwd = call.currentDirectory ?? ""
+            stagedHasRootJson = FileManager.default.fileExists(
+                atPath: (cwd as NSString).appendingPathComponent(".devcontainer.json")
+            )
+            stagedHasDevcontainerDir = FileManager.default.fileExists(
+                atPath: (cwd as NSString).appendingPathComponent(".devcontainer")
+            )
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restoreHost = RecordingHostProcessRunner.install(host)
+        defer { restoreHost() }
+        let s = RebuildScenario()
+        var labels = s.volumeLabels(configFile: ".devcontainer.json")
+        labels[ContainerIdentity.labelLocalFolder] = "volume://adev-repo-ws"
+        let info = RebuildScenario.container(id: "vol-old", labels: labels)
+        s.containers = [info]
+        s.volumes = ["adev-repo-ws"]
+        s.guestDevcontainerExists = false
+        s.volumeConfigText = """
+        {
+          "image": "alpine:3.20",
+          "initializeCommand": "echo init-global"
+        }
+        """
+        s.install()
+        try withRebuildVolumeOverrides {
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(skipPull: true),
+                runtime: s.runtime
+            )
+        }
+        try MiniTest.expectEqual(host.calls.count, 1, "missing .devcontainer/ must not skip initializeCommand")
+        try MiniTest.expect(host.calls[0].arguments.contains("echo init-global"))
+        try MiniTest.expect(stagedHasRootJson, "temp cwd must contain the root .devcontainer.json")
+        try MiniTest.expect(!stagedHasDevcontainerDir, "missing guest .devcontainer/ must not be invented")
+        try MiniTest.expect(
+            !warnings.contains { $0.lowercased().contains("initializecommand") && $0.lowercased().contains("host") },
+            "must not skip+warn solely because .devcontainer/ is absent"
+        )
+        guard let cwd = initCwd else {
+            throw MiniTest.Failure(message: "initialize cwd was not observed")
+        }
+        try MiniTest.expect(
+            !FileManager.default.fileExists(atPath: cwd),
+            "temporary workspace root is removed after the hook"
+        )
+    }),
+
+    ("volumeModeRebuildInitializeIsNotAFullWorkspaceCheckout", {
+        let host = RecordingHostProcessRunner()
+        var stagedHasNestedConfig = false
+        var stagedHasScripts = false
+        host.handler = { call in
+            let cwd = call.currentDirectory ?? ""
+            stagedHasNestedConfig = FileManager.default.fileExists(
+                atPath: (cwd as NSString).appendingPathComponent(".devcontainer/devcontainer.json")
+            )
+            stagedHasScripts = FileManager.default.fileExists(
+                atPath: (cwd as NSString).appendingPathComponent("scripts/bootstrap.sh")
+            )
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restoreHost = RecordingHostProcessRunner.install(host)
+        defer { restoreHost() }
+        let s = RebuildScenario()
+        var labels = s.volumeLabels()
+        labels[ContainerIdentity.labelLocalFolder] = "volume://adev-repo-ws"
+        let info = RebuildScenario.container(id: "vol-old", labels: labels)
+        s.containers = [info]
+        s.volumes = ["adev-repo-ws"]
+        s.volumeConfigText = """
+        {
+          "image": "alpine:3.20",
+          "initializeCommand": "echo only-devcontainer"
+        }
+        """
+        s.guestDevcontainerTar = try makeGuestDevcontainerArchive(files: [
+            "devcontainer.json": s.volumeConfigText
+        ])
+        s.install()
+        try withRebuildVolumeOverrides {
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(skipPull: true),
+                runtime: s.runtime
+            )
+        }
+        try MiniTest.expectEqual(host.calls.count, 1)
+        try MiniTest.expect(stagedHasNestedConfig, "temp root contains guest .devcontainer/")
+        try MiniTest.expect(
+            !stagedHasScripts,
+            "success must not depend on other guest paths such as ./scripts/"
+        )
+    }),
+
+    ("volumeModeRebuildWithRetainedHostCheckoutUsesThatPath", {
+        let checkout = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "initializeCommand": "echo init-retained"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: checkout) }
+        let host = RecordingHostProcessRunner()
+        host.handler = { _ in
+            ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restoreHost = RecordingHostProcessRunner.install(host)
+        defer { restoreHost() }
+        let s = RebuildScenario()
+        var labels = s.volumeLabels()
+        labels[ContainerIdentity.labelLocalFolder] = checkout.path
+        let info = RebuildScenario.container(id: "vol-old", labels: labels)
+        s.containers = [info]
+        s.volumes = ["adev-repo-ws"]
+        s.volumeConfigText = """
+        {
+          "image": "alpine:3.20",
+          "initializeCommand": "echo init-retained"
+        }
+        """
+        s.install()
+        try withRebuildVolumeOverrides {
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(skipPull: true),
+                runtime: s.runtime
+            )
+        }
+        try MiniTest.expectEqual(host.calls.count, 1)
+        try MiniTest.expectEqual(
+            (host.calls[0].currentDirectory as NSString?)?.standardizingPath,
+            (checkout.path as NSString).standardizingPath
+        )
+        try MiniTest.expect(
+            !s.mock.calls.contains { $0.arguments.contains("tar") && $0.arguments.contains("cf") },
+            "must not substitute a temporary workspace root when a retained checkout exists"
+        )
+        try MiniTest.expect(
+            FileManager.default.fileExists(atPath: checkout.path),
+            "retained host checkout is durable and must not be removed"
+        )
+    }),
+
     ("rebuildHookFailureDeletesNewContainer", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
         {
@@ -1572,6 +1955,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         )
         s.mock.throwingHandler = { args in
             guard args.first == "exec" else { return nil }
+            if args.contains(LifecycleRunner.userEnvProbeScript) { return nil }
             throw expectedError
         }
         var foundNewContainer = false
@@ -1635,6 +2019,9 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         mock.handlers = [
             { args in
                 if args.first == "exec" {
+                    if args.contains(LifecycleRunner.userEnvProbeScript) {
+                        return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                    }
                     return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("boom".utf8))
                 }
                 return nil
@@ -1861,6 +2248,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
         {
           "image": "alpine:3.20",
+          "postAttachCommand": "echo postAttachCustom",
           "customizations": {
             "vscode": {
               "settings": { "editor.fontSize": 14 },
@@ -1896,8 +2284,8 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
             guest.writes.contains { $0.contains("settings.json") },
             "settings still applied without --vscode"
         )
-        let postAttachIdx = s.mock.calls.firstIndex { $0.arguments.last?.contains("postAttach") == true }
-        try MiniTest.expect(postAttachIdx == nil, "postAttach skipped without --vscode")
+        let postAttachIdx = s.mock.calls.firstIndex { $0.arguments.last?.contains("postAttachCustom") == true }
+        try MiniTest.expect(postAttachIdx != nil, "CLI-attach rebuild runs postAttach without --vscode")
     }),
 
     ("rebuildVscodeExtensionsThenOpenThenPostAttach", {
@@ -1948,7 +2336,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(sequence.firstIndex(of: "extensions")! < sequence.firstIndex(of: "open")!)
     }),
 
-    ("rebuildVscodeOpenSoftFailSucceedsNoPostAttach", {
+    ("rebuildVscodeOpenSoftFailStillRunsPostAttach", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
         {
           "image": "alpine:3.20",
@@ -1972,7 +2360,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         _ = try RebuildCommand.run(options: RebuildOptions(openVSCode: true), runtime: s.runtime)
         try MiniTest.expectEqual(launcher.calls.count, 0, "no launch without code CLI")
         let postAttachIdx = s.mock.calls.firstIndex { $0.arguments.last?.contains("postAttachCustom") == true }
-        try MiniTest.expect(postAttachIdx == nil, "postAttach skipped when open did not succeed")
+        try MiniTest.expect(postAttachIdx != nil, "open soft-fail must not skip CLI-attach postAttach")
     }),
 
     ("rebuildPostAttachFailureKeepsContainer", {

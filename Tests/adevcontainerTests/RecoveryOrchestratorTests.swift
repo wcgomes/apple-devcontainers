@@ -1203,6 +1203,9 @@ nonisolated(unsafe) let recoveryOrchestratorTests: [(String, () throws -> Void)]
         mock.handlers = [
             { args in
                 if args.first == "exec" {
+                    if args.contains(LifecycleRunner.userEnvProbeScript) {
+                        return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                    }
                     execCount += 1
                     return ProcessResult(exitCode: 42, stdout: Data(), stderr: Data())
                 }
