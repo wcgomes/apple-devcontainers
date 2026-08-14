@@ -39,8 +39,8 @@ Detail: [architecture.md](../architecture.md), [cli-runtime-boundary.md](../conv
 
 ### Real-runtime validation constraints
 
-- Volume-mode clone population runs inside the container. A host-only `file://` URL is not reachable from an Apple container; real-runtime fixtures need a container-reachable endpoint, such as a host `git daemon` over `git://`. This is a runtime reachability constraint, not a product clone failure. Live recovery E2E shares this family: when guest DNS / host `file://` cannot populate via live `CloneCommand`, fixtures bootstrap clone-origin labels and volumes instead.
-- Live non-TTY recovery E2E is opt-in via `ADEVCONTAINER_RECOVERY_E2E=1` (default suite skips). TTY editor path is manual-only; `ADEVCONTAINER_RECOVERY_E2E_TTY=1` only surfaces skip guidance.
+- Volume-mode clone population runs inside the container. A host-only `file://` URL is not reachable from an Apple container; real-runtime fixtures need a container-reachable endpoint, such as a host `git daemon` over `git://`. This is a runtime reachability constraint, not a product clone failure. Rebuild recovery E2E shares this family: when guest DNS / host `file://` cannot populate via live `CloneCommand`, fixtures bootstrap clone-origin labels and volumes instead.
+- Recovery E2E gate: `ADEVCONTAINER_RECOVERY_E2E=1` (non-TTY) / `ADEVCONTAINER_RECOVERY_E2E_TTY=1` (TTY). Default suite skips. Rebuild non-TTY live exists when gated. Automated TTY recovery E2E is absent (TTY env only surfaces skip guidance). Bring-up gated case `recoveryE2E_bringUpCommands_gated` still skip-cascades and then always skips — it does not execute live bring-up commands.
 - Feature material for rebuild/recovery git inject on live rebuild must use a durable host path (e.g. `~/Library/Caches`). Apple `container build` effectively drops or breaks contexts under `/var/folders` temp.
 - `--skip-pull` suppresses adevcontainer's explicit image-pull step only. Apple `container` may still auto-fetch a missing image during `create`, so the flag does not guarantee fail-if-absent or runtime-level no-fetch behavior.
 
@@ -90,7 +90,23 @@ Host stamped `devcontainer.json` editor UX only — **no** Alpine helper, **no**
 
 - Bind named retry after non-TTY may use host-side **BindRecoveryResume** stamps (not container labels) when the container is already gone — labels are unavailable once the failed container is deleted.
 
-Contract + README/CLI help landed (archive `20260810-rebuild`). Remaining gaps only: automated TTY E2E absent; non-TTY live recovery E2E gated `ADEVCONTAINER_RECOVERY_E2E=1`.
+Contract + README/CLI help landed (archive `20260810-rebuild`). Rebuild remaining gaps only: automated TTY E2E absent; non-TTY live rebuild recovery E2E gated `ADEVCONTAINER_RECOVERY_E2E=1`. Bring-up recovery is a separate path — see [below](#bring-up-recovery-up--clone--start).
+
+### Bring-up recovery (`up` / `clone` / `start`)
+
+Not rebuild-only. Shared primitive `BringUpRecovery`. Rebuild post-delete recovery ([above](#failed-rebuild-recovery-mode-split)) is unchanged. Contract: [`specs/clone.md`](../../specs/clone.md) + [`specs/managed-lifecycle.md`](../../specs/managed-lifecycle.md); archive [`20260814-bring-up-recovery`](../../specs/changes/archive/20260814-bring-up-recovery/).
+
+**Offer** when bring-up fails and an editable `devcontainer.json` exists. Triggers: config parse/resolve on an existing file, create, start, workspace-ownership, clone populate, create-path hooks. **No recovery:** config not found; clone git fetch fails before any config exists. postAttach/settings/open still never enter recovery.
+
+**TTY / non-TTY:** TTY without `--json`: structured error, then `Open the recovery editor now? [Y/n]` (default **Y**). Affirmative → editor + retry from scratch. Decline/EOF → original error. Non-TTY/`--json` never prompt or open an editor; fail with the original error plus an edit/retry hint.
+
+| Command | Recovery |
+|---------|----------|
+| `up` | Edit the host config (bind resolve). Retry re-resolves from the host and re-runs the create path. Deletes leftover containers including after a later retry or `name` change. No helper, no retained checkout. |
+| `clone` | Retain a product-managed config-only checkout (`~/Library/Application Support/adevcontainer/clone-recovery`, marker `.adevcontainer-retained-checkout`). TTY edits the retained config and retries without re-fetch. Non-TTY prints exact `clone --resume <config-dir>`. Resume/remove: managed root + marker only; never delete an external path. Successful TTY retry/`--resume` overlays the edited `devcontainer.json` into the guest workspace **after populate** (replaces the git-populated original). Overlay is clone-recovery only; none when there is no editable config. Rebuild helper write-back is unchanged. |
+| `start` | Delegates to `rebuild --name` (ports/labels are baked at create). Does **not** re-run start, open an editor, or write config. |
+
+Same E2E gate as rebuild. Do not treat the bring-up gated case as live command execution — `recoveryE2E_bringUpCommands_gated` is still a skip stub.
 
 ### list/inspect JSON (tested shape: 1.2.x)
 

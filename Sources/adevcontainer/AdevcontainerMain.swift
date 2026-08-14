@@ -94,7 +94,8 @@ struct AdevcontainerMain {
                 gitURL: parsed.passthrough[0],
                 skipPull: parsed.flags.contains("skip-pull"),
                 openVSCode: parsed.flags.contains("vscode"),
-                jsonOutput: parsed.flags.contains("json")
+                jsonOutput: parsed.flags.contains("json"),
+                resumeConfigDir: parsed.resume
             )
             let result = try CloneCommand.run(options: opts, runtime: runtime)
             if opts.jsonOutput {
@@ -120,7 +121,8 @@ struct AdevcontainerMain {
             try StartCommand.run(
                 options: StartOptions(
                     name: parsed.name,
-                    openVSCode: parsed.flags.contains("vscode")
+                    openVSCode: parsed.flags.contains("vscode"),
+                    jsonOutput: parsed.flags.contains("json")
                 ),
                 runtime: runtime
             )

@@ -1,7 +1,7 @@
 # Apple Dev Container CLI (adevcontainer)
 
 [![CI](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml/badge.svg)](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-697%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
+[![tests](https://img.shields.io/badge/tests-727%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Native Swift CLI that reads `devcontainer.json` and runs development environments on Apple [`container`](https://github.com/apple/container).
@@ -71,6 +71,9 @@ adevcontainer exec --name <name> -it
 ```
 
 The cloned source remains in a named volume. You can work, commit, and push from inside the container.
+If bring-up fails after the config-only fetch, the CLI retains that checkout for recovery. On a
+TTY it offers to open and retry the config; in automation, edit the printed path and run the exact
+`adevcontainer clone <git-url> --resume <config-dir>` command.
 
 ## Commands
 
@@ -78,15 +81,27 @@ The cloned source remains in a named volume. You can work, commit, and push from
 | --- | --- |
 | `adevcontainer doctor` | Check Apple `container` readiness |
 | `adevcontainer up [-w <path>] [--vscode]` | Create or start a dev container from a local folder |
-| `adevcontainer clone <git-url> [--vscode]` | Clone a repository into a named volume and start its dev container |
+| `adevcontainer clone <git-url> [--vscode] [--resume <config-dir>]` | Clone a repository into a named volume and start its dev container |
 | `adevcontainer exec [-it] [--name <name>] [--] [cmd…]` | Open a shell or run a command in a running managed container |
 | `adevcontainer list [--json]` | List managed dev containers |
-| `adevcontainer start [--vscode] \| stop \| inspect [--name <name>]` | Manage a container by name or with the interactive picker |
+| `adevcontainer start [--name <name>] [--vscode] [--json] \| stop \| inspect [--name <name>]` | Manage a container by name or with the interactive picker |
 | `adevcontainer delete [--name <name>]` | Remove a container, keeping its managed volumes |
 | `adevcontainer prune [--name <name>]` | Remove a container, its managed volumes, and the image |
 | `adevcontainer rebuild [--name <name>] [--vscode]` | Rebuild a managed container from its current configuration |
 | `adevcontainer help [<command>]` | Show main usage or per-command help |
 | `adevcontainer version [--version]` | Print the CLI version |
+
+## Bring-up recovery
+
+When `up` or `clone` cannot bring up a container after an editable `devcontainer.json` exists,
+interactive TTY mode prints the structured failure, asks `Open the recovery editor now? [Y/n]`,
+and retries the complete create path after a valid edit. Declining or EOF returns the original
+failure. Non-TTY and `--json` never prompt or edit; `up` prints a host-config retry hint, while
+`clone` retains its config checkout and prints an exact `clone --resume` command.
+
+If `start` cannot start a selected managed container, TTY recovery asks the same question and
+delegates to `rebuild --name <name>`; it never re-runs `start` or opens an editor. Non-TTY,
+`--json`, decline, and EOF return the original start failure with the rebuild hint.
 
 ## Visual Studio Code integration
 

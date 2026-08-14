@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Volume-mode workspaces via `adevcontainer clone`: host git prerequisite, config-only fetch, volume-mode identity and labels, in-container full clone populate (SSH/HTTPS auth), hooks and temp cleanup, success presentation (human digest default; JSON with `--json`), git Feature auto-inject, and host-resolved git author identity. Does not replace bind-mode `up`.
+Volume-mode workspaces via `adevcontainer clone`: host git prerequisite, config-only fetch, volume-mode identity and labels, in-container full clone populate (SSH/HTTPS auth), hooks and temp cleanup, success presentation (human digest default; JSON with `--json`), git Feature auto-inject, host-resolved git author identity, and eligible bring-up recovery (retain checkout, `--resume`, persist edited config after populate). Does not replace bind-mode `up`.
 
 ## Requirements
 
@@ -469,4 +469,62 @@ This requirement does **not** change `up` bind-path identity behavior.
 - Given missing name or email, stdin is a TTY
 - When the user supplies both fields
 - Then Features/create run only after collection and local config uses the entered values
+
+---
+
+### Requirement: clone volume recovery (retained checkout)
+
+On an eligible `clone` failure, `clone` MUST retain the config-only checkout in a stable non-temporary host location before it would otherwise be removed, so it can be edited and reused by a retry. In a TTY, recovery MUST prompt (default Y) and on affirmative open the editor on the retained config and retry by re-resolving from the retained checkout and re-running create → start → ownership → populate → hooks (no re-fetch of git). Non-TTY/`--json` MUST retain the checkout, print structured details plus an exact edit and retry command, and never prompt or edit. A later non-TTY resume MUST be possible via `clone --resume <config-dir>` reusing the retained checkout.
+
+#### Scenario: clone recovery retains and reuses the checkout
+
+- Given `clone` fetched a config-only checkout and then failed at create/start/populate/hooks
+- When the failure is eligible
+- Then the checkout is retained in a stable host location; in a TTY an affirmed prompt edits the retained config and retries without re-fetching git; in non-TTY the checkout is retained with an exact `clone --resume <config-dir>` retry command
+
+See also: [managed-lifecycle.md](managed-lifecycle.md) **Bring-up recovery offer on up and clone** and **Retry re-executes from scratch**.
+
+---
+
+### Requirement: Clone recovery persists edited config into workspace
+
+After a successful `clone` recovery retry — an affirmed TTY edit-and-retry, or a later `clone --resume` of a retained checkout — the in-container workspace `devcontainer.json` MUST be the edited bytes, not the original file git-populated from the remote. That replacement MUST take effect after in-container populate completes, so a later in-container open MUST NOT require re-applying the recovery edit. Bind `up` recovery MUST remain host-edit only and MUST NOT perform an extra copy of the edited config into the container. `start` recovery MUST continue to delegate to `rebuild` and MUST NOT add a write path for an edited config. When there is no editable `devcontainer.json`, the CLI MUST NOT offer recovery and MUST NOT persist or overlay a config into the workspace.
+
+#### Scenario: successful TTY clone recovery leaves edited workspace config
+
+- Given `clone` failed after an editable config existed, the user affirmed the TTY recovery prompt, and the retained `devcontainer.json` was edited to valid bytes
+- When the recovery retry succeeds through in-container populate
+- Then the container workspace `devcontainer.json` is those edited bytes, not the original git-populated file
+
+#### Scenario: successful clone --resume leaves edited workspace config
+
+- Given a retained checkout whose `devcontainer.json` already holds the recovery edit
+- When `clone --resume <config-dir>` succeeds through in-container populate
+- Then the container workspace `devcontainer.json` is those edited bytes, not the original git-populated file
+
+#### Scenario: later in-container open does not require re-fixing
+
+- Given a successful `clone` recovery retry (TTY edit or `--resume`) has completed, including populate
+- When the workspace is opened again in that container
+- Then `devcontainer.json` is still the edited bytes and the user does not need to re-apply the recovery edit
+
+#### Scenario: bind up recovery stays host-edit only
+
+- Given an eligible `up` failure whose config path is the host checkout
+- When the user affirms recovery, edits the host `devcontainer.json`, and retry succeeds
+- Then the CLI does not perform an extra copy of the edited config into the container; the host file remains the workspace file
+
+#### Scenario: start recovery adds no write path
+
+- Given a selected managed container and `start` fails
+- When recovery is offered
+- Then the CLI still delegates to `rebuild` for that container and does not write an edited `devcontainer.json` as part of `start`
+
+#### Scenario: no overlay when there is no editable config
+
+- Given `clone` fails during git fetch before a config exists, or `up` finds no `devcontainer.json`
+- When the command exits
+- Then the CLI fails with the normal structured error, does not offer recovery, and does not persist or overlay a config into the workspace
+
+See also: [managed-lifecycle.md](managed-lifecycle.md) **bind up recovery (host config editor)** and **start failure delegates to rebuild**.
 

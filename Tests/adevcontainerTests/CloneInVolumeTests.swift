@@ -777,6 +777,18 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(opts.skipPull, true)
         try MiniTest.expectEqual(opts.openVSCode, true)
     }),
+    ("cloneResumeFlagParsesAndIsCloneOnly", {
+        let parsed = try CommandSurface.parseArgs(["https://example.com/r.git", "--resume", "/tmp/retained"])
+        try MiniTest.expectEqual(parsed.resume, "/tmp/retained")
+        try MiniTest.expectEqual(parsed.passthrough, ["https://example.com/r.git"])
+        try CommandSurface.enforceWorkspaceGate(subcommand: "clone", parsed: parsed)
+        try MiniTest.expectThrows({
+            try CommandSurface.enforceWorkspaceGate(subcommand: "up", parsed: parsed)
+        }) { error in
+            try MiniTest.expectEqual((error as? CLIError)?.code, CLIErrorCode.usage)
+            try MiniTest.expectEqual((error as? CLIError)?.property, "--resume")
+        }
+    }),
     ("cloneHelpAndUsageListJson", {
         let usage = CommandSurface.usageText()
         try MiniTest.expect(usage.contains("--json"), "usage mentions --json")
@@ -789,6 +801,7 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         guard let help else { return }
         try MiniTest.expect(help.contains("[--json]"), "clone help lists --json")
         try MiniTest.expect(help.contains("machine-readable"), "clone help describes JSON mode")
+        try MiniTest.expect(help.contains("--resume"), "clone help describes resume")
     }),
     ("cloneMissingGitNoContainer", {
         let git = MockGitClient()
