@@ -119,6 +119,19 @@ enum IntegrationSupport {
         }
     }
 
+    /// Local inspect first (no network). Missing image → pull; pull failure → skip.
+    /// `UpCommand` still runs with `skipPull: true` so `up` does not pull again.
+    static func ensureTestImageOrSkip(runtime: AppleContainerRuntime, image: String) throws {
+        if (try? runtime.inspectImage(ref: image)) != nil {
+            return
+        }
+        do {
+            try runtime.pullImage(image)
+        } catch {
+            try MiniTest.skip("test image pull failed: \(image)")
+        }
+    }
+
     static func runFixtureE2E(
         fixtureFile: String,
         ensureKube: Bool = false,
@@ -140,6 +153,12 @@ enum IntegrationSupport {
 
         if let prepareWorkspace {
             try prepareWorkspace(ws)
+        }
+
+        // Remapped fixture image (`ADEVCONTAINER_TEST_IMAGE` already applied). Cached → no pull.
+        if let image = (config["image"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !image.isEmpty {
+            try ensureTestImageOrSkip(runtime: runtime, image: image)
         }
 
         let up = try UpCommand.run(
@@ -177,6 +196,71 @@ enum IntegrationSupport {
 }
 
 nonisolated(unsafe) let integrationTests: [(String, () throws -> Void)] = [
+    ("fixtureE2E_ensureImage_doesNotPullWhenCached", {
+        let mock = MockProcessRunner()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let image = "mcr.microsoft.com/devcontainers/base:ubuntu"
+        try IntegrationSupport.ensureTestImageOrSkip(runtime: runtime, image: image)
+        let inspect = mock.calls.first { $0.arguments.starts(with: ["image", "inspect"]) }
+        try MiniTest.expect(inspect != nil, "expected local image inspect")
+        try MiniTest.expectEqual(inspect!.arguments.last, image)
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.contains("pull") },
+            "cached image must not hit the network"
+        )
+    }),
+    ("fixtureE2E_ensureImage_skipsWhenPullFails", {
+        let image = "mcr.example/missing:tag"
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["image", "inspect"]) {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("not found".utf8))
+                }
+                if args.contains("pull") {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("network down".utf8))
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        do {
+            try IntegrationSupport.ensureTestImageOrSkip(runtime: runtime, image: image)
+            throw MiniTest.Failure(message: "expected skip when pull fails")
+        } catch let skip as MiniTest.Skip {
+            try MiniTest.expect(
+                skip.message.contains(image),
+                "skip message should name the image"
+            )
+        }
+        let pull = mock.calls.last { $0.arguments.contains("pull") }
+        try MiniTest.expect(pull != nil, "missing image must attempt a pull before skip")
+        try MiniTest.expectEqual(pull!.arguments.last, image)
+    }),
+    ("fixtureE2E_ensureImage_pullsWhenMissing", {
+        let image = "mcr.example/uncached:tag"
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["image", "inspect"]) {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("not found".utf8))
+                }
+                if args.contains("pull") {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        do {
+            try IntegrationSupport.ensureTestImageOrSkip(runtime: runtime, image: image)
+        } catch is MiniTest.Skip {
+            throw MiniTest.Failure(message: "expected return when pull succeeds")
+        }
+        let pull = mock.calls.last { $0.arguments.contains("pull") }
+        try MiniTest.expect(pull != nil, "missing image must pull")
+        try MiniTest.expectEqual(pull!.arguments.last, image)
+    }),
     ("fixtureE2E_smoke", {
         // smoke.json = base:ubuntu, no local users → metadata remoteUser=vscode.
         try IntegrationSupport.runFixtureE2E(fixtureFile: "smoke.json", extra: { ws, runtime, _ in
