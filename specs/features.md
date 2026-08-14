@@ -380,7 +380,7 @@ After features are resolved (and before create for flag contributions; lifecycle
 | `capAdd` | Each capability mapped via the existing **cap-add allowlist path**; disallowed names fail closed with structured error |
 | `containerEnv` | Merged into effective **runtime** create/exec env; **config `containerEnv` wins** on key conflict. Install-time availability of feature `containerEnv` is governed solely by **Derived image build** and MUST NOT reverse or weaken config-wins at runtime |
 | mounts | Bind and volume only; sources normalized with **MountNormalizer** for file→dir promotion; incompatible mount types fail structured |
-| lifecycle hooks contributed by features | Appended/merged into the create-path exec order after start (installs already in derived image); same string/argv/object-map forms and failure/delete-on-fail policy as config hooks for create-path failures |
+| lifecycle hooks contributed by features | Appended/merged into the create-path exec order after start (installs already in derived image); same string/argv/object-map forms and failure/delete-on-fail policy as config hooks for create-path failures. Feature `postStart` (and feature `postAttach` when postAttach runs) MUST remelt on resume per **Feature postStart remelt on resume** and [vscode.md](vscode.md) **postAttachCommand policy (CLI-only)**. Feature onCreate / updateContent / postCreate MUST NOT run on resume. |
 
 Privileged / `securityOpt` contributions are warn-stripped and not applied to create (see warn-skip requirement); other contributions still merge.
 
@@ -406,6 +406,39 @@ Privileged / `securityOpt` contributions are warn-stripped and not applied to cr
 - When `up` succeeds through create
 - Then the contributed hook runs via runtime exec after start (features already installed in the derived image), and non-zero exit fails `up` under create-path policy
 
+#### Scenario: Feature postStart remelts on start
+- Given feature metadata contributing `postStart` and a stopped managed container from a prior successful create
+- When the user runs `adevcontainer start` or `up` start-stopped
+- Then the contributed postStart runs via runtime exec on this start
+
+#### Scenario: start with unreadable config still runs metadata postStart
+- Given a stopped managed container whose stamped config cannot be read and whose image `devcontainer.metadata` contributes `postStart`
+- When the user runs `adevcontainer start --name <that-name>`
+- Then after the container starts, feature-only postStart runs via container exec (`failKeepContainer`)
+- And onCreate / updateContent / postCreate do not run
+- And vscode customizations are not applied
+
+#### Scenario: start with unreadable config still runs metadata postAttach on CLI attach
+- Given a stopped managed container whose stamped config cannot be read and whose image `devcontainer.metadata` contributes `postAttach`
+- When the user runs a real `adevcontainer start` (CLI-attach gate)
+- Then feature-only postAttach runs via container exec (`failKeepContainer`)
+
+#### Scenario: derived-image LABEL includes base-image postStart/postAttach after Features build
+- Given a base image whose `devcontainer.metadata` contributes `postStart` / `postAttach` and a feature that also contributes those hooks
+- When Features builds a derived image
+- Then the derived `LABEL devcontainer.metadata` includes both the base-image and feature hooks
+
+#### Scenario: no-features up runs image-metadata postCreate/postStart
+- Given a config with empty `features` and a base image whose `devcontainer.metadata` contributes `onCreate` / `updateContent` / `postCreate` / `postStart` / `postAttach`
+- When the user runs a fresh `up`
+- Then those image-metadata hooks run via container exec on the create path (and postAttach as CLI attach)
+- And Features `container build` does not run
+
+#### Scenario: up finish still has base-image postAttach after remelt
+- Given Features apply already unioned base-image `postAttach` into the create config
+- When `up` finish remelts feature postAttach from image metadata that is features-only
+- Then the base-image postAttach still runs (remelt unions, does not replace-away)
+
 #### Scenario: devcontainer.metadata label merge when present
 - Given a base image with a parseable `devcontainer.metadata` label
 - When features/metadata merge runs
@@ -415,6 +448,31 @@ Privileged / `securityOpt` contributions are warn-stripped and not applied to cr
 - Given no `devcontainer.metadata` label on the image
 - When `up` runs with features
 - Then absence alone does not fail `up`
+
+### Requirement: Feature postStart remelt on resume
+
+On every path that MUST run `postStartCommand` after a successful start of a previously stopped container (`up` start-stopped and bare `adevcontainer start` in bind and volume modes), the CLI MUST remelt feature-contributed `postStart` commands for that invocation. The CLI MUST run the config `postStartCommand` when present, then feature-contributed postStart commands, in the same merge/order spirit as create-path feature lifecycle hooks.
+
+Resume MUST NOT drop feature-contributed postStart solely because the container was created earlier. Feature onCreate / updateContent / postCreate MUST remain create-path only. A non-zero remelted feature postStart on resume MUST fail the command and MUST NOT delete the container.
+
+When `start` recovery delegates to `rebuild`, the rebuild create-path already includes config and feature postStart. That recovery MUST NOT run an additional postStart after rebuild returns.
+
+#### Scenario: volume-mode start remelts feature postStart
+- Given a stopped volume-mode managed container created with a feature that contributed `postStart` (and optional config `postStartCommand`)
+- When the user runs `adevcontainer start --name <that-name>`
+- Then after the container starts, config postStart (when present) then the feature postStart run via container exec
+- And the command succeeds if those commands exit 0
+
+#### Scenario: up start-stopped remelts feature postStart
+- Given a matching stopped bind-mode container and remeltable feature postStart
+- When the user runs `adevcontainer up`
+- Then feature postStart runs on this start (not only the original create)
+- And onCreate / updateContent / postCreate do not run
+
+#### Scenario: start recovery via rebuild does not double-run postStart
+- Given `start` fails and recovery delegates to `rebuild` for that container
+- When rebuild’s create-path runs `postStartCommand` (config and features) on the new container
+- Then the user-visible start-recovery path does not run `postStartCommand` a second time after rebuild returns
 
 ---
 

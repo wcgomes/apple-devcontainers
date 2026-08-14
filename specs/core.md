@@ -115,8 +115,11 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - `portsAttributes` — retained and surfaced as metadata only (no IDE auto-forward semantics promised)
 
 **Lifecycle**
-- `postCreateCommand` — string, argv array, or object map (name → string|argv; map runs sequentially sorted by name); executed via runtime exec on fresh create after `updateContentCommand`; non-zero exit MUST fail `up`
-- `onCreateCommand`, `updateContentCommand`, `postStartCommand`, `postAttachCommand` — same command forms; policy per lifecycle hook surface and postAttachCommand policy requirements
+- `initializeCommand` — string, argv array, or object map; host command per [lifecycle-hooks.md](lifecycle-hooks.md) **initializeCommand host execution**
+- `onCreateCommand`, `updateContentCommand`, `postCreateCommand`, `postStartCommand`, `postAttachCommand` — string, argv array, or object map; object-map entries run concurrently; policy per **Lifecycle hook surface** and [vscode.md](vscode.md) **postAttachCommand policy (CLI-only)**
+- `waitFor` — enum; default `updateContentCommand`; policy per **waitFor readiness**
+- `userEnvProbe` — enum; default `loginInteractiveShell`; policy per **userEnvProbe merge**
+- `shutdownAction` — enum; default `stopContainer` for this image/Dockerfile product; `stopCompose` fails closed; policy per **shutdownAction admission**
 
 **runArgs + hostRequirements**
 - `runArgs` — allowlisted subset only; mapped on create
@@ -161,9 +164,14 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - Then `up` fails with a structured error including the exit code and MUST NOT report overall success
 
 #### Scenario: Lifecycle / runArgs / hostRequirements property set does not hard-error as unknown
-- Given a config that includes only core supported keys plus lifecycle hooks, allowlisted `runArgs`, and `hostRequirements`
+- Given a config that includes only core supported keys plus the lifecycle properties in this requirement, allowlisted `runArgs`, and `hostRequirements`
 - When config is validated
 - Then validation does not fail with unsupported-property for those keys
+
+#### Scenario: initializeCommand waitFor userEnvProbe shutdownAction admit
+- Given a minimal image config that also sets valid `initializeCommand`, `waitFor`, `userEnvProbe`, and `shutdownAction` `stopContainer`
+- When config is resolved
+- Then resolve succeeds and those fields are available to lifecycle paths
 
 #### Scenario: features is on the supported surface
 - Given a config that includes only previously supported keys plus an OCI `features` map without warn-skipped docker-* markers
@@ -536,16 +544,16 @@ On paths that create a new container (fresh create or `rebuild`):
 
 | Path | Lifecycle |
 |------|-----------|
-| Fresh create (missing) | onCreate → updateContent → postCreate → postStart; delete container if any of these fail |
-| `rebuild <name>` (forced rebuild after container-only delete of the old container) | full fresh create-path onCreate → updateContent → postCreate → postStart on the **new** container; delete-on-fail applies to the **new** container; the old container was already removed (status warning on post-delete failure); a clone-origin volume failure in create/start/create-path hooks additionally offers the volume recovery session; a bind-mode failure in the same set offers the bind host-editor recovery session; non-clone volume targets retain warning-only behavior |
-| Reuse running (matching identity) | no hooks |
-| Start stopped | postStart only; on failure fail `up`, do not delete container |
-| Any path with postAttach present and `--vscode` absent | skip execute; one status line (no attach hook) |
-| Any path with postAttach present, `--vscode` set, open soft-failed/skipped | skip execute; SHOULD status that attach open did not succeed |
-| Any path with postAttach present, `--vscode` set, open success | after open: run config then feature postAttach via exec; on failure fail command, keep container |
+| Fresh create (missing) | Host initialize (when a host workspace exists) → onCreate → updateContent → postCreate → postStart; delete container if any create-path hook (onCreate / updateContent / postCreate / first postStart) fails; Ready / open / postAttach wait for `waitFor` (default updateContent) |
+| `rebuild <name>` (forced rebuild after container-only delete of the old container) | Same fresh create-path on the **new** container, including host initialize (volume-mode / clone-origin with no usable host workspace: initialize still runs on a temporary workspace root that contains the guest config directory/files; temp removed after the hook); delete-on-fail applies to the **new** container; the old container was already removed (status warning on post-delete failure); recovery offer rules unchanged |
+| Reuse running (matching identity) | No onCreate / updateContent / postCreate / postStart; host initialize MUST run when a host workspace exists; postAttach runs as CLI attach |
+| Start stopped (`up` or bare `start`) | Host initialize when a host workspace exists; postStart (config then remelted feature postStart); on failure fail the command, do not delete; Ready / open / postAttach follow [lifecycle-hooks.md](lifecycle-hooks.md) **waitFor readiness** (this invocation’s postStart only when `waitFor` is `postStartCommand`); postAttach runs as CLI attach |
+| Already-running `start` | No initialize / postStart; postAttach only after successful `--vscode` open |
+| CLI-attach path (`up` / `clone` / `rebuild` / real `start`) with postAttach present | After waitFor: run config then feature postAttach; `--vscode` open soft-fail MUST NOT skip; on failure fail command, keep container |
+| Already-running `start` with postAttach present and no successful `--vscode` open | skip execute; one status line |
 | Any path with postAttach absent | no postAttach skip line; no postAttach exec |
 
-postAttach gating applies on `up`, `start`, `clone`, and `rebuild` after the command’s own prior lifecycle steps succeed and (when `--vscode`) after the open attempt outcome is known. postAttach is **not** part of create-path delete-on-fail. Settings/open soft-fail and postAttach failure MUST NOT enter either recovery session.
+postAttach is **not** part of create-path delete-on-fail. Settings/open soft-fail and postAttach failure MUST NOT enter either recovery session. Customizations apply remains **not** part of create-path delete-on-fail, **not** folded into postAttach, and **not** run on `start`.
 
 | Path | Vscode customizations apply |
 |------|-----------------------------|
@@ -558,7 +566,7 @@ postAttach gating applies on `up`, `start`, `clone`, and `rebuild` after the com
 
 postAttach matrix rows and gating text above remain in force. Customizations apply is **not** part of create-path delete-on-fail and **not** folded into postAttach execution.
 
-Create-path cleanup: if any create-path hook fails before `up` returns success, the CLI MUST delete the container before failing (extend core postCreate delete-on-fail to onCreate, updateContent, postCreate, and first-create postStart). On `rebuild`, delete-on-fail applies to the **new** container only (workspace/config volumes preserved); eligible hard post-delete failures then offer mode-split recovery.
+Create-path cleanup is unchanged: if any create-path hook fails before the command returns success, the CLI MUST delete the new/created container (extend to onCreate, updateContent, postCreate, and first-create postStart). On `rebuild`, delete-on-fail applies to the **new** container only (workspace/config volumes preserved); eligible hard post-delete failures then offer mode-split recovery.
 
 #### Scenario: Create then reuse
 - Given no existing container for the workspace
@@ -568,7 +576,7 @@ Create-path cleanup: if any create-path hook fails before `up` returns success, 
 #### Scenario: Start stopped container
 - Given a container previously created by `up` that is stopped
 - When the user runs `up`
-- Then the container is started and success JSON is emitted
+- Then the container is started, resume hooks run, and success JSON is emitted
 
 #### Scenario: Up JSON shape
 - Given a successful `up`
@@ -583,7 +591,18 @@ Create-path cleanup: if any create-path hook fails before `up` returns success, 
 #### Scenario: Create then reuse still stable with hooks
 - Given a successful fresh `up` with postStart configured
 - When the user runs `up` again while the container is running
-- Then the second run reuses without re-running onCreate/updateContent/postCreate/postStart
+- Then the second run reuses without re-running onCreate / updateContent / postCreate / postStart
+
+#### Scenario: up start-stopped remelts feature postStart
+- Given a matching stopped container and a feature-contributed postStart
+- When the user runs `up`
+- Then feature postStart runs after the container starts
+- And onCreate / updateContent / postCreate do not run
+
+#### Scenario: up without --vscode still runs postAttach
+- Given a matching running or freshly created container and `postAttachCommand` that exits 0
+- When the user runs `up` without `--vscode`
+- Then postAttach runs after waitFor is satisfied
 
 #### Scenario: Up with features builds then hooks
 - Given fixture-equivalent config with OCI node feature
@@ -598,7 +617,7 @@ Create-path cleanup: if any create-path hook fails before `up` returns success, 
 #### Scenario: Reuse running does not re-fetch features
 - Given a matching container already running with features identity satisfied
 - When the user runs `up` (matching hash, no rebuild)
-- Then no feature fetch/build is required and lifecycle hooks are not re-run
+- Then no feature fetch/build is required and onCreate / updateContent / postCreate / postStart are not re-run
 
 #### Scenario: up hash mismatch hints rebuild
 - Given a managed bind-mode container whose stamped `devcontainer.config_hash` does not match the resolved config hash
@@ -606,9 +625,9 @@ Create-path cleanup: if any create-path hook fails before `up` returns success, 
 - Then the CLI fails with `config_hash_mismatch` and does not delete the container
 - And the error hint mentions `adevcontainer rebuild` and managed selection (`--name` or auto)
 #### Scenario: rebuild hook matrix row applies
-- Given a managed container being rebuilt with a config carrying all four create-path hooks
+- Given a managed container being rebuilt with a config carrying initialize plus the four create-path hooks
 - When `rebuild` runs the fresh create-path on the new container
-- Then onCreate → updateContent → postCreate → postStart execute in order on the new container, and a first-hook failure deletes only the new container
+- Then initialize runs on the host, then onCreate → updateContent → postCreate → postStart execute on the new container, and a first create-path hook failure deletes only the new container
 
 #### Scenario: rebuild does not require hash drift
 - Given a managed container whose current config hash equals the stamped hash

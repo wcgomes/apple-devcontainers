@@ -284,19 +284,26 @@ The CLI MUST provide `adevcontainer start` that starts a **stopped** managed con
 
 **Runtime behavior**
 
-- If the selected container is stopped → start it via AppleContainerRuntime.
-- If already running → success **no-op** (MUST NOT error solely because it was already running).
+- If the selected container is stopped → start it via AppleContainerRuntime after any required host `initializeCommand`.
+- If already running → success **no-op** (MUST NOT error solely because it was already running). Already-running MUST NOT run `initializeCommand` or `postStartCommand`.
 - MUST NOT re-clone the git URL.
-- MUST NOT run the full `up` or `clone` create path (no Features rebuild, no volume re-populate, no config re-resolve required for start).
+- MUST NOT run the full `up` or `clone` create path (no Features rebuild, no volume re-populate, no onCreate / updateContent / postCreate).
 
-**Lifecycle hooks on start (locked split)**
+**Lifecycle hooks on start**
 
-| Workspace origin | `start` / start-stopped hooks |
-|------------------|-------------------------------|
-| **Volume-mode / clone-origin** (`devcontainer.workspace_mode=volume`) | **Runtime start only** — MUST NOT run lifecycle hooks (`postStartCommand` included) |
-| **Bind-mode** via `up` | `up` start-stopped (same container, via `up` path) runs **`postStartCommand` only** per base contract. Bare `adevcontainer start` on a bind managed container is runtime start only (no config re-resolve / no hooks) in v1. |
+| Workspace origin | Real start (stopped → running) |
+|------------------|--------------------------------|
+| **Bind-mode** | Host `initializeCommand` when a usable stamped host workspace exists; then start; then config `postStartCommand` then remelted feature postStart. Ready / open / postAttach follow [lifecycle-hooks.md](lifecycle-hooks.md) **waitFor readiness** and [vscode.md](vscode.md) **postAttachCommand policy (CLI-only)** |
+| **Volume-mode / clone-origin** | Skip `initializeCommand` with a warning when no host workspace exists; start; then config `postStartCommand` then remelted feature postStart. Ready / open / postAttach follow **waitFor readiness** and **postAttachCommand policy (CLI-only)** |
 
-Rationale: clone config may have lived only in a temp directory that is gone after clone; bare `start` MUST remain reliable without recovering full config from disk. Labels remain available for identity/list; hook re-execution on bare `start` is out of scope for v1 (use `up` for bind postStart).
+`up` start-stopped MUST keep the same resume hook set (initialize when a host workspace exists, then postStart including remelted feature postStart). Bare `start` is not runtime-start-only.
+
+Restart-class hook failure MUST fail `start` and MUST NOT delete the container. When `start` recovery delegates to `rebuild`, rebuild’s create-path already includes postStart; the recovery path MUST NOT double-run postStart after rebuild.
+
+**Vscode customizations on start**
+
+- `adevcontainer start` MUST NOT apply `customizations.vscode.settings` or `customizations.vscode.extensions`, with or without `--vscode`.
+- Config load on `start` MAY be used for hooks, open, and postAttach. It MUST NOT be used to apply settings or extensions.
 
 #### Scenario: Start stopped managed container
 - Given a managed container created by clone that is stopped
@@ -307,16 +314,30 @@ Rationale: clone config may have lived only in a temp directory that is gone aft
 - Given a managed container that is already running
 - When the user runs `adevcontainer start --name <that-name>`
 - Then the command succeeds without changing the container
+- And `initializeCommand` and `postStartCommand` do not run
 
 #### Scenario: Start interactive picker when multiple
 - Given two stopped managed containers and an interactive TTY stdin
 - When the user runs `adevcontainer start` without `--name`
 - Then the CLI presents an interactive selection UI and starts the chosen container
 
-#### Scenario: Volume-mode start runs no hooks
+#### Scenario: Volume-mode start runs postStart
 - Given a volume-mode managed container with labels from clone and a config that had `postStartCommand` at create time
 - When the user runs `adevcontainer start --name <that-name>` on a stopped container
-- Then the container starts and **no** lifecycle hooks are executed on this path
+- Then the container starts and `postStartCommand` runs via container exec
+- And onCreate / updateContent / postCreate do not run
+
+#### Scenario: Bind-mode start runs postStart
+- Given a stopped bind-mode managed container and a config with `postStartCommand` that exits 0
+- When the user runs `adevcontainer start --name <that-name>`
+- Then the container starts and `postStartCommand` runs
+- And the command succeeds
+
+#### Scenario: start does not apply vscode customizations
+- Given a managed container whose config has well-formed settings and extensions and whose guest marker is missing or drifted
+- When the user runs `adevcontainer start` without or with `--vscode`
+- Then the CLI MUST NOT apply those settings or extensions on this path
+- And resume hooks still follow this requirement
 
 ---
 

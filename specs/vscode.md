@@ -2,7 +2,7 @@
 
 ## Purpose
 
-VS Code integration: manual attach acceptance, optional `--vscode` best-effort open, postAttachCommand gating after successful open, and CLI apply of config-file `customizations.vscode` settings/extensions (soft-fail, idempotent marker).
+VS Code integration: manual attach acceptance, optional `--vscode` best-effort open, postAttachCommand CLI-attach policy, and CLI apply of config-file `customizations.vscode` settings/extensions (soft-fail, idempotent marker).
 
 ## Requirements
 
@@ -14,7 +14,7 @@ MVP acceptance for editor integration is:
 
 2. **Optional best-effort open (additive):** When the user passes `--vscode` on `up`, `start`, `clone`, or `rebuild`, the CLI MUST attempt a best-effort open of a new VS Code window on the resolved remote workspace folder per **VS Code best-effort open**. Open failure MUST be soft (warn; lifecycle success preserved **by itself**). Without `--vscode`, no automatic open is required.
 
-3. **CLI attach hook for postAttach:** A successful best-effort open under `--vscode` is the product’s CLI attach hook for gating `postAttachCommand` (see **postAttachCommand policy (CLI-only)**). This is an approximation of IDE attach, not confirmation that the remote session is fully ready.
+3. **CLI attach hook for postAttach:** The CLI is the supporting tool. `postAttachCommand` runs per **postAttachCommand policy (CLI-only)** — at the end of successful `up` / `clone` / `rebuild`, after a real `start`, and on already-running `start` only after successful `--vscode` open. A successful best-effort open is an additional tool attach, not the sole gate, and MUST NOT be required for CLI-attach paths. This is an approximation of IDE attach, not confirmation that the remote session is fully ready.
 
 4. **CLI apply of config-file vscode customizations (additive):** The CLI MUST apply parseable config-file `customizations.vscode.settings` on create-path (not gated on open) and MUST apply parseable `customizations.vscode.extensions` when `--vscode` is set (before open; not gated on open success), per the apply requirements. Manual attach without `--vscode` does not receive CLI extension install. Apply failures are soft-fail and MUST NOT be presented as full Dev Containers parity.
 
@@ -46,9 +46,11 @@ The CLI MUST accept an optional boolean flag `--vscode` on:
 - `adevcontainer clone`
 - `adevcontainer rebuild`
 
-When `--vscode` is **absent**, those commands MUST behave as today for editor open (no automatic editor open). When `--vscode` is **present**, after the command’s container lifecycle succeeds and the managed container is running (or already running for a start no-op), the CLI MUST attempt a **best-effort** open of a **new** VS Code window attached to that container at the **resolved remote workspace folder** (see VS Code best-effort open). postAttach gating after that open is specified under **postAttachCommand policy (CLI-only)**.
+When `--vscode` is **absent**, those commands MUST NOT invoke a host VS Code open. When `--vscode` is **present**, after the command’s container lifecycle has reached the `waitFor` connection point and the managed container is running (or already running for a start no-op), the CLI MUST attempt a **best-effort** open of a **new** VS Code window attached to that container at the **resolved remote workspace folder**. postAttach after that open is specified under **postAttachCommand policy (CLI-only)**.
 
-On `rebuild`, `--vscode` behavior MUST be identical to the `up`/`clone` create path: after rebuild lifecycle success on the new container, run extensions apply (flag gate only), then attempt a best-effort open; on open **success**, run the postAttach gate; on open **soft-fail**, skip postAttach with status when present (extensions may already have run) — never failing rebuild solely due to open.
+`--vscode` MUST NOT gate settings apply or extensions apply. On `start`, the flag still requests open (and postAttach only when open succeeds on an already-running container); `start` MUST NOT apply customizations. On CLI-attach paths, omitting `--vscode` MUST NOT skip postAttach.
+
+On `rebuild`, `--vscode` behavior MUST be identical to the `up`/`clone` create path for open: after rebuild lifecycle has reached the `waitFor` connection point on the new container, attempt a best-effort open. postAttach follows **postAttachCommand policy (CLI-only)**. Open MUST NOT fail rebuild solely due to open.
 
 Unknown or misspelled variants that are not the product flag MUST continue to fail closed per existing usage rules. `--vscode` MUST be combinable with other valid flags for those commands (including `--json` where applicable).
 
@@ -76,11 +78,26 @@ Unknown or misspelled variants that are not the product flag MUST continue to fa
 - Then after lifecycle success the CLI attempts to open a new VS Code window on the resolved remote workspace folder
 - And rebuild still reports success when open succeeds and postAttach is absent or exits 0
 
-#### Scenario: without --vscode behavior unchanged
+#### Scenario: --vscode still only gates open not apply on up
+- Given a successful `up` create-path with well-formed settings and extensions and a config that also has `postAttachCommand`
+- When the user runs `up` **without** `--vscode`
+- Then settings and extensions apply still run per the apply requirements
+- And the CLI MUST NOT invoke a host VS Code open
+- And postAttach MUST execute as CLI attach
+
+#### Scenario: --vscode on already-running start opens without applying customizations
+- Given a managed container that is already running and a config with settings, extensions, and `postAttachCommand`
+- When the user runs `start --vscode` and host `code` launch succeeds
+- Then after start success the CLI attempts to open a new VS Code window attached to that container
+- And postAttach runs after that successful open
+- And the CLI MUST NOT apply settings or extensions on that `start` invocation
+- And `postStartCommand` does not run
+
+#### Scenario: without --vscode behavior unchanged for open
 - Given any valid `up`, `start`, `clone`, or `rebuild` invocation
 - When the user omits `--vscode`
 - Then the CLI MUST NOT invoke a host VS Code open as part of that command
-- And manual attach (list/inspect + experimental Attach to Running Apple Container) remains valid
+- And manual attach remains valid
 
 #### Scenario: --json works with --vscode
 - Given a successful `up`, `clone`, or `rebuild` with both `--json` and `--vscode`
@@ -107,8 +124,9 @@ When `--vscode` is set and lifecycle has succeeded, the CLI MUST attempt to open
 - If no usable VS Code CLI (`code`) is found, or the open/launch fails for any reason (including missing id, image, or folder inputs needed to build the URI), the CLI MUST:
   - Emit a clear warning on stderr (naming the missing dependency or failure at a high level), and
   - **MUST NOT** change the lifecycle command’s success exit solely because open failed, and
-  - **MUST NOT** tear down or alter the container as a consequence of open failure, and
-  - **MUST NOT** execute postAttach solely because of that soft-failed open (see postAttachCommand policy).
+  - **MUST NOT** tear down or alter the container as a consequence of open failure.
+- On a path that would otherwise run postAttach as CLI attach (`up` / `clone` / `rebuild` / real `start`), open soft-fail MUST NOT prevent postAttach.
+- On already-running `start`, open soft-fail MUST NOT by itself execute postAttach (there was no CLI attach and no successful tool open).
 - The product MAY warn when `code` is missing; it MUST NOT hard-require VS Code for `up` / `start` / `clone` / `rebuild` success.
 
 **Host prerequisites (document; soft):**
@@ -125,28 +143,27 @@ When `--vscode` is set and lifecycle has succeeded, the CLI MUST attempt to open
 
 **Approximation (document):**
 
-- Successful host `code` launch is a **CLI-initiated attach approximation**. The CLI MUST NOT wait for VS Code Server fully ready or for IDE-confirmed remote attach before treating open as success for postAttach gating. Detecting manual UI attach is out of scope.
+- Successful host `code` launch remains a CLI-initiated attach approximation. The CLI MUST NOT wait for VS Code Server fully ready. Detecting manual UI attach is out of scope.
 
 #### Scenario: omitted workspaceFolder uses product default already resolved
 - Given a config that omits `workspaceFolder` (or leaves it empty) so resolve yields the product default `/workspaces/<basename>`
 - When the user runs `up` or `clone` with `--vscode` after successful lifecycle
 - Then the open targets that already-resolved default folder (e.g. `/workspaces/<basename>`), not an empty path and not a re-parse of raw JSON that bypasses the resolver
 
-#### Scenario: soft-fail when code CLI missing
-- Given lifecycle would otherwise succeed and `--vscode` is set
+#### Scenario: soft-fail when code CLI missing on CLI-attach path
+- Given lifecycle would otherwise succeed on `up` and `--vscode` is set and `postAttachCommand` exits 0
 - When no usable `code` executable is discoverable on the host
-- Then the command still exits successfully for the lifecycle outcome (when postAttach does not run)
+- Then the command still attempts `postAttachCommand`
 - And a stderr warning indicates that VS Code open was skipped or failed because `code` was not found
 - And the managed container remains running / created as the lifecycle commanded
-- And postAttach MUST NOT execute
 
-#### Scenario: soft-fail when launch fails
-- Given lifecycle success, `--vscode` set, and a discoverable `code` that fails when invoked for open
+#### Scenario: soft-fail when launch fails on already-running start
+- Given an already-running container, `--vscode` set, and a discoverable `code` that fails when invoked for open
 - When open/launch returns failure
-- Then the lifecycle command still reports success (when postAttach does not run)
+- Then the lifecycle command still reports success
 - And a stderr warning indicates the open failure
+- And `postAttachCommand` MUST NOT execute
 - And the managed container is not deleted or stopped solely due to that failure
-- And postAttach MUST NOT execute
 
 #### Scenario: explicit workspaceFolder is honored for open
 - Given a config with an explicit resolved `workspaceFolder` (e.g. `/custom/ws`)
@@ -168,85 +185,101 @@ When `--vscode` is set and lifecycle has succeeded, the CLI MUST attempt to open
 
 ### Requirement: postAttachCommand policy (CLI-only)
 
-The CLI MUST parse and admit `postAttachCommand` when present (string, argv array, or object map of name → string|argv — same `LifecycleCommand` forms as other hooks) so configs are not rejected solely for this property. Invalid form MUST still fail resolve with a structured error naming `postAttachCommand` (unchanged).
+The CLI MUST parse and admit `postAttachCommand` when present (string, argv array, or object map of name → string|argv — same forms as other hooks) so configs are not rejected solely for this property. Invalid form MUST still fail resolve with a structured error naming `postAttachCommand`. Object-map entries MUST run concurrently per [lifecycle-hooks.md](lifecycle-hooks.md) **Lifecycle hook surface**.
+
+This policy is a **CLI attach model**. The CLI is the supporting tool. Manual IDE UI attach without the CLI remains out of scope. `adevcontainer exec` is **not** attach and MUST NOT run `postAttachCommand`. The product MUST NOT require IDE-confirmed remote ready and MUST NOT wait for VS Code Server fully ready.
 
 **When postAttach RUNS**
 
-The CLI MUST execute postAttach only when **all** of the following hold on `up`, `start`, `clone`, or `rebuild`:
+The CLI MUST execute postAttach when **any** of the following hold after the command’s prior lifecycle steps required by `waitFor` have succeeded:
 
-1. `--vscode` is set, and
-2. The best-effort VS Code open outcome is **success** (host `code` launch succeeded per **VS Code best-effort open**).
+1. Successful `adevcontainer up`, `adevcontainer clone`, or `adevcontainer rebuild` (including `up` reuse of an already-running matching container) — the CLI attach at the end of that supporting-tool command.
+2. A **real** `adevcontainer start` of a previously stopped container.
+3. Already-running `adevcontainer start` **only when** `--vscode` is set **and** best-effort open succeeds — that open is an actual tool attach.
 
-That successful open is the **CLI attach hook**. Execution MUST occur **after** the successful open attempt completes — never before open when `--vscode` is set.
+When `--vscode` is set on a path that already qualifies as CLI attach (items 1–2), postAttach MUST still run **after** the open attempt. If that open **soft-fails**, the CLI MUST still run postAttach (open is best-effort and MUST NOT suppress the CLI attach). When `--vscode` is set and open **succeeds**, postAttach MUST run after that successful open.
 
 **What runs**
 
-When the run gate is satisfied, the CLI MUST run:
-
-- Config `postAttachCommand` when present, then
-- Feature-contributed postAttach commands (`featurePostAttachCommands` / equivalent merge), in the same merge/order patterns as other feature lifecycle hooks already in product (LifecycleRunner conventions: config hook then feature hooks for that stage).
-
-Each command MUST execute via existing container **exec** lifecycle machinery (same string/argv/object-map rules as `postCreateCommand` / `postStartCommand`; object-map entries sequential sorted-by-name), using the **resolved remote connection user** (from config resolution on create-path, or stamped/label-aligned user on reuse/`start`) and the resolved workspace folder when set — not create-only `containerUser` when `remoteUser` differs. When `remoteUser` is `alice` and `containerUser` is `bob`, postAttach MUST use `alice`.
+When the run gate is satisfied, the CLI MUST run config `postAttachCommand` when present, then feature-contributed postAttach commands, using the resolved remote connection user and workspace folder when set. When `remoteUser` is `alice` and `containerUser` is `bob`, postAttach MUST use `alice`.
 
 **When postAttach is SKIPPED (status line, not executed)**
 
-- **`--vscode` absent** (manual attach path / no CLI attach): if any postAttach is present (config and/or features), the CLI MUST emit a single stderr status line indicating attach is not hooked (e.g. `postAttach skipped (no attach hook)` or a clearer equivalent) and MUST NOT execute postAttach.
-- **`--vscode` set but open soft-failed or skipped** (missing `code`, launch fail, missing id/image/folder, or other soft-fail open outcome): the CLI MUST NOT execute postAttach. The CLI SHOULD emit a skip status explaining that attach open did not succeed (in addition to the open soft-fail warning as applicable).
-- **No postAttach present** (config and features empty): the CLI MUST NOT emit a postAttach skip line.
+- Already-running `start` without a successful `--vscode` open: if any postAttach is present, emit a single stderr skip status and MUST NOT execute postAttach.
+- `--vscode` set on already-running `start` and open soft-failed or skipped: MUST NOT execute postAttach; SHOULD emit a skip status that attach open did not succeed.
+- No postAttach present: MUST NOT emit a postAttach skip line.
 
 **Failure policy**
 
-- If postAttach **runs** and any postAttach command exits non-zero, the lifecycle command (`up` / `start` / `clone` / `rebuild`) MUST fail (non-zero) with a clear structured error naming postAttach (property label consistent with other lifecycle hooks, including feature-labeled forms when applicable).
-- The CLI MUST NOT delete or stop the container solely due to postAttach failure (container already successfully brought up; VS Code may already be opening). This contrasts with create-path onCreate / updateContent / postCreate / first-create postStart delete-on-fail. On `rebuild`, a non-zero postAttach MUST keep the **new** container and MUST NOT start a volume or bind recovery session.
-- Open soft-fail still MUST NOT fail the lifecycle command **by itself**. postAttach failure after successful open **does** fail the lifecycle exit.
+- If postAttach runs and any postAttach command exits non-zero, the lifecycle command MUST fail (non-zero) with a structured error naming postAttach.
+- The CLI MUST NOT delete or stop the container solely due to postAttach failure. On `rebuild`, a non-zero postAttach MUST keep the **new** container and MUST NOT start a recovery session.
+- Open soft-fail still MUST NOT fail the lifecycle command **by itself**.
 - On postAttach failure, the command MUST follow the existing error path (no success JSON on stdout for `--json` paths).
-
-**Approximation caveat**
-
-Running postAttach after successful host `code` launch is a **CLI-initiated attach approximation**. The product MUST NOT require IDE-confirmed remote ready, MUST NOT wait for VS Code Server fully ready, and MUST NOT treat manual UI attach as a postAttach trigger. Full IDE attach event integration remains out of scope beyond this gate.
 
 **Consistency**
 
-The gated policy MUST apply consistently on `up`, `start`, `clone`, and `rebuild`. Presence of `postAttachCommand` alone MUST NOT fail those commands when postAttach is skipped.
+Presence of `postAttachCommand` alone MUST NOT fail those commands when postAttach is skipped. vscode customizations apply on `start` remains forbidden.
 
-#### Scenario: postAttach runs after successful --vscode open
-- Given a valid config with `postAttachCommand` that exits 0, and a successful container lifecycle on `up` (or equivalently `start` / `clone` / `rebuild`)
-- When the user runs the command with `--vscode` and host `code` launch succeeds (or mocks equivalent)
-- Then after the successful open the CLI executes `postAttachCommand` via container exec
-- And the command reports lifecycle success
-- And success JSON shape (when `--json`) remains unchanged
+#### Scenario: postAttach runs at end of up without --vscode
+- Given a valid config with `postAttachCommand` that exits 0 and a successful `up` (fresh, reuse, or start-stopped)
+- When the user runs `up` without `--vscode`
+- Then the CLI executes `postAttachCommand` via container exec after waitFor is satisfied
+- And the command reports lifecycle success when postAttach exits 0
 
-#### Scenario: postAttach skipped without --vscode
-- Given a valid minimal image config that also sets `postAttachCommand` to a command that would exit non-zero if run
-- When the user runs `up` (fresh create) without `--vscode`
-- Then `up` succeeds without executing `postAttachCommand`
-- And stderr includes a one-time skip status for postAttach (e.g. no attach hook)
+#### Scenario: postAttach runs after real start without --vscode
+- Given a stopped managed container, default `waitFor`, and a config with `postAttachCommand` that exits 0
+- When the user runs `adevcontainer start --name <that-name>` without `--vscode`
+- Then after the real start, once waitFor is satisfied, the CLI executes `postAttachCommand`
+- And that MAY be before this invocation’s `postStartCommand`
+- And the command succeeds
 
-#### Scenario: postAttach skipped when open soft-fails
-- Given a config with `postAttachCommand` present and lifecycle that would otherwise succeed
-- When the user runs `up` (or `start` / `clone` / `rebuild`) with `--vscode` and open soft-fails (missing `code`, launch failure, or missing open inputs)
-- Then the CLI MUST NOT execute `postAttachCommand`
-- And the lifecycle command still exits successfully
-- And stderr includes open soft-fail warning and SHOULD include a postAttach skip status explaining attach open did not succeed
+#### Scenario: already-running start skips postAttach without successful open
+- Given a managed container that is already running and a config with `postAttachCommand` that would exit non-zero if run
+- When the user runs `adevcontainer start --name <that-name>` without `--vscode`
+- Then `postAttachCommand` does not run
+- And stderr includes a one-time skip status
+- And the command succeeds
+
+#### Scenario: already-running start runs postAttach after successful --vscode open
+- Given an already-running managed container, `postAttachCommand` that exits 0, and `--vscode` whose host `code` launch succeeds
+- When the user runs `adevcontainer start … --vscode`
+- Then after the successful open the CLI executes `postAttachCommand`
+- And `initializeCommand` and `postStartCommand` do not run
+
+#### Scenario: open soft-fail does not suppress CLI-attach postAttach
+- Given a config with `postAttachCommand` present and a successful `up` / `clone` / `rebuild` or real `start`
+- When the user runs that command with `--vscode` and open soft-fails
+- Then the CLI still executes `postAttachCommand`
+- And open soft-fail does not by itself fail the command
 - And the managed container is not deleted or stopped solely due to open soft-fail
-- And on rebuild, no recovery helper or editor session is created
+
+#### Scenario: postAttach still runs after successful --vscode open on CLI-attach paths
+- Given a valid config with `postAttachCommand` that exits 0 and a successful container lifecycle on `up` (or equivalently real `start` / `clone` / `rebuild`)
+- When the user runs the command with `--vscode` and host `code` launch succeeds
+- Then after the successful open the CLI executes `postAttachCommand`
+- And the command reports lifecycle success
 
 #### Scenario: postAttach failure fails command but keeps container
-- Given lifecycle success, `--vscode` set, successful open, and `postAttachCommand` that exits non-zero
+- Given a CLI-attach path that runs postAttach and `postAttachCommand` exits non-zero
 - When the user runs `up` (or `start` / `clone` / `rebuild`)
 - Then the command fails with a structured error naming postAttach
-- And the managed container still exists and is not deleted or stopped solely due to that postAttach failure
-- And on rebuild, no recovery helper or editor session is created
+- And the managed container still exists and is not deleted or stopped solely due to that failure
+- And on rebuild, no recovery session is created
 - And no success JSON is emitted on the error path
 
-#### Scenario: feature postAttach runs after successful open
-- Given resolved config with feature-contributed postAttach commands (and optional config `postAttachCommand`) and successful open under `--vscode`
+#### Scenario: feature postAttach runs on CLI attach
+- Given resolved config with feature-contributed postAttach commands (and optional config `postAttachCommand`) on a CLI-attach path
 - When postAttach runs
-- Then feature postAttach commands execute via container exec after the config hook when both are present (same merge/order spirit as other feature lifecycle hooks)
+- Then feature postAttach commands execute via container exec after the config hook when both are present
 - And non-zero exit of a feature postAttach fails the command under the same keep-container failure policy as config postAttach
 
+#### Scenario: exec is not attach
+- Given a running managed container and a config with `postAttachCommand`
+- When the user runs `adevcontainer exec`
+- Then `postAttachCommand` does not run
+
 #### Scenario: Invalid postAttach form still fails resolve
-- Given `postAttachCommand` set to a non-string, non-array value
+- Given `postAttachCommand` set to a non-string, non-array, non-object value
 - When config is resolved
 - Then the CLI fails with a structured error naming `postAttachCommand`
 
@@ -256,7 +289,7 @@ The gated policy MUST apply consistently on `up`, `start`, `clone`, and `rebuild
 - Then the CLI MUST NOT emit a postAttach skip status line solely for postAttach
 
 #### Scenario: postAttach runs as remote connection user not containerUser
-- Given `remoteUser` `alice`, `containerUser` `bob`, `--vscode`, and successful open
+- Given `remoteUser` `alice`, `containerUser` `bob`, and a CLI-attach path that runs postAttach
 - When postAttach runs
 - Then postAttach exec uses user `alice`
 
