@@ -1,6 +1,6 @@
 # Change Spec: vscode-customizations-up-clone-rebuild
 
-Delta against realized contract (union of `specs/<domain>.md`). RFC 2119 keywords apply. `--vscode` open and realized **postAttachCommand policy (CLI-only)** (CLI attach model) remain in force; this change MUST NOT re-gate postAttach on `--vscode` or lock `start` as runtime-only / no postStart. **Vscode customizations apply is not image build** remains in force unchanged. `start` MUST NOT apply vscode customizations.
+Delta against realized contract (union of `specs/<domain>.md`). RFC 2119 keywords apply. `--vscode` open and **postAttachCommand policy (CLI-only)** remain in force unchanged. **Vscode customizations apply is not image build** remains in force unchanged.
 
 ## ADDED Requirements
 
@@ -25,9 +25,9 @@ Extensions apply MUST NOT be gated on `--vscode`. Extensions apply MUST NOT be g
 
 **Order relative to open and postAttach**
 
-- On `up` / `clone` / `rebuild` with `--vscode`: run extensions apply (soft-fail) **before** best-effort open, **then** open, **then** postAttach per realized **postAttachCommand policy (CLI-only)** (fail-keep; CLI attach is not gated on open success).
-- On `up` / `clone` / `rebuild` without `--vscode`: run extensions apply; MUST NOT open; postAttach follows realized **postAttachCommand policy (CLI-only)**.
-- Extensions apply failure MUST NOT by itself skip or fail open or postAttach; postAttach remains as specified in the realized policy.
+- On `up` / `clone` / `rebuild` with `--vscode`: run extensions apply (soft-fail) **before** best-effort open, **then** open, **then** postAttach per existing **postAttachCommand policy (CLI-only)** (unchanged fail-keep; still only after open success).
+- On `up` / `clone` / `rebuild` without `--vscode`: run extensions apply; MUST NOT open; MUST NOT run postAttach (skip status when postAttach is present, unchanged).
+- Extensions apply failure MUST NOT by itself skip or fail open or postAttach; postAttach gating remains solely `--vscode` + open-success + presence as specified today.
 - Extensions apply MAY complete (and finalize the marker when full apply succeeds) even when `--vscode` is absent or open later soft-fails.
 
 **When extensions apply is SKIPPED**
@@ -83,7 +83,7 @@ Extensions apply MUST NOT be gated on `--vscode`. Extensions apply MUST NOT be g
 - Then the CLI attempts to install missing extension IDs into the remote extensions directory under the resolved remote connection user home
 - And each successfully installed ID is listed in the guest `extensions.json` registry (not folder-only)
 - And the CLI MUST NOT invoke a host VS Code open as part of that command
-- And postAttach follows realized **postAttachCommand policy (CLI-only)**
+- And postAttach MUST NOT execute (skip status when postAttach is present)
 - And lifecycle success is preserved when extensions apply soft-fails (absent unrelated failures)
 
 #### Scenario: extensions install on fresh clone without --vscode
@@ -91,16 +91,14 @@ Extensions apply MUST NOT be gated on `--vscode`. Extensions apply MUST NOT be g
 - When the user runs `clone` **without** `--vscode`
 - Then the CLI attempts the same guest extensions install after create-path hooks
 - And soft-fail does not fail `clone` or delete the container/volume solely due to extensions apply
-- And the CLI MUST NOT open VS Code solely because extensions were applied
-- And postAttach follows realized **postAttachCommand policy (CLI-only)**
+- And the CLI MUST NOT open VS Code or run postAttach solely because extensions were applied
 
 #### Scenario: extensions install on rebuild without --vscode
 - Given a successful `rebuild` create-path on the new container, well-formed extension IDs, and no matching guest marker
 - When the user runs `rebuild` **without** `--vscode`
 - Then the CLI attempts guest extensions install after create-path hooks on the **new** container
 - And rebuild still reports success when apply soft-fails
-- And the CLI MUST NOT open VS Code solely because extensions were applied
-- And postAttach follows realized **postAttachCommand policy (CLI-only)**
+- And the CLI MUST NOT open VS Code or run postAttach solely because extensions were applied
 
 #### Scenario: extensions still apply on up when --vscode is set
 - Given a valid config with well-formed extensions, successful create-path, and no matching guest marker
@@ -120,8 +118,7 @@ Extensions apply MUST NOT be gated on `--vscode`. Extensions apply MUST NOT be g
 - When the user runs `start --vscode`
 - Then the CLI MUST NOT install those extensions on that invocation
 - And after start success the CLI still attempts best-effort open
-- And postAttach follows realized **postAttachCommand policy (CLI-only)**
-- And resume hooks still follow realized **Start managed container**
+- And postAttach still runs only on open success per existing policy
 
 #### Scenario: up reuse applies pending extensions without --vscode
 - Given a running managed container whose guest marker hash does not match the normalized customizations from loadable config (e.g. an extension ID added in config without rebuilding)
@@ -181,7 +178,7 @@ Extensions apply MUST NOT be gated on `--vscode`. Extensions apply MUST NOT be g
 - When the user runs with `--vscode` and open soft-fails
 - Then the CLI still attempts extensions install for that invocation (command gate, not open-success gate)
 - And lifecycle success is unchanged by open soft-fail alone
-- And postAttach follows realized **postAttachCommand policy (CLI-only)** (open soft-fail MUST NOT skip CLI-attach postAttach)
+- And postAttach remains skipped per existing policy
 - And the marker MAY be finalized when extensions apply fully succeeds even though open soft-failed
 
 #### Scenario: extensions soft-fail keeps lifecycle success
@@ -215,7 +212,7 @@ Extensions apply MUST NOT be gated on `--vscode`. Extensions apply MUST NOT be g
 ### Requirement: VS Code attach acceptance
 
 **Domain:** `vscode`  
-*(Delta — replace apply bullet 4 and the docs scenario. Bullet 3 stays as in the realized spec (CLI attach model). This change MUST NOT re-gate postAttach on `--vscode`.)*
+*(Delta — replace apply bullet 4 and the docs scenario; preserve manual attach, optional open, and postAttach hook.)*
 
 MVP acceptance for editor integration is:
 
@@ -223,10 +220,9 @@ MVP acceptance for editor integration is:
 
 2. **Optional best-effort open (additive):** When the user passes `--vscode` on `up`, `start`, `clone`, or `rebuild`, the CLI MUST attempt a best-effort open of a new VS Code window on the resolved remote workspace folder per **VS Code best-effort open**. Open failure MUST be soft (warn; lifecycle success preserved **by itself**). Without `--vscode`, no automatic open is required.
 
-  3. **CLI attach hook for postAttach:** Unchanged from the realized spec (CLI attach model; see **postAttachCommand policy (CLI-only)**).
+3. **CLI attach hook for postAttach:** A successful best-effort open under `--vscode` is the product’s CLI attach hook for gating `postAttachCommand` (see **postAttachCommand policy (CLI-only)**). This is an approximation of IDE attach, not confirmation that the remote session is fully ready. This bullet is unchanged.
 
-  4. **CLI apply of config-file vscode customizations:** The CLI MUST apply parseable config-file `customizations.vscode.settings` and `customizations.vscode.extensions` on `up`, `clone`, and `rebuild` (fresh create-path, `up` reuse, and `up` start-stopped) without requiring `--vscode` or a successful editor open, per the apply requirements. `adevcontainer start` MUST NOT apply settings or extensions. `--vscode` MUST NOT be an apply gate; it remains the open flag only. Manual UI attach is not an apply trigger. Apple attach still does not auto-install. Apply failures are soft-fail and MUST NOT be presented as full Dev Containers parity.
-
+4. **CLI apply of config-file vscode customizations:** The CLI MUST apply parseable config-file `customizations.vscode.settings` and `customizations.vscode.extensions` on `up`, `clone`, and `rebuild` (fresh create-path, `up` reuse, and `up` start-stopped) without requiring `--vscode` or a successful editor open, per the apply requirements. `adevcontainer start` MUST NOT apply settings or extensions. `--vscode` MUST NOT be an apply gate; it remains the open + postAttach gate only. Manual UI attach is not an apply trigger. Apple attach still does not auto-install. Apply failures are soft-fail and MUST NOT be presented as full Dev Containers parity.
 
 #### Scenario: Running container is attachable target
 - Given a successful `up` (or `clone`)
@@ -245,7 +241,7 @@ MVP acceptance for editor integration is:
 - Then the text MUST NOT claim that manual UI attach or full Dev Containers extension-driven apply is implemented
 - And it MUST describe soft-fail
 - And it MUST describe that settings and extensions apply by default on `up` / `clone` / `rebuild`
-- And it MUST describe that `--vscode` gates open, not apply
+- And it MUST describe that `--vscode` gates open and postAttach only, not apply
 - And it MUST describe that `start` does not apply settings or extensions
 
 ---
@@ -253,28 +249,27 @@ MVP acceptance for editor integration is:
 ### Requirement: Optional `--vscode` flag on up, start, clone, and rebuild
 
 **Domain:** `vscode`  
-*(Delta — `--vscode` remains open only for apply purposes; drop the rebuild “extensions apply (flag gate only)” clause. postAttach follows the realized CLI attach model. `start` MUST NOT apply customizations.)*
+*(Delta — `--vscode` remains open + postAttach only; drop the rebuild “extensions apply (flag gate only)” clause. Remainder of this requirement is unchanged.)*
 
-When `--vscode` is **absent**, those commands MUST NOT invoke a host VS Code open. When `--vscode` is **present**, after the command’s container lifecycle has reached the `waitFor` connection point and the managed container is running (or already running for a start no-op), the CLI MUST attempt a **best-effort** open of a **new** VS Code window attached to that container at the **resolved remote workspace folder**. postAttach after that open is specified under realized **postAttachCommand policy (CLI-only)**.
+When `--vscode` is **absent**, those commands MUST behave as today for editor open (no automatic editor open). When `--vscode` is **present**, after the command’s container lifecycle succeeds and the managed container is running (or already running for a start no-op), the CLI MUST attempt a **best-effort** open of a **new** VS Code window attached to that container at the **resolved remote workspace folder** (see VS Code best-effort open). postAttach gating after that open is specified under **postAttachCommand policy (CLI-only)**.
 
-`--vscode` MUST NOT gate settings apply or extensions apply. On `up`, `clone`, and `rebuild`, customizations apply (when pending) MUST run whether the flag is present or not, and when the flag is present MUST run **before** the open attempt. On `start`, the flag still requests open (and postAttach per realized policy); `start` MUST NOT apply customizations. On CLI-attach paths, omitting `--vscode` MUST NOT skip postAttach.
+`--vscode` MUST NOT gate settings apply or extensions apply. On `up`, `clone`, and `rebuild`, customizations apply (when pending) MUST run whether the flag is present or not, and when the flag is present MUST run **before** the open attempt. On `start`, the flag still requests open + postAttach only; `start` MUST NOT apply customizations.
 
-On `rebuild`, `--vscode` behavior MUST be identical to the `up`/`clone` create path for **open**: after rebuild lifecycle reaches `waitFor` on the new container, customizations apply (not flag-gated) has already run or runs before open; then attempt a best-effort open. postAttach follows realized **postAttachCommand policy (CLI-only)** — never failing rebuild solely due to open.
+On `rebuild`, `--vscode` behavior MUST be identical to the `up`/`clone` create path for **open and postAttach only**: after rebuild lifecycle success on the new container, customizations apply (not flag-gated) has already run or runs before open; then attempt a best-effort open; on open **success**, run the postAttach gate; on open **soft-fail**, skip postAttach with status when present — never failing rebuild solely due to open.
 
-#### Scenario: --vscode still only gates open not apply on up
+#### Scenario: --vscode still only gates open and postAttach on up
 - Given a successful `up` create-path with well-formed settings and extensions and a config that also has `postAttachCommand`
 - When the user runs `up` **without** `--vscode`
 - Then settings and extensions apply still run per the apply requirements
 - And the CLI MUST NOT invoke a host VS Code open
-- And postAttach MUST execute as CLI attach
+- And postAttach MUST NOT execute (skip status when present)
 
 #### Scenario: --vscode on start still opens without applying customizations
 - Given a managed container that `start` can select and a config with settings, extensions, and `postAttachCommand`
 - When the user runs `start --vscode` and host `code` launch succeeds
 - Then after start success the CLI attempts to open a new VS Code window attached to that container
-- And postAttach follows realized **postAttachCommand policy (CLI-only)**
+- And postAttach runs after that successful open
 - And the CLI MUST NOT apply settings or extensions on that `start` invocation
-- And resume hooks still follow realized **Start managed container**
 
 #### Scenario: without --vscode behavior unchanged for open
 - Given any valid `up`, `start`, `clone`, or `rebuild` invocation
@@ -368,8 +363,7 @@ When resolved config retains a non-empty well-formed `customizations.vscode.sett
 - Given well-formed settings, a managed container that `start` can select, and a guest marker missing or drifted
 - When the user runs `start --vscode`
 - Then the CLI MUST NOT merge or repair Machine settings on that invocation
-- And open / postAttach still follow realized `--vscode` and **postAttachCommand policy (CLI-only)**
-- And resume hooks still follow realized **Start managed container**
+- And open / postAttach still follow existing `--vscode` policy
 
 ---
 
@@ -460,7 +454,7 @@ The CLI MUST record successful application of the **normalized** customizations 
 ### Requirement: Up lifecycle (create, start, reuse)
 
 **Domain:** `core`  
-*(Delta — replace the vscode customizations apply matrix and the following paragraph. Hook and postAttach matrix rows stay as in the realized spec (CLI attach / start hooks). This change MUST NOT restore “Bind start-stopped postStartCommand remains an `up` path only”.)*
+*(Delta — replace the vscode customizations apply matrix and the following paragraph; hook and postAttach matrix rows unchanged.)*
 
 | Path | Vscode customizations apply |
 |------|-----------------------------|
@@ -470,10 +464,10 @@ The CLI MUST record successful application of the **normalized** customizations 
 | `up` start-stopped (matching hash) with loadable config and marker pending/drift | after `postStartCommand` when that hook runs: settings repair and extensions install as applicable (soft-fail); **not** gated on `--vscode` |
 | `adevcontainer start` (any flag combination) | **no** settings or extensions apply |
 | Any path with matching marker for full normalized payload | skip redundant settings+extensions apply (`start` still does not apply) |
-| `up`/`clone`/`rebuild` with `--vscode` | apply first (if pending), then open; postAttach follows realized **postAttachCommand policy (CLI-only)** |
-| `start` with `--vscode` | no apply; then open; postAttach follows realized **postAttachCommand policy (CLI-only)** |
+| `up`/`clone`/`rebuild` with `--vscode` | apply first (if pending), then open, then postAttach only on open success per existing matrix |
+| `start` with `--vscode` | no apply; then open; then postAttach only on open success per existing matrix |
 
-postAttach matrix rows and gating text remain as in the realized spec. Customizations apply is **not** part of create-path delete-on-fail, **not** folded into postAttach execution, and **not** run on `start`.
+postAttach matrix rows and gating text above remain in force. Customizations apply is **not** part of create-path delete-on-fail and **not** folded into postAttach execution. Bind start-stopped `postStartCommand` remains an `up` path only.
 
 #### Scenario: up reuse still applies customizations
 - Given a matching running container and a drifted guest customizations marker
@@ -491,18 +485,28 @@ postAttach matrix rows and gating text remain as in the realized spec. Customiza
 ### Requirement: Start managed container
 
 **Domain:** `managed-lifecycle`  
-*(Delta — apply exclusion only. Resume hooks follow realized **Start managed container** / **Lifecycle hook surface**. This change does **not** lock `start` as runtime-only and MUST NOT remove postStart from bare `start`.)*
+*(Delta — additive apply exclusion; selection, runtime start/no-op, no re-clone, and locked hook split are unchanged. MUST NOT add `postStartCommand` to bare `start`.)*
+
+**Runtime behavior** remains: start a stopped managed container; already-running is success no-op; MUST NOT re-clone; MUST NOT run the full `up` or `clone` create path.
+
+**Lifecycle hooks on start (locked split)** remain: volume-mode and bind-mode bare `adevcontainer start` are **runtime start only** — MUST NOT run lifecycle hooks (`postStartCommand` included). Bind start-stopped `postStartCommand` remains via `up` only.
 
 **Vscode customizations on start**
 
 - `adevcontainer start` MUST NOT apply `customizations.vscode.settings` or `customizations.vscode.extensions`, with or without `--vscode`.
-- Config load on `start` MAY be used for hooks, open, and postAttach. It MUST NOT be used to apply settings or extensions.
+- When `--vscode` is set, `start` MAY still load config from labels for **postAttach** only (load errors → treat postAttach absent; MUST NOT fail start solely for that load) and MUST still follow **VS Code best-effort open** and **postAttachCommand policy (CLI-only)**.
+- Config load on `start` MUST NOT be used to apply settings or extensions.
+
+#### Scenario: Volume-mode start runs no hooks
+- Given a volume-mode managed container with labels from clone and a config that had `postStartCommand` at create time
+- When the user runs `adevcontainer start --name <that-name>` on a stopped container
+- Then the container starts and **no** lifecycle hooks are executed on this path
 
 #### Scenario: start does not apply vscode customizations
 - Given a managed container whose config has well-formed settings and extensions and whose guest marker is missing or drifted
 - When the user runs `adevcontainer start` without or with `--vscode`
 - Then the CLI MUST NOT apply those settings or extensions on this path
-- And resume hooks still follow the realized Start managed container requirement
+- And MUST NOT run `postStartCommand` on this path
 
 ## REMOVED Requirements
 
