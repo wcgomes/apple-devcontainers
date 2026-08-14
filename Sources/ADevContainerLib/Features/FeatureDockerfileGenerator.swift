@@ -15,7 +15,10 @@ public enum FeatureDockerfileGenerator {
         }
     }
 
-    /// Write context: `features/<index>/…` package files + `Dockerfile`.
+    /// Write context: `feature-<id>/…` package files + `Dockerfile`.
+    /// Layer directory and `/tmp/adev-feature-<id>` names use a stable identity
+    /// (metadata `id`, else last path segment of the admitted ref), sanitized
+    /// for Dockerfile/Apple paths. Duplicate ids append `-<index>`.
     ///
     /// - Parameter baseUser: Base image OCI `USER` from a **successful** inspect (nil/empty → restore `root`).
     ///   Callers MUST fail closed on inspect failure before invoking this — do not pass a fabricated user.
@@ -49,6 +52,7 @@ public enum FeatureDockerfileGenerator {
         lines.append("FROM \(baseImage)")
         lines.append("")
 
+        let layerNames = layerDirectoryNames(for: ordered)
         for (index, feature) in ordered.enumerated() {
             guard let pkg = byRef[feature.admitted.reference] else {
                 throw CLIError(
@@ -57,8 +61,9 @@ public enum FeatureDockerfileGenerator {
                     message: "Internal: missing fetched package for \(feature.admitted.reference)"
                 )
             }
-            let featureDirName = "feature-\(index)"
+            let featureDirName = layerNames[index]
             let destFeatureDir = (contextDirectory as NSString).appendingPathComponent(featureDirName)
+            let containerPath = "/tmp/adev-\(featureDirName)"
             try? fileManager.removeItem(atPath: destFeatureDir)
             try copyPackage(from: pkg.directoryPath, to: destFeatureDir, fileManager: fileManager)
 
@@ -79,7 +84,7 @@ public enum FeatureDockerfileGenerator {
 
             lines.append("# Feature: \(feature.admitted.reference)")
             lines.append("USER root")
-            lines.append("COPY \(featureDirName) /tmp/adev-feature-\(index)")
+            lines.append("COPY \(featureDirName) \(containerPath)")
             for envLine in envLines {
                 lines.append(envLine)
             }
@@ -88,10 +93,10 @@ public enum FeatureDockerfileGenerator {
             // install.sh copies them into /usr/local/share/… for bare-path shell hooks.
             // (sh -lc /path/script requires +x; OCI layers often ship scripts as 0644.)
             lines.append(
-                "RUN chmod -R 0755 /tmp/adev-feature-\(index) "
-                    + "&& cd /tmp/adev-feature-\(index) "
+                "RUN chmod -R 0755 \(containerPath) "
+                    + "&& cd \(containerPath) "
                     + "&& \(exportPrefix)./install.sh "
-                    + "&& rm -rf /tmp/adev-feature-\(index)"
+                    + "&& rm -rf \(containerPath)"
             )
             lines.append("")
         }
@@ -119,6 +124,58 @@ public enum FeatureDockerfileGenerator {
             dockerfilePath: dockerfilePath,
             dockerfileContents: contents
         )
+    }
+
+    /// Dockerfile-safe context directory per ordered feature (`feature-<id>`).
+    /// Prefer metadata `id`; else last path segment of the admitted reference.
+    /// Duplicate slugs append `-<index>` so COPY/RUN paths stay unique.
+    public static func layerDirectoryNames(for ordered: [FeatureOrder.OrderedFeature]) -> [String] {
+        var used: Set<String> = []
+        var names: [String] = []
+        names.reserveCapacity(ordered.count)
+        for (index, feature) in ordered.enumerated() {
+            let slug = sanitizeLayerSlug(rawLayerIdentity(for: feature))
+            var name = "feature-\(slug)"
+            if used.contains(name) {
+                name = "feature-\(slug)-\(index)"
+            }
+            var suffix = 2
+            while used.contains(name) {
+                name = "feature-\(slug)-\(index)-\(suffix)"
+                suffix += 1
+            }
+            used.insert(name)
+            names.append(name)
+        }
+        return names
+    }
+
+    /// Stable human identity before path sanitizing.
+    static func rawLayerIdentity(for feature: FeatureOrder.OrderedFeature) -> String {
+        let id = feature.metadata.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !id.isEmpty { return id }
+        return FeatureRef.featureId(from: feature.admitted.reference)
+    }
+
+    /// Dockerfile + Apple-ref-safe slug: no `/` or `:`, `[a-z0-9._-]` only.
+    static func sanitizeLayerSlug(_ raw: String) -> String {
+        let mapped = raw.lowercased().unicodeScalars.map { scalar -> Character in
+            if CharacterSet.alphanumerics.contains(scalar)
+                || scalar == "." || scalar == "_" || scalar == "-"
+            {
+                return Character(scalar)
+            }
+            return "-"
+        }
+        var name = String(mapped)
+        while name.contains("--") {
+            name = name.replacingOccurrences(of: "--", with: "-")
+        }
+        name = name.trimmingCharacters(in: CharacterSet(charactersIn: "-."))
+        if name.count > 48 {
+            name = String(name.prefix(48)).trimmingCharacters(in: CharacterSet(charactersIn: "-."))
+        }
+        return name.isEmpty ? "feature" : name
     }
 
     /// Dockerfile `LABEL` value: double-quoted, with `\`, `"`, and `$` escaped.

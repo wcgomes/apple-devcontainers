@@ -12,12 +12,14 @@ public enum DerivedImageTag {
     ///
     /// Bump when `FeatureDockerfileGenerator` install-layer semantics change
     /// so `imageExists` does not reuse images built with the old recipe.
-    /// Current `"6"`: bake unioned lifecycle (base-image metadata + features)
+    /// Current `"7"`: install COPY/RUN paths use sanitized feature identity
+    /// (`feature-<id>` / `/tmp/adev-feature-<id>`) instead of ordinal `feature-N`.
+    /// Prior `"6"`: bake unioned lifecycle (base-image metadata + features)
     /// onto `devcontainer.metadata` so resume remelt does not drop base-image
-    /// hooks. Prior `"5"` reused a features-only LABEL (plus chmod-before-install,
+    /// hooks. Was `"5"`: features-only LABEL (plus chmod-before-install,
     /// restore base USER, and feature `containerEnv` as Dockerfile `ENV` before
     /// each install `RUN`).
-    public static let recipeVersion = "6"
+    public static let recipeVersion = "7"
 
     public static func compute(
         baseImage: String,
