@@ -165,8 +165,8 @@ struct AdevcontainerMain {
             )
             return 0
 
-        case "prune":
-            return try PruneCommand.run(
+        case "purge":
+            return try PurgeCommand.run(
                 name: parsed.name,
                 runtime: runtime
             )
@@ -200,7 +200,7 @@ struct AdevcontainerMain {
             throw CLIError(
                 code: CLIErrorCode.usage,
                 message: "Unknown subcommand '\(subcommand)'",
-                hint: "Try: doctor | up | clone | rebuild | list | start | exec | stop | delete | prune | inspect"
+                hint: "Try: doctor | up | clone | rebuild | list | start | exec | stop | delete | purge | inspect"
             )
         }
     }

@@ -232,14 +232,14 @@ public enum CommandSurface {
           exec [-it] [--name] [--] [cmd...]  Run a command (or shell) in a managed dev container
           stop [--name]       Stop a managed dev container (name or picker)
           delete [--name]     Remove container only (not workspace volume)
-          prune [--name]      Remove container, volumes (incl. *-ws), and config image
+          purge [--name]      Remove container, volumes (incl. *-ws), and config image
           rebuild [--name]    Force-rebuild a managed dev container from its current config
                                (same name; volumes preserved)
           inspect [--name]    Show identity, state, labels (from runtime + labels)
 
         Options:
           -w, --workspace <path>   Workspace root for `up` only (default: cwd)
-          --name <container>       Managed container name/id (exec/start/stop/delete/prune/rebuild/inspect)
+          --name <container>       Managed container name/id (exec/start/stop/delete/purge/rebuild/inspect)
           --resume <config-dir>    Resume clone from a retained config checkout (clone only)
           --json                   Machine-readable output (up, clone, list, rebuild); on start,
                                    suppresses the interactive recovery prompt
@@ -413,9 +413,9 @@ public enum CommandSurface {
 
             Remove the managed container only (not volumes or images).
             """
-        case "prune":
+        case "purge":
             return """
-            adevcontainer prune [--name <container>]
+            adevcontainer purge [--name <container>]
 
             Remove managed container, config named volumes (label), volume-mode
             workspace volume (*-ws), and config image. Selection via --name/picker.

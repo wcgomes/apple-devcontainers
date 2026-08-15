@@ -44,7 +44,7 @@ Resource identity stem `adev-{base}-{hash12}` (empty base → `adev-{hash12}`). 
 | After Features merge, before volume ensure + create | `expandDevcontainerId` with the stem: **`up`** → bind stem; **`clone`** → volume stem; **`rebuild`** → same stem (stable across create-name change). |
 | Safety net | `CreateRequest.from` / `fromVolumeMode` expand mounts + stamp `devcontainer.config_volumes` from post-expansion sources (idempotent if already expanded). |
 
-**Config hash:** bind-mode hash may keep the deferred token in mount material; **volume-mode** hash / `config_volumes` label use **post-expansion** sources so identity and prune see real volume names. Expand **before** `ensureVolume` so Apple names match `^[A-Za-z0-9][A-Za-z0-9_.-]*$`. Contract: [`specs/core.md`](../../specs/core.md) (Variable substitution subset).
+**Config hash:** bind-mode hash may keep the deferred token in mount material; **volume-mode** hash / `config_volumes` label use **post-expansion** sources so identity and purge see real volume names. Expand **before** `ensureVolume` so Apple names match `^[A-Za-z0-9][A-Za-z0-9_.-]*$`. Contract: [`specs/core.md`](../../specs/core.md) (Variable substitution subset).
 
 ## MountNormalizer (file → directory bind promotion)
 
@@ -134,7 +134,7 @@ Set on create and use for reuse/inspect/`list`:
 | Label `devcontainer.workspace_mode` | `bind` on `up` create; `volume` on `clone` create |
 | Label `devcontainer.workspace_volume` | Workspace volume name (`adev-*-ws`; volume-mode) |
 | Label `devcontainer.git_url` | Normalized remote (userinfo stripped; volume-mode) |
-| Label `devcontainer.config_volumes` | Config `type=volume` source names — **prune candidate set only** (delete gated on real mounts; see [prune](#prune-resource-set)) |
+| Label `devcontainer.config_volumes` | Config `type=volume` source names — **purge candidate set only** (delete gated on real mounts; see [purge](#purge-resource-set)) |
 | Label `devcontainer.workspace_folder` | Create-time container workdir for exec (both modes) |
 | Label `devcontainer.remote_user` | Resolved connection user at create (both modes); **always non-empty on new creates** (incl. `root`); empty = legacy only; consumed by `exec` / `--vscode` |
 
@@ -212,7 +212,7 @@ Apple named volumes mount **root:root** ([gaps](../domain/devcontainer-apple-gap
 **Only `up` uses `-w`/cwd** (bind workspace path). All other lifecycle commands resolve a managed container via `--name` or interactive picker — never `-w`.
 
 - `list [--json]`: client-side filter to `devcontainer.managed=adevcontainer` only.
-- `start` / `exec` / `stop` / `delete` / `prune` / `rebuild` / `inspect`: `--name` or picker among managed; no host workspace path required.
+- `start` / `exec` / `stop` / `delete` / `purge` / `rebuild` / `inspect`: `--name` or picker among managed; no host workspace path required.
 - `start`: runtime start of a managed container. **Real start** (bind+volume): host `initializeCommand` when a host workspace exists (volume start without host path skips+warns) → `postStartCommand` + feature remelt → CLI-attach postAttach. **Already-running:** no initialize/postStart; postAttach only after successful `--vscode` open. **Never applies** settings/extensions. **No** create-name occupancy classification. Start failure: TTY recovery delegates to `rebuild --name` (does **not** re-run start or open an editor); non-TTY/`--json`/decline → original error + hint `adevcontainer rebuild --name <name>`.
 - `exec`: user/workdir from labels `devcontainer.remote_user` / `devcontainer.workspace_folder` when set (both modes stamp workdir; new creates always stamp non-empty `remote_user` incl. `root`; empty label = legacy omit `-u` — see [Connection user](#connection-user-remoteuser--containeruser)).
 
@@ -252,9 +252,9 @@ Shared primitive for `up`/`clone` (edit-and-retry) and `start` (rebuild handoff)
 - **`clone`:** retain product-managed checkout (`~/Library/Application Support/adevcontainer/clone-recovery`, marker `.adevcontainer-retained-checkout`); retry without re-fetch; non-TTY exact `clone --resume <config-dir>`. Resume/remove: managed root + marker only; never delete an external path. Successful TTY retry/`--resume` overlays edited `devcontainer.json` into the guest workspace after populate (replaces git-populated original; in-container write `adevcontainer-clone-persist`). Overlay is clone-recovery only; none when there is no editable config. Rebuild helper write-back unchanged.
 - **`start`:** TTY → `rebuild --name`; never re-run start, open an editor, or write config.
 
-## `prune` resource set
+## `purge` resource set
 
-`prune` removes container + config `image` + **unreferenced** candidate volumes. Labels define candidates only — **not** unconditional volume delete.
+`purge` removes container + config `image` + **unreferenced** candidate volumes. Labels define candidates only — **not** unconditional volume delete.
 
 | Resource | Included? |
 |----------|-----------|
@@ -268,7 +268,7 @@ Shared primitive for `up`/`clone` (edit-and-retry) and `start` (rebuild handoff)
 
 **Attachment gate (after target container deleted or already absent):** for each distinct candidate name, inspect real volume mounts on **all** remaining containers (managed or not, **running or stopped**) via `containersAttached` / `list --all` style inspection. Target does not count. **Unreferenced** + exists → delete. **Referenced (shared)** → preserve + stderr StatusPrinter warning listing referencers (prefer name+id); share-only is **not** a hard failure (exit 0 when no other hard fails). **Attach inspect fail** → preserve that volume + non-zero. Runtime rejection on volume delete remains hard-fail. Missing resources skipped.
 
-**Model:** labels live on containers, not volumes; same volume name = shared resource (Docker-like). No Compose `external` / shared-private naming schema. `delete` stays container-only. Recovery-helper prune skip unchanged. Contract: [`specs/managed-lifecycle.md`](../../specs/managed-lifecycle.md); archive [`20260812-prune-shared-volume-safety`](../../specs/changes/archive/20260812-prune-shared-volume-safety/).
+**Model:** labels live on containers, not volumes; same volume name = shared resource (Docker-like). No Compose `external` / shared-private naming schema. `delete` stays container-only. Recovery-helper purge skip unchanged. Contract: [`specs/managed-lifecycle.md`](../../specs/managed-lifecycle.md); archive [`20260812-prune-shared-volume-safety`](../../specs/changes/archive/20260812-prune-shared-volume-safety/).
 
 ## Features runner
 

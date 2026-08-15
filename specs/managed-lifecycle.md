@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Unified managed-container selection for non-`up` lifecycle commands, named-volume reuse on `up`, `list`/`start`/`prune`, bring-up recovery for `up` and `start`, and related managed lifecycle operations shared by bind-mode and volume-mode workspaces.
+Unified managed-container selection for non-`up` lifecycle commands, named-volume reuse on `up`, `list`/`start`/`purge`, bring-up recovery for `up` and `start`, and related managed lifecycle operations shared by bind-mode and volume-mode workspaces.
 
 ## Requirements
 
@@ -13,7 +13,7 @@ Lifecycle commands share **one** selection model. Only `up` accepts `-w` / `--wo
 | Command | Selection |
 |---------|-----------|
 | `up` | `-w` / `--workspace` (default cwd) — bind-mode create/start/reuse |
-| `exec`, `stop`, `delete`, `prune`, `inspect`, `start`, `rebuild` | `ManagedContainers.resolveSelection(name:)` only — `--name` and/or interactive picker over `devcontainer.managed=adevcontainer` |
+| `exec`, `stop`, `delete`, `purge`, `inspect`, `start`, `rebuild` | `ManagedContainers.resolveSelection(name:)` only — `--name` and/or interactive picker over `devcontainer.managed=adevcontainer` |
 | `clone`, `list`, `doctor` | no `-w` (unchanged) |
 
 If the user passes `-w` / `--workspace` on any non-`up` command (including `rebuild`), the CLI MUST fail with a structured **usage** error whose message includes that `-w is only valid for up` (clearer than silently ignoring).
@@ -89,9 +89,9 @@ If no container exists, inspect MUST fail structurally or report not-found consi
 
 ---
 
-### Requirement: Prune command
+### Requirement: Purge command
 
-`adevcontainer prune` MUST remove:
+`adevcontainer purge` MUST remove:
 
 | Resource | Included? |
 |----------|-----------|
@@ -105,7 +105,7 @@ If no container exists, inspect MUST fail structurally or report not-found consi
 
 **Identity and candidates (unchanged intent):**
 
-- Identity resolution for prune MUST be managed-only (`--name` / picker), same as stop/delete/exec/inspect.
+- Identity resolution for purge MUST be managed-only (`--name` / picker), same as stop/delete/exec/inspect.
 - Config named volumes MUST be taken from the `devcontainer.config_volumes` label when present.
 - Missing `workspace_volume` label (bind-mode) means no workspace volume candidate.
 - Labels define the **candidate volume set only**. The product MUST NOT invent Compose `external` support, shared/private naming conventions, or new public `devcontainer.json` fields for this decision.
@@ -123,14 +123,14 @@ If no container exists, inspect MUST fail structurally or report not-found consi
 For each existing candidate volume name:
 
 - The product MUST determine whether **any other container** (managed or not, **running or stopped**) still has a **real volume mount** of that name, using existing attachment inspection semantics (`containersAttached` / `list --all` style mount inspection already used elsewhere in the product).
-- The pruned target container MUST NOT count as an attachment (it is already deleted or was absent).
-- **Unreferenced:** if no remaining container mounts the volume, and the volume exists, prune MUST delete it (same success/skip-missing behavior as today for the delete call itself).
-- **Referenced (shared):** if one or more remaining containers mount the volume, prune MUST **preserve** the volume (MUST NOT call volume delete for it) and MUST emit a **stderr** status warning via the StatusPrinter pattern stating that the volume is preserved because it is still referenced, and listing the referencing containers preferably by **name and id** when both are available (name alone is acceptable when id is unavailable).
-- Legitimate sharing MUST **not** by itself cause a non-zero exit. When the only volume-related deviations are share-preserves (and any missing-volume skips), and container/image deletes did not hard-fail, prune MUST exit **0**.
+- The purged target container MUST NOT count as an attachment (it is already deleted or was absent).
+- **Unreferenced:** if no remaining container mounts the volume, and the volume exists, purge MUST delete it (same success/skip-missing behavior as today for the delete call itself).
+- **Referenced (shared):** if one or more remaining containers mount the volume, purge MUST **preserve** the volume (MUST NOT call volume delete for it) and MUST emit a **stderr** status warning via the StatusPrinter pattern stating that the volume is preserved because it is still referenced, and listing the referencing containers preferably by **name and id** when both are available (name alone is acceptable when id is unavailable).
+- Legitimate sharing MUST **not** by itself cause a non-zero exit. When the only volume-related deviations are share-preserves (and any missing-volume skips), and container/image deletes did not hard-fail, purge MUST exit **0**.
 
 **Attachment inspection failure (MUST):**
 
-- If listing or parsing attachments fails for a candidate volume (runtime list failure, unparseable payload, or equivalent inability to decide safely), prune MUST **preserve** that volume (MUST NOT delete it) and MUST treat the command as a **hard failure** (non-zero exit).
+- If listing or parsing attachments fails for a candidate volume (runtime list failure, unparseable payload, or equivalent inability to decide safely), purge MUST **preserve** that volume (MUST NOT delete it) and MUST treat the command as a **hard failure** (non-zero exit).
 - The product MUST NOT delete a volume when it cannot prove the volume is unreferenced.
 
 **Volume delete runtime failure (MUST):**
@@ -142,7 +142,7 @@ For each existing candidate volume name:
 - Missing candidate volumes are skipped without error solely for absence.
 - Bind-mount host paths are never deleted; no global volume/image prune is invoked.
 - Ordinary `delete` remains **container-only**; this change MUST NOT add a force-volumes flag or make `delete` remove volumes.
-- Recovery helper prune skip behavior is unchanged.
+- Recovery helper purge skip behavior is unchanged.
 
 **Exit summary (MUST):**
 
@@ -155,68 +155,68 @@ For each existing candidate volume name:
 | Runtime volume/image delete of existing resource failed | Per attempt | non-zero |
 | All handled or already absent; shares only warned | As above | 0 |
 
-#### Scenario: Prune removes volume-mode workspace volume when unreferenced
+#### Scenario: Purge removes volume-mode workspace volume when unreferenced
 - Given a volume-mode managed container with workspace volume `adev-{base}-{hash12}-ws` and optional config named volumes, and no other container mounts those volumes
-- When the user runs `adevcontainer prune --name <that-name>`
+- When the user runs `adevcontainer purge --name <that-name>`
 - Then the container is gone, unreferenced config named volumes are removed, the config image reference is removed per base policy, **and** the workspace volume `*-ws` is removed
 
-#### Scenario: Prune bind-mode uses config_volumes label when unreferenced
+#### Scenario: Purge bind-mode uses config_volumes label when unreferenced
 - Given a bind-mode managed container with `config_volumes=vol-a,vol-b`, no workspace_volume label, and no other container mounts `vol-a` or `vol-b`
-- When the user runs `adevcontainer prune --name <that-name>`
+- When the user runs `adevcontainer purge --name <that-name>`
 - Then the container and labeled config volumes are removed; no `*-ws` volume delete is attempted solely for bind mode
 
-#### Scenario: Prune still skips binds and global prune
+#### Scenario: Purge still skips binds and global prune
 - Given bind mounts in a bind-mode config
-- When the user runs `adevcontainer prune` targeting that container
+- When the user runs `adevcontainer purge` targeting that container
 - Then host bind paths remain and no global volume/image prune is invoked
 
-#### Scenario: Prune skips missing resources
-- Given no managed dev container and no matching named volumes (or selection finds nothing to prune per existing managed selection rules)
-- When the user runs `adevcontainer prune` in a situation where resources are already absent after valid selection handling
+#### Scenario: Purge skips missing resources
+- Given no managed dev container and no matching named volumes (or selection finds nothing to purge per existing managed selection rules)
+- When the user runs `adevcontainer purge` in a situation where resources are already absent after valid selection handling
 - Then the command succeeds without erroring solely because resources were already absent
 
-#### Scenario: Prune preserves volume still mounted by another container
-- Given managed container A selected for prune with candidate volume `shared-data`, and container B (running or stopped) still has a real volume mount of `shared-data`
-- When the user runs `adevcontainer prune --name <A>`
+#### Scenario: Purge preserves volume still mounted by another container
+- Given managed container A selected for purge with candidate volume `shared-data`, and container B (running or stopped) still has a real volume mount of `shared-data`
+- When the user runs `adevcontainer purge --name <A>`
 - Then container A is deleted, volume `shared-data` still exists, no volume-delete was applied to `shared-data`, and stderr carries a StatusPrinter-style warning that the volume was preserved because it is referenced, listing B preferably by name and id
 - And the command exits 0 when no other hard failures occur
 
-#### Scenario: Prune deletes unreferenced candidate among mixed attachments
-- Given prune candidates `vol-shared` and `vol-only`, where another container mounts only `vol-shared`, and `vol-only` has no remaining mounts after target delete
-- When the user runs `adevcontainer prune` on the target
+#### Scenario: Purge deletes unreferenced candidate among mixed attachments
+- Given purge candidates `vol-shared` and `vol-only`, where another container mounts only `vol-shared`, and `vol-only` has no remaining mounts after target delete
+- When the user runs `adevcontainer purge` on the target
 - Then `vol-only` is removed, `vol-shared` is preserved with a reference warning, and exit is 0 when no hard failures occur
 
 #### Scenario: Stopped container attachment still protects volume
 - Given another container that is **stopped** but still configured with a real volume mount of candidate volume `v1`
-- When prune evaluates `v1` after deleting the target
+- When purge evaluates `v1` after deleting the target
 - Then `v1` is preserved (stopped attachments count) with the same warning class as a running attacher
 
 #### Scenario: Labels discover candidates; mounts decide deletion
 - Given a managed container whose labels list volume `from-label` but after target delete no remaining container mounts `from-label`
-- When prune runs
+- When purge runs
 - Then `from-label` is a delete candidate because of the label and is deleted because mounts show it unreferenced
 - Given instead the labels omit `other-vol` even if some host volume exists by that name
-- When prune runs
-- Then prune MUST NOT delete `other-vol` solely because it exists on the host (not in the candidate set)
+- When purge runs
+- Then purge MUST NOT delete `other-vol` solely because it exists on the host (not in the candidate set)
 
 #### Scenario: Container delete failure blocks all volume deletes
-- Given a managed prune target whose container delete fails at the runtime
-- When the user runs `adevcontainer prune --name <that-name>`
+- Given a managed purge target whose container delete fails at the runtime
+- When the user runs `adevcontainer purge --name <that-name>`
 - Then the command returns non-zero and MUST NOT delete any candidate volumes (including unreferenced ones)
 
 #### Scenario: Attachment inspection failure preserves volume and fails
-- Given a candidate volume that exists and attachment list/parse fails so prune cannot prove the volume is unreferenced
-- When prune evaluates that volume
+- Given a candidate volume that exists and attachment list/parse fails so purge cannot prove the volume is unreferenced
+- When purge evaluates that volume
 - Then the volume is left in place, the command exits non-zero, and no success is claimed for that volume delete
 
 #### Scenario: Runtime volume delete rejection remains hard failure
 - Given an unreferenced existing candidate volume whose runtime `volume delete` fails
-- When prune attempts deletion
+- When purge attempts deletion
 - Then the command exits non-zero (hard failure)
 
 #### Scenario: Recovery helper skip unchanged
-- Given a marked recovery helper selected for prune
-- When the user runs `adevcontainer prune --name <helper>`
+- Given a marked recovery helper selected for purge
+- When the user runs `adevcontainer purge --name <helper>`
 - Then the helper, its referenced workspace/config volumes, and its image are not removed, and the command exits 0
 
 #### Scenario: delete remains container-only

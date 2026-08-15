@@ -248,7 +248,7 @@ Unsupported substitution tokens MUST cause a structured error naming the token. 
 - Feature metadata mounts (and config mounts) MAY embed `${devcontainerId}` in volume `source` (e.g. shell-history `source=${devcontainerId}-shellhistory`).
 - When the resource identity stem is not yet known at config resolve, the token MAY remain unsubstituted through resolve.
 - Before named-volume ensure and `container create`, the CLI MUST expand `${devcontainerId}` to the resource identity stem so Apple volume names match `^[A-Za-z0-9][A-Za-z0-9_.-]*$`.
-- Volume-mode config hash / `devcontainer.config_volumes` labels MUST use post-expansion mount sources so identity stays stable and prune sees real volume names.
+- Volume-mode config hash / `devcontainer.config_volumes` labels MUST use post-expansion mount sources so identity stays stable and purge sees real volume names.
 - A rebuild that only changes config `name` (create name) MUST expand `${devcontainerId}` to the same stem as before so those volumes are reused.
 
 #### Scenario: localEnv in mount source
@@ -290,7 +290,7 @@ When `features` is present, config hash material MUST include the selected featu
 | `devcontainer.workspace_folder` | Container workspace folder |
 | `devcontainer.remote_user` | MUST be the **resolved remote connection user** (non-empty). MUST NOT be stamped empty on a successful create. |
 | `devcontainer.config_volumes` | Comma-separated config `type=volume` sources when any; omit/empty otherwise |
-| `devcontainer.git_url` / `devcontainer.workspace_volume` | MUST NOT be set (or empty; prune ignores missing ws vol) |
+| `devcontainer.git_url` / `devcontainer.workspace_volume` | MUST NOT be set (or empty; purge ignores missing ws vol) |
 
 **Resource base** (rebuild-stable sidecars only)
 
@@ -474,7 +474,7 @@ On `clone` create, the CLI MUST:
 | Config hash label (e.g. `devcontainer.config_hash`) | MUST be set per existing drift/identity policy |
 | `devcontainer.workspace_folder` | Container workspace folder |
 | `devcontainer.remote_user` | MUST be the **resolved remote connection user** (non-empty). MUST NOT be stamped empty on a successful create (same contract as bind-mode — see [core.md](../../core.md) **Remote connection user resolution** and **Deterministic identity and labels**) |
-| `devcontainer.config_volumes` | MUST be set on clone create when the resolved config has one or more `mounts` with `type=volume`: comma-separated list of those volume **source** names. MUST be omitted or empty when there are no config named volumes. `prune` MUST use this label (when present) to remove config named volumes for managed/volume-mode targets without re-resolving host config. |
+| `devcontainer.config_volumes` | MUST be set on clone create when the resolved config has one or more `mounts` with `type=volume`: comma-separated list of those volume **source** names. MUST be omitted or empty when there are no config named volumes. `purge` MUST use this label (when present) to remove config named volumes for managed/volume-mode targets without re-resolving host config. |
 
 Additional existing labels MAY be set. Discovery of managed containers for `list` / `start` / extended `stop` MUST filter client-side on `devcontainer.managed=adevcontainer` after machine JSON list (Apple `container` has no label filter API).
 

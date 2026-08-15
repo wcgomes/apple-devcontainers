@@ -1,6 +1,6 @@
 import Foundation
 
-public enum PruneCommand {
+public enum PurgeCommand {
     /// Removes managed dev container, named volumes from config labels, config image,
     /// and volume-mode workspace volume (`*-ws` / label) when applicable.
     ///
@@ -21,7 +21,7 @@ public enum PruneCommand {
             picker: picker
         )
 
-        // A recovery helper is an active repair endpoint. Ordinary prune must not remove the
+        // A recovery helper is an active repair endpoint. Ordinary purge must not remove the
         // endpoint, its workspace/config volumes, or its image; explicit container-only
         // `delete --name` remains the operator-facing cleanup path.
         if RecoveryHelper.isRecoveryHelper(info) {
@@ -30,7 +30,7 @@ public enum PruneCommand {
             return 0
         }
 
-        let target = PruneTarget(
+        let target = PurgeTarget(
             container: info,
             expectedContainerName: info.name,
             configVolumeNames: ContainerIdentity.parseConfigVolumeNames(from: info.labels),
@@ -41,7 +41,7 @@ public enum PruneCommand {
             image: info.image
         )
 
-        StatusPrinter.status("Pruning dev container resources")
+        StatusPrinter.status("Purging dev container resources")
         var hardFailure = false
         var containerDeleteFailed = false
         let targetContainerID = target.container?.id
@@ -135,13 +135,13 @@ public enum PruneCommand {
             }
         }
 
-        StatusPrinter.status("Prune complete")
+        StatusPrinter.status("Purge complete")
         return hardFailure ? 1 : 0
     }
 
     // MARK: - Target
 
-    private struct PruneTarget {
+    private struct PurgeTarget {
         var container: ContainerInfo?
         var expectedContainerName: String?
         var configVolumeNames: [String]

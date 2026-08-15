@@ -73,7 +73,7 @@ Unsupported substitution tokens MUST cause a structured error naming the token. 
 - Feature metadata mounts (and config mounts) MAY embed `${devcontainerId}` in volume `source` (e.g. shell-history `source=${devcontainerId}-shellhistory`).
 - When the create name is not yet known at config resolve (common for feature mounts; clone volume-mode name differs from bind-mode path identity), the token MAY remain unsubstituted through resolve.
 - Before named-volume ensure and `container create`, the CLI MUST expand `${devcontainerId}` to the create `--name` value so Apple volume names match `^[A-Za-z0-9][A-Za-z0-9_.-]*$`.
-- Volume-mode config hash / `devcontainer.config_volumes` labels MUST use post-expansion mount sources so identity stays stable and prune sees real volume names.
+- Volume-mode config hash / `devcontainer.config_volumes` labels MUST use post-expansion mount sources so identity stays stable and purge sees real volume names.
 
 #### Scenario: localEnv in mount source
 - Given `containerEnv` or a mount `source` containing `${localEnv:HOME}/.kube/config` and `HOME` is set on the host
@@ -440,7 +440,7 @@ When `features` is present, config hash material MUST include the selected featu
 | `devcontainer.workspace_folder` | Container workspace folder |
 | `devcontainer.remote_user` | MUST be the **resolved remote connection user** (non-empty). MUST NOT be stamped empty on a successful create. |
 | `devcontainer.config_volumes` | Comma-separated config `type=volume` sources when any; omit/empty otherwise |
-| `devcontainer.git_url` / `devcontainer.workspace_volume` | MUST NOT be set (or empty; prune ignores missing ws vol) |
+| `devcontainer.git_url` / `devcontainer.workspace_volume` | MUST NOT be set (or empty; purge ignores missing ws vol) |
 
 **Human base (bind-mode)**
 

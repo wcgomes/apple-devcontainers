@@ -21,7 +21,7 @@ Apple `container create --name` is the container id and DNS hostname, so this pr
 - Letting config `name` participate in `${devcontainerId}`, `*-ws`, or Features `nameBase`.
 - Changing the hashed Features-tag / workspace-volume *format*, or rewriting user-literal volume sources.
 - Silent reuse, replace, or attach when `clone` hits the same workspace already running under the computed name (still fail-closed; not rename-to-duplicate).
-- Changing bring-up recovery, managed selection, `list`, prune, or rebuild recovery.
+- Changing bring-up recovery, managed selection, `list`, purge, or rebuild recovery.
 
 ## Approach
 

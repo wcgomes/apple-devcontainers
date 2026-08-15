@@ -2,7 +2,7 @@
 
 ## Architecture
 
-- [Architecture](architecture.md) — architecture, lifecycle, identity — System structure, lifecycle behavior, and command routing.
+- [Architecture](architecture.md) — architecture, lifecycle, identity, purge — System structure, lifecycle behavior, and command routing.
 
 ## Decisions
 
@@ -18,6 +18,6 @@
 ## Conventions
 
 - [Terminal output](conventions/terminal-output.md) — terminal, output, formatting — Defines terminal output conventions and presentation behavior.
-- [CLI runtime boundary](conventions/cli-runtime-boundary.md) — runtime, identity, Features — Defines runtime boundaries, identities, mounts, and Feature handling.
+- [CLI runtime boundary](conventions/cli-runtime-boundary.md) — runtime, identity, Features, purge — Defines runtime boundaries, identities, mounts, and Feature handling.
 - [Release distribution](conventions/release-distribution.md) — release, distribution, Homebrew — Defines release, packaging, and distribution conventions.
 - [Workspace devcontainer](conventions/workspace-devcontainer.md) — workspace, devcontainer, tooling — Documents the repository’s development container conventions.
