@@ -2441,7 +2441,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
             configName: nil
         )
         try MiniTest.expect(parsed?["containerId"] as? String == s.newContainerId, "json containerId")
-        try MiniTest.expect(obj["containerName"] as? String == expectedName, "json containerName")
+        try MiniTest.expect(obj["containerName"] == nil, "json omits containerName")
         try MiniTest.expect(obj["gitUrl"] == nil && obj["workspaceVolume"] == nil, "bind json omits volume fields")
         try expectPostSuccessConnectionHints(stderr, nameOrId: expectedName)
     }),

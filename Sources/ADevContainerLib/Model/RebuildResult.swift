@@ -70,7 +70,6 @@ public struct RebuildResult: Sendable {
             "remoteUser": remoteUser,
             "remoteWorkspaceFolder": remoteWorkspaceFolder
         ]
-        if let containerName { obj["containerName"] = containerName }
         if let gitUrl { obj["gitUrl"] = gitUrl }
         if let workspaceVolume { obj["workspaceVolume"] = workspaceVolume }
         return obj

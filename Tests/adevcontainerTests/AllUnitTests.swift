@@ -363,7 +363,7 @@ nonisolated(unsafe) let errorModelTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(obj["containerId"] as? String, "abc123")
         try MiniTest.expectEqual(obj["remoteUser"] as? String, "vscode")
         try MiniTest.expectEqual(obj["remoteWorkspaceFolder"] as? String, "/workspaces/app")
-        try MiniTest.expectEqual(obj["containerName"] as? String, "adev-app-deadbeef")
+        try MiniTest.expect(obj["containerName"] == nil)
     }),
     ("packageLoads", {
         try MiniTest.expectEqual(CLIErrorCode.configNotFound, "config_not_found")
