@@ -97,7 +97,7 @@ Enable when stderr is a TTY and `NO_COLOR` unset. `FORCE_COLOR=1` may force; **`
 
 - Say **dev container** for the managed product container (not “workspace container”).
 - Keep **workspace folder**, **workspace volume** (`*-ws`), `-w/--workspace` (host path on `up`) as technical terms.
-- Example status: `==> Ensuring git feature for volume-mode dev container`, `==> Pruning dev container resources`.
+- Example status: `==> Ensuring git feature for volume-mode dev container`, `==> Purging dev container resources`.
 
 ## Agent / implementer rules
 

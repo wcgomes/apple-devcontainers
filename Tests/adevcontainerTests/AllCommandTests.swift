@@ -635,7 +635,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
             try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.containerNotFound)
         }
     }),
-    ("pruneDeletesContainerVolumesImageInOrder", {
+    ("purgeDeletesContainerVolumesImageInOrder", {
         let workspace = try TestRepo.makeTempWorkspace(configJSON: """
         {
           "image": "alpine:3.20",
@@ -688,7 +688,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        let code = try PruneCommand.run(name: resolved.containerName, runtime: runtime)
+        let code = try PurgeCommand.run(name: resolved.containerName, runtime: runtime)
         try MiniTest.expect(code == 0)
 
         let argSeq = mock.calls.map(\.arguments)
@@ -708,7 +708,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         // Bind mounts must not trigger volume delete
         try MiniTest.expect(!argSeq.contains { $0.starts(with: ["volume", "delete"]) && $0.contains("/tmp") })
     }),
-    ("pruneSkipsRecoveryHelperAndReferencedResources", {
+    ("purgeSkipsRecoveryHelperAndReferencedResources", {
         let labels: [String: String] = [
             ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
             ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
@@ -734,14 +734,14 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         }]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         try MiniTest.expectEqual(
-            try PruneCommand.run(name: "recovery-helper", runtime: runtime),
+            try PurgeCommand.run(name: "recovery-helper", runtime: runtime),
             0
         )
         try MiniTest.expect(
             !mock.calls.contains { call in
                 ["delete", "volume", "image"].contains(call.arguments.first ?? "")
             },
-            "prune does not delete the helper, referenced volumes, or image"
+            "purge does not delete the helper, referenced volumes, or image"
         )
 
         let deleteMock = MockProcessRunner()
@@ -759,7 +759,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         try DeleteCommand.run(name: "recovery-helper", runtime: deleteRuntime)
         try MiniTest.expect(deleteMock.calls.contains { $0.arguments.first == "delete" })
     }),
-    ("pruneMissingManagedErrors", {
+    ("purgeMissingManagedErrors", {
         let mock = MockProcessRunner()
         mock.handlers = [
             { args in
@@ -772,12 +772,12 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         try MiniTest.expectThrows({
-            _ = try PruneCommand.run(name: "adev-missing", runtime: runtime)
+            _ = try PurgeCommand.run(name: "adev-missing", runtime: runtime)
         }) { error in
             try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.containerNotFound)
         }
     }),
-    ("prunePreservesVolumeMountedByAnotherRunningContainer", {
+    ("purgePreservesVolumeMountedByAnotherRunningContainer", {
         let targetID = "adev-target-prune"
         let otherID = "other"
         let labels: [String: String] = [
@@ -787,7 +787,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         let target = MockProcessRunner.containerListJSON(
             id: targetID, state: "stopped", labels: labels, image: "alpine:3.20"
         )
-        let other = pruneAttachedContainerJSON(
+        let other = purgeAttachedContainerJSON(
             id: otherID, state: "running", volumes: ["shared-data"]
         )
         let volumeListData = try JSONSerialization.data(withJSONObject: [["id": "shared-data"]] as [[String: Any]])
@@ -822,7 +822,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         StatusPrinter.onWarning = { warnings.append($0) }
 
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        let code = try PruneCommand.run(name: targetID, runtime: runtime)
+        let code = try PurgeCommand.run(name: targetID, runtime: runtime)
         try MiniTest.expectEqual(code, 0)
         try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" })
         try MiniTest.expect(
@@ -834,7 +834,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(preserve!.contains("referenced by containers:"))
         try MiniTest.expect(preserve!.contains(otherID))
     }),
-    ("prunePreservesVolumeMountedByStoppedContainer", {
+    ("purgePreservesVolumeMountedByStoppedContainer", {
         let targetID = "adev-target-stopped-share"
         let otherID = "stopped-other"
         let labels: [String: String] = [
@@ -844,7 +844,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         let target = MockProcessRunner.containerListJSON(
             id: targetID, state: "stopped", labels: labels, image: "alpine:3.20"
         )
-        let other = pruneAttachedContainerJSON(
+        let other = purgeAttachedContainerJSON(
             id: otherID, state: "stopped", volumes: ["v1"]
         )
         let volumeListData = try JSONSerialization.data(withJSONObject: [["id": "v1"]] as [[String: Any]])
@@ -879,7 +879,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         StatusPrinter.onWarning = { warnings.append($0) }
 
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        let code = try PruneCommand.run(name: targetID, runtime: runtime)
+        let code = try PurgeCommand.run(name: targetID, runtime: runtime)
         try MiniTest.expectEqual(code, 0)
         try MiniTest.expect(
             !mock.calls.contains { $0.arguments == ["volume", "delete", "v1"] },
@@ -887,7 +887,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expect(warnings.contains { $0.contains("Preserving volume 'v1'") && $0.contains(otherID) })
     }),
-    ("pruneDeletesUnreferencedAmongMixedAttachments", {
+    ("purgeDeletesUnreferencedAmongMixedAttachments", {
         let targetID = "adev-target-mixed"
         let otherID = "peer"
         let labels: [String: String] = [
@@ -897,7 +897,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         let target = MockProcessRunner.containerListJSON(
             id: targetID, state: "stopped", labels: labels, image: "alpine:3.20"
         )
-        let other = pruneAttachedContainerJSON(
+        let other = purgeAttachedContainerJSON(
             id: otherID, state: "running", volumes: ["vol-shared"]
         )
         let volumeListData = try JSONSerialization.data(withJSONObject: [
@@ -935,7 +935,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         StatusPrinter.onWarning = { warnings.append($0) }
 
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        let code = try PruneCommand.run(name: targetID, runtime: runtime)
+        let code = try PurgeCommand.run(name: targetID, runtime: runtime)
         try MiniTest.expectEqual(code, 0)
         try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "delete", "vol-only"] })
         try MiniTest.expect(
@@ -945,7 +945,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
             $0.contains("Preserving volume 'vol-shared'") && $0.contains(otherID)
         })
     }),
-    ("prunePreservesSharedWorkspaceVolumeAndRemovesUnreferenced", {
+    ("purgePreservesSharedWorkspaceVolumeAndRemovesUnreferenced", {
         let targetID = "adev-ws-share-target"
         let otherID = "ws-peer"
         let wsVol = "adev-app-sharetest-ws"
@@ -957,7 +957,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         let target = MockProcessRunner.containerListJSON(
             id: targetID, state: "stopped", labels: labels, image: "alpine:3.20"
         )
-        let other = pruneAttachedContainerJSON(
+        let other = purgeAttachedContainerJSON(
             id: otherID, state: "running", volumes: [wsVol]
         )
         let volumeListData = try JSONSerialization.data(withJSONObject: [["id": wsVol]] as [[String: Any]])
@@ -992,7 +992,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         StatusPrinter.onWarning = { warnings.append($0) }
 
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        let code = try PruneCommand.run(name: targetID, runtime: runtime)
+        let code = try PurgeCommand.run(name: targetID, runtime: runtime)
         try MiniTest.expectEqual(code, 0)
         try MiniTest.expect(
             !mock.calls.contains { $0.arguments == ["volume", "delete", wsVol] },
@@ -1002,7 +1002,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
             $0.contains("Preserving volume '\(wsVol)'") && $0.contains(otherID)
         })
     }),
-    ("pruneContainerDeleteFailureBlocksAllVolumeDeletes", {
+    ("purgeContainerDeleteFailureBlocksAllVolumeDeletes", {
         let targetID = "adev-target-delete-fail"
         let labels: [String: String] = [
             ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
@@ -1042,14 +1042,14 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        let code = try PruneCommand.run(name: targetID, runtime: runtime)
+        let code = try PurgeCommand.run(name: targetID, runtime: runtime)
         try MiniTest.expect(code != 0)
         try MiniTest.expect(
             !mock.calls.contains { $0.arguments.starts(with: ["volume", "delete"]) },
             "container delete failure must skip the entire volume-delete loop"
         )
     }),
-    ("pruneAttachmentInspectionFailurePreservesVolumeAndFails", {
+    ("purgeAttachmentInspectionFailurePreservesVolumeAndFails", {
         let targetID = "adev-target-attach-fail"
         let labels: [String: String] = [
             ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
@@ -1094,14 +1094,14 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        let code = try PruneCommand.run(name: targetID, runtime: runtime)
+        let code = try PurgeCommand.run(name: targetID, runtime: runtime)
         try MiniTest.expect(code != 0)
         try MiniTest.expect(
             !mock.calls.contains { $0.arguments == ["volume", "delete", "risky-vol"] },
             "must not delete volume when attachment inspection fails"
         )
     }),
-    ("pruneVolumeDeleteRejectionIsHardFailure", {
+    ("purgeVolumeDeleteRejectionIsHardFailure", {
         let targetID = "adev-target-vol-reject"
         let labels: [String: String] = [
             ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
@@ -1141,11 +1141,11 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        let code = try PruneCommand.run(name: targetID, runtime: runtime)
+        let code = try PurgeCommand.run(name: targetID, runtime: runtime)
         try MiniTest.expect(code != 0)
         try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "delete", "doomed-vol"] })
     }),
-    ("pruneOnlyDeletesLabeledCandidatesNotHostExtras", {
+    ("purgeOnlyDeletesLabeledCandidatesNotHostExtras", {
         let targetID = "adev-target-labels-only"
         let labels: [String: String] = [
             ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
@@ -1185,7 +1185,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        let code = try PruneCommand.run(name: targetID, runtime: runtime)
+        let code = try PurgeCommand.run(name: targetID, runtime: runtime)
         try MiniTest.expectEqual(code, 0)
         try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "delete", "from-label"] })
         try MiniTest.expect(
@@ -1195,8 +1195,8 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
     })
 ]
 
-/// Container list JSON with real volume mounts (RecoveryHelperTests shape) for prune attachment mocks.
-private func pruneAttachedContainerJSON(
+/// Container list JSON with real volume mounts (RecoveryHelperTests shape) for purge attachment mocks.
+private func purgeAttachedContainerJSON(
     id: String,
     state: String,
     volumes: [String],

@@ -86,7 +86,7 @@ TTY it offers to open and retry the config; in automation, edit the printed path
 | `adevcontainer list [--json]` | List managed dev containers |
 | `adevcontainer start [--name <name>] [--vscode] [--json] \| stop \| inspect [--name <name>]` | Manage a container by name or with the interactive picker |
 | `adevcontainer delete [--name <name>]` | Remove a container, keeping its managed volumes |
-| `adevcontainer prune [--name <name>]` | Remove a container, its managed volumes, and the image |
+| `adevcontainer purge [--name <name>]` | Remove a container, its managed volumes, and the image |
 | `adevcontainer rebuild [--name <name>] [--vscode]` | Rebuild a managed container from its current configuration |
 | `adevcontainer help [<command>]` | Show main usage or per-command help |
 | `adevcontainer version [--version]` | Print the CLI version |

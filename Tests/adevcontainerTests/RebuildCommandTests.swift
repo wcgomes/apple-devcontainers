@@ -399,7 +399,7 @@ nonisolated(unsafe) let rebuildCommandTests: [(String, () throws -> Void)] = [
     ("helpRoutesCommandSpecificHelp", {
         // `help <command>` MUST print the same command-specific help as `<command> --help`
         // (regression: `help rebuild` printed the main usage text instead).
-        for cmd in ["up", "clone", "rebuild", "list", "start", "exec", "stop", "delete", "prune", "inspect"] {
+        for cmd in ["up", "clone", "rebuild", "list", "start", "exec", "stop", "delete", "purge", "inspect"] {
             try MiniTest.expectEqual(
                 CommandSurface.resolveHelpSubcommand(args: ["help", cmd]),
                 cmd,

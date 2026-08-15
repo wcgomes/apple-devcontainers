@@ -2119,7 +2119,7 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
     }),
 ]
 
-// MARK: - List / start / stop / prune
+// MARK: - List / start / stop / purge
 
 nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
     ("listShowsOnlyManaged", {
@@ -2657,7 +2657,7 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
         try StopCommand.run(name: resolved.containerName, runtime: runtime)
         try MiniTest.expect(mock.calls.contains { $0.arguments == ["stop", resolved.containerName] })
     }),
-    ("pruneRemovesWorkspaceVolume", {
+    ("purgeRemovesWorkspaceVolume", {
         let mock = MockProcessRunner()
         let volName = "adev-app-aaaabbbbcccc-ws"
         let entry = MockProcessRunner.containerListJSON(
@@ -2696,7 +2696,7 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        let code = try PruneCommand.run(
+        let code = try PurgeCommand.run(
             name: "adev-app-aaaabbbbcccc",
             runtime: runtime
         )
@@ -2704,7 +2704,7 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" })
         try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "delete", volName] })
     }),
-    ("pruneManagedRemovesConfigVolumesFromLabel", {
+    ("purgeManagedRemovesConfigVolumesFromLabel", {
         let mock = MockProcessRunner()
         let wsVol = "adev-app-aaaabbbbcccc-ws"
         let entry = MockProcessRunner.containerListJSON(
@@ -2748,7 +2748,7 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
-        let code = try PruneCommand.run(
+        let code = try PurgeCommand.run(
             name: "adev-app-aaaabbbbcccc",
             runtime: runtime
         )

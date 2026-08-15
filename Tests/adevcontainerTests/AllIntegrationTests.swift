@@ -447,7 +447,7 @@ nonisolated(unsafe) let integrationTests: [(String, () throws -> Void)] = [
 
     ("recoveryE2E_cloneOriginAndNonTTYRecoveryFlow", {
         // Spec §13.1–13.4: clone-origin volume workspace → post-delete hard failure →
-        // non-TTY/JSON recovery → edit temp → named retry → final verify + prune/cleanup.
+        // non-TTY/JSON recovery → edit temp → named retry → final verify + purge/cleanup.
         try RecoveryE2ESupport.runNonTTYJsonRecoveryFlow()
     }),
     ("recoveryE2E_ttyInteractivePath_skippedByDefault", {
@@ -1034,24 +1034,24 @@ enum RecoveryE2ESupport {
         )
         try MiniTest.expectEqual(helperWsCode, 0, "workspace sentinel survives via helper")
 
-        // ── 13.4 list [RECOVERY] + prune skip (while helper alive) ──
+        // ── 13.4 list [RECOVERY] + purge skip (while helper alive) ──
         let listed = try ListCommand.run(options: ListOptions(jsonOutput: false), runtime: runtime)
         try MiniTest.expect(listed.contains("[RECOVERY]"), "human list marks recovery helper")
         try MiniTest.expect(listed.contains(name), "human list includes helper name")
 
-        let pruneCode = try PruneCommand.run(name: name, runtime: runtime)
-        try MiniTest.expectEqual(pruneCode, 0)
+        let purgeCode = try PurgeCommand.run(name: name, runtime: runtime)
+        try MiniTest.expectEqual(purgeCode, 0)
         try MiniTest.expect(
             try runtime.findByName(name) != nil,
-            "ordinary prune must leave the recovery helper"
+            "ordinary purge must leave the recovery helper"
         )
         try MiniTest.expect(
             try runtime.volumeExists(wsVol, requireObjectEntries: true),
-            "prune must leave workspace volume"
+            "purge must leave workspace volume"
         )
         try MiniTest.expect(
             try runtime.volumeExists(configVolumeName!),
-            "prune must leave config volume"
+            "purge must leave config volume"
         )
 
         // Named selection still addresses the helper (runtime exec; Alpine has no vscode).

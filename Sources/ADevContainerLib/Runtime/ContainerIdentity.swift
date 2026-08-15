@@ -11,7 +11,7 @@ public enum ContainerIdentity {
     public static let labelGitURL = "devcontainer.git_url"
     public static let labelWorkspaceVolume = "devcontainer.workspace_volume"
     public static let labelWorkspaceMode = "devcontainer.workspace_mode"
-    /// Comma-separated config `type=volume` mount source names (clone/managed prune).
+    /// Comma-separated config `type=volume` mount source names (clone/managed purge).
     public static let labelConfigVolumes = "devcontainer.config_volumes"
     /// Container workspace folder for exec (volume-mode).
     public static let labelWorkspaceFolder = "devcontainer.workspace_folder"
