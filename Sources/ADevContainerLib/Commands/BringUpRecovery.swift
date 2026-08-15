@@ -50,6 +50,127 @@ public enum BringUpRecovery {
         }
     }
 
+    public static let changeNamePromptText = "Change the name? [Y/n] "
+    public static let newNamePromptText = "New name: "
+
+    /// TTY offer for a foreign occupant: Y/n then a full-name prompt. Never opens an editor,
+    /// never offers a suffix, never deletes the occupant. Decline/cancel/EOF rethrows the
+    /// original name-in-use error.
+    public static func runNameCollision<T>(
+        failure: Error,
+        guidance: Guidance,
+        createName: String,
+        isTTY: Bool,
+        jsonOutput: Bool,
+        prompt: RecoveryOpenEditorPrompt = .default,
+        persistName: (String) throws -> Void,
+        retry: () throws -> T
+    ) throws -> T {
+        let initialFailure = (failure as? EligibleFailure)?.cause ?? failure
+        guard isTTY, !jsonOutput else {
+            throw hintError(initialFailure, guidance)
+        }
+
+        var activeFailure = initialFailure
+        var currentName = createName
+        while true {
+            emitNameCollisionWarning(
+                name: currentName,
+                failure: activeFailure,
+                writeError: prompt.writeError
+            )
+            prompt.writeError(changeNamePromptText)
+            switch RecoveryOpenEditorPrompt.classify(prompt.readLine()) {
+            case .decline:
+                throw activeFailure
+            case .affirmative:
+                break
+            }
+
+            let persisted = try readAcceptedCreateName(
+                prompt: prompt,
+                eofError: activeFailure
+            )
+            try persistName(persisted)
+            currentName = persisted
+
+            do {
+                return try retry()
+            } catch let next as EligibleFailure {
+                let cause = next.cause
+                if isNameInUse(cause) {
+                    activeFailure = cause
+                    if let cli = cause as? CLIError, let nextName = nameFromCollision(cli) {
+                        currentName = nextName
+                    }
+                    continue
+                }
+                throw next
+            } catch {
+                if isNameInUse(error) {
+                    activeFailure = error
+                    continue
+                }
+                throw error
+            }
+        }
+    }
+
+    /// Prompt for a full create name until sanitize succeeds. Empty/invalid re-prompt.
+    /// EOF throws `eofError`.
+    private static func readAcceptedCreateName(
+        prompt: RecoveryOpenEditorPrompt,
+        eofError: Error
+    ) throws -> String {
+        while true {
+            prompt.writeError(newNamePromptText)
+            guard let raw = prompt.readLine() else { throw eofError }
+            if let accepted = acceptedCreateName(raw) {
+                return accepted
+            }
+        }
+    }
+
+    /// Sanitize a typed full name. Nil when empty after DNS-safe sanitize or longer than 63.
+    public static func acceptedCreateName(_ raw: String) -> String? {
+        let sanitized = ContainerIdentity.sanitizeCreateName(raw)
+        guard !sanitized.isEmpty, sanitized.count <= 63 else { return nil }
+        let unclipped = ContainerIdentity.sanitizeDNS(raw)
+        guard unclipped.count <= 63 else { return nil }
+        return sanitized
+    }
+
+    public static func isNameInUse(_ error: Error) -> Bool {
+        (error as? CLIError)?.code == CLIErrorCode.containerNameInUse
+            || ((error as? EligibleFailure)?.cause as? CLIError)?.code == CLIErrorCode.containerNameInUse
+    }
+
+    public static func createName(fromCollision failure: Error) -> String? {
+        let cause = (failure as? EligibleFailure)?.cause ?? failure
+        guard let cli = cause as? CLIError else { return nil }
+        return nameFromCollision(cli)
+    }
+
+    private static func nameFromCollision(_ error: CLIError) -> String? {
+        let prefix = "Container name '"
+        guard error.message.hasPrefix(prefix),
+              let end = error.message.range(of: "' is in use")
+        else { return nil }
+        let start = error.message.index(error.message.startIndex, offsetBy: prefix.count)
+        return String(error.message[start..<end.lowerBound])
+    }
+
+    private static func emitNameCollisionWarning(
+        name: String,
+        failure: Error,
+        writeError: (String) -> Void
+    ) {
+        writeError("warning: container name '\(name)' is in use and is not this workspace\n")
+        if let cli = failure as? CLIError {
+            writeError(cli.formatted() + "\n")
+        }
+    }
+
     /// Run the interactive recovery loop and return the result of the final retry.
     ///
     /// - Parameters:

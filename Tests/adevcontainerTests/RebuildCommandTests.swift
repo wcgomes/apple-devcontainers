@@ -77,6 +77,301 @@ nonisolated(unsafe) let rebuildCommandTests: [(String, () throws -> Void)] = [
 
     // ---- 2.3 usage + help ----
 
+    ("rebuildAfterEditingNameUsesNewCreateName", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "name": "Other App",
+          "image": "alpine:3.20",
+          "remoteUser": "vscode",
+          "mounts": ["source=team-cache,target=/cache,type=volume"]
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let oldName = "my-app"
+        let selected = RebuildScenario.container(
+            id: oldName,
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [selected]
+        s.volumes = ["team-cache"]
+        s.newContainerId = "other-app"
+        s.install()
+        let result = try RebuildCommand.run(
+            options: RebuildOptions(name: oldName, skipPull: true),
+            runtime: s.runtime
+        )
+        try MiniTest.expectEqual(result.containerName, "other-app")
+        let createArgs = s.mock.calls.first { $0.arguments.first == "create" }?.arguments ?? []
+        if let idx = createArgs.firstIndex(of: "--name"), idx + 1 < createArgs.count {
+            try MiniTest.expectEqual(createArgs[idx + 1], "other-app")
+        } else {
+            try MiniTest.expect(false, "expected create --name other-app")
+        }
+        try MiniTest.expect(createArgs.contains { $0.contains("source=team-cache") })
+        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.contains(oldName) })
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.starts(with: ["volume", "delete"]) })
+        let deleteIdx = s.mock.calls.firstIndex { $0.arguments.first == "delete" && $0.arguments.contains(oldName) }
+        let createIdx = s.mock.calls.firstIndex { $0.arguments.first == "create" }
+        try MiniTest.expect(deleteIdx != nil && createIdx != nil && deleteIdx! < createIdx!)
+    }),
+
+    ("rebuildMigratesAdevNameToShortComputedName", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "name": "My App", "image": "alpine:3.20", "remoteUser": "vscode" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let oldName = "adev-myapp-abc123def456"
+        let selected = RebuildScenario.container(
+            id: oldName,
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [selected]
+        s.newContainerId = "my-app"
+        s.install()
+        let result = try RebuildCommand.run(
+            options: RebuildOptions(name: oldName, skipPull: true),
+            runtime: s.runtime
+        )
+        try MiniTest.expectEqual(result.containerName, "my-app")
+        let createArgs = s.mock.calls.first { $0.arguments.first == "create" }?.arguments ?? []
+        if let idx = createArgs.firstIndex(of: "--name"), idx + 1 < createArgs.count {
+            try MiniTest.expectEqual(createArgs[idx + 1], "my-app")
+        } else {
+            try MiniTest.expect(false, "expected create --name my-app")
+        }
+        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.contains(oldName) })
+        try MiniTest.expect(!createArgs.contains(oldName) || createArgs.contains("my-app"))
+    }),
+
+    ("rebuildSameComputedNameIsUnchanged", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "name": "My App", "image": "alpine:3.20", "remoteUser": "vscode" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let selected = RebuildScenario.container(
+            id: "my-app",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [selected]
+        s.newContainerId = "my-app"
+        s.install()
+        let result = try RebuildCommand.run(
+            options: RebuildOptions(name: "my-app", skipPull: true),
+            runtime: s.runtime
+        )
+        try MiniTest.expectEqual(result.containerName, "my-app")
+        let createArgs = s.mock.calls.first { $0.arguments.first == "create" }?.arguments ?? []
+        if let idx = createArgs.firstIndex(of: "--name"), idx + 1 < createArgs.count {
+            try MiniTest.expectEqual(createArgs[idx + 1], "my-app")
+        } else {
+            try MiniTest.expect(false, "expected same-name rebuild")
+        }
+        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.contains("my-app") })
+    }),
+
+    ("rebuildForeignOccupantDoesNotDeleteSelected", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "name": "My App", "image": "alpine:3.20", "remoteUser": "vscode" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let oldName = "adev-myapp-abc123def456"
+        let selected = RebuildScenario.container(
+            id: oldName,
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        let occupant = RebuildScenario.container(
+            id: "my-app",
+            labels: [
+                ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+                ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeBind,
+                ContainerIdentity.labelLocalFolder: "/other/ws",
+                ContainerIdentity.labelConfigFile: "/other/ws/.devcontainer/devcontainer.json"
+            ]
+        )
+        s.containers = [selected, occupant]
+        s.install()
+        try MiniTest.expectThrows({
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(name: oldName, skipPull: true, jsonOutput: true),
+                runtime: s.runtime,
+                isTTY: true
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.containerNameInUse)
+            try MiniTest.expect(err.hint?.contains("rebuild") == true)
+        }
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "delete" })
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "create" })
+        try MiniTest.expect(s.containers.contains { $0.id == oldName })
+        try MiniTest.expect(s.containers.contains { $0.id == "my-app" })
+    }),
+
+    ("rebuildTTYForeignOccupantRenamesWithoutDeletingSelectedUntilOccupiable", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "name": "My App", "image": "alpine:3.20", "remoteUser": "vscode" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let oldName = "adev-myapp-abc123def456"
+        let cfg = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+        let selected = RebuildScenario.container(
+            id: oldName,
+            labels: s.bindLabels(localFolder: ws.path, configFile: cfg)
+        )
+        let occupant = RebuildScenario.container(
+            id: "my-app",
+            labels: [
+                ContainerIdentity.labelLocalFolder: "/other/ws",
+                ContainerIdentity.labelConfigFile: "/other/ws/.devcontainer/devcontainer.json"
+            ]
+        )
+        s.containers = [selected, occupant]
+        s.newContainerId = "free-name"
+        s.install()
+        final class Box: @unchecked Sendable {
+            var remaining: [String] = ["y", "free-name"]
+            var lines: [String] = []
+        }
+        let box = Box()
+        let result = try RebuildCommand.run(
+            options: RebuildOptions(name: oldName, skipPull: true),
+            runtime: s.runtime,
+            isTTY: true,
+            openEditorPrompt: RecoveryOpenEditorPrompt(
+                readLine: {
+                    if box.remaining.isEmpty { return nil }
+                    return box.remaining.removeFirst()
+                },
+                writeError: { box.lines.append($0) }
+            )
+        )
+        try MiniTest.expectEqual(result.containerName, "free-name")
+        let joined = box.lines.joined()
+        try MiniTest.expect(joined.contains("not this workspace"))
+        try MiniTest.expect(joined.contains(BringUpRecovery.changeNamePromptText))
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.contains("my-app") })
+        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.contains(oldName) })
+        let host = try String(contentsOfFile: cfg, encoding: .utf8)
+        try MiniTest.expect(host.contains("free-name"))
+        let createArgs = s.mock.calls.first { $0.arguments.first == "create" }?.arguments ?? []
+        if let idx = createArgs.firstIndex(of: "--name"), idx + 1 < createArgs.count {
+            try MiniTest.expectEqual(createArgs[idx + 1], "free-name")
+        } else {
+            try MiniTest.expect(false, "expected create --name free-name")
+        }
+    }),
+
+    ("rebuildKeepsDevcontainerIdStemWhenCreateNameChanges", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "name": "My App",
+          "image": "alpine:3.20",
+          "remoteUser": "vscode",
+          "mounts": ["source=${devcontainerId}-shellhistory,target=/cmdhist,type=volume"]
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let cfg = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+        let stem = ContainerIdentity.bindResourceIdentityStem(
+            workspacePath: ws.path,
+            configPath: cfg
+        )
+        let s = RebuildScenario()
+        let oldName = "adev-myapp-abc123def456"
+        s.containers = [
+            RebuildScenario.container(
+                id: oldName,
+                labels: s.bindLabels(localFolder: ws.path, configFile: cfg)
+            )
+        ]
+        s.newContainerId = "my-app"
+        s.install()
+        _ = try RebuildCommand.run(
+            options: RebuildOptions(name: oldName, skipPull: true),
+            runtime: s.runtime
+        )
+        let createArgs = s.mock.calls.first { $0.arguments.first == "create" }?.arguments ?? []
+        if let idx = createArgs.firstIndex(of: "--name"), idx + 1 < createArgs.count {
+            try MiniTest.expectEqual(createArgs[idx + 1], "my-app")
+        }
+        try MiniTest.expect(createArgs.contains { $0.contains("source=\(stem)-shellhistory") })
+        try MiniTest.expect(!createArgs.contains { $0.contains("source=my-app-shellhistory") })
+        try MiniTest.expect(!createArgs.contains { $0.contains("source=\(oldName)-shellhistory") })
+        try MiniTest.expect(!createArgs.contains { $0.contains("${devcontainerId}") })
+        try MiniTest.expect(stem.hasPrefix("adev-"))
+        try MiniTest.expect(!stem.contains("my-app"))
+    }),
+
+    ("rebuildVolumeRenameKeepsStampedWorkspaceStem", {
+        let s = RebuildScenario()
+        s.volumeConfigText = """
+        { "name": "Other App", "image": "alpine:3.20", "remoteUser": "vscode",
+          "mounts": ["source=${devcontainerId}-shellhistory,target=/cmdhist,type=volume"] }
+        """
+        let wsVol = "adev-foo-abcdef123456-ws"
+        let oldName = "old-vol"
+        s.containers = [
+            RebuildScenario.container(
+                id: oldName,
+                labels: s.volumeLabels(
+                    gitURL: "https://github.com/org/foo.git",
+                    workspaceVolume: wsVol
+                )
+            )
+        ]
+        s.volumes = [wsVol]
+        s.newContainerId = "other-app"
+        s.install()
+        var result: RebuildResult?
+        try withRebuildVolumeOverrides {
+            result = try RebuildCommand.run(
+                options: RebuildOptions(name: oldName, skipPull: true),
+                runtime: s.runtime
+            )
+        }
+        try MiniTest.expectEqual(result?.containerName, "other-app")
+        try MiniTest.expectEqual(result?.workspaceVolume, wsVol)
+        let createArgs = s.mock.calls.first { $0.arguments.first == "create" }?.arguments ?? []
+        try MiniTest.expect(createArgs.contains { $0.contains("source=adev-foo-abcdef123456-shellhistory") })
+        try MiniTest.expect(!createArgs.contains { $0.contains("source=other-app-shellhistory") })
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.starts(with: ["volume", "delete"]) })
+    }),
+    ("rebuildDoesNotMigrateExistingAdevName", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20","remoteUser":"vscode"}"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let oldName = "adev-proj-0123456789ab"
+        s.containers = [
+            RebuildScenario.container(
+                id: oldName,
+                labels: s.bindLabels(
+                    localFolder: ws.path,
+                    configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+                )
+            )
+        ]
+        s.install()
+        // No rebuild invoked — leftover name stays. Classification is not a rename pass.
+        try MiniTest.expectEqual(s.containers[0].id, oldName)
+        try MiniTest.expect(s.containers[0].id.hasPrefix("adev-"))
+    }),
     ("usageTextListsRebuildWithFlags", {
         let text = CommandSurface.usageText()
         try MiniTest.expect(text.contains("rebuild"), "usage lists rebuild")

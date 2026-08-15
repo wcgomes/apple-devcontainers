@@ -313,5 +313,49 @@ nonisolated(unsafe) let startCommandRecoveryTests: [(String, () throws -> Void)]
             "start recovery adds no persist or helper write path"
         )
         try MiniTest.expect(mock.calls.allSatisfy { $0.stdinData == nil }, "start recovery streams no config bytes")
+    }),
+
+    ("startDoesNotOfferCreateNameCollision", {
+        let mock = MockProcessRunner()
+        let managed = MockProcessRunner.containerListJSON(
+            id: startRecoveryName,
+            state: "running",
+            labels: [ContainerIdentity.labelManaged: ContainerIdentity.managedValue]
+        )
+        let collider = MockProcessRunner.containerListJSON(
+            id: "my-app",
+            state: "running",
+            labels: [:]
+        )
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: try! JSONSerialization.data(withJSONObject: [managed, collider]),
+                        stderr: Data()
+                    )
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        final class Writes: @unchecked Sendable { var lines: [String] = [] }
+        let writes = Writes()
+        try StartCommand.run(
+            options: StartOptions(name: startRecoveryName),
+            runtime: runtime,
+            picker: InteractivePicker(
+                isInteractive: true,
+                readLine: { "1" },
+                writeError: { writes.lines.append($0) }
+            ),
+            isTTY: true
+        )
+        let joined = writes.lines.joined()
+        try MiniTest.expect(!joined.contains(BringUpRecovery.changeNamePromptText))
+        try MiniTest.expect(!joined.contains("not this workspace"))
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
     })
 ]

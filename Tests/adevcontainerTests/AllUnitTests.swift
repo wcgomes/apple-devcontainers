@@ -544,7 +544,7 @@ nonisolated(unsafe) let substitutionTests: [(String, () throws -> Void)] = [
             containerWorkspaceFolder: "/workspaces/ws",
             localEnv: [:]
         )
-        // Feature mounts / clone: leave token until create name is known.
+        // Feature mounts / clone: leave token until the resource identity stem is known.
         try MiniTest.expectEqual(
             try VariableSubstitutor.substitute("${devcontainerId}-shellhistory", context: ctx),
             "${devcontainerId}-shellhistory"
@@ -582,28 +582,31 @@ nonisolated(unsafe) let substitutionTests: [(String, () throws -> Void)] = [
                 )
             ]
         )
-        let name = "adev-ws-0123456789ab"
+        let name = "my-app"
+        let stem = "adev-ws-0123456789ab"
         let req = CreateRequest.from(
             resolved: config,
             identityName: name,
             labels: [:],
             configHash: "h",
-            workspacePath: "/ws"
+            workspacePath: "/ws",
+            devcontainerId: stem
         )
+        try MiniTest.expectEqual(req.name, name)
         try MiniTest.expectEqual(req.mounts.count, 1)
-        try MiniTest.expectEqual(req.mounts[0].source, "\(name)-shellhistory")
+        try MiniTest.expectEqual(req.mounts[0].source, "\(stem)-shellhistory")
         try MiniTest.expect(
             !req.mounts[0].source.contains("${"),
             "volume source must not retain unsubstituted tokens"
         )
         let vols = req.labels[ContainerIdentity.labelConfigVolumes] ?? ""
-        try MiniTest.expectEqual(vols, "\(name)-shellhistory")
+        try MiniTest.expectEqual(vols, "\(stem)-shellhistory")
         let args = req.createArguments()
         let mountFlags = args.enumerated().compactMap { i, a -> String? in
             i > 0 && args[i - 1] == "--mount" ? a : nil
         }
         try MiniTest.expect(
-            mountFlags.contains { $0.contains("source=\(name)-shellhistory") },
+            mountFlags.contains { $0.contains("source=\(stem)-shellhistory") },
             "create --mount uses expanded volume name"
         )
     }),
@@ -624,18 +627,159 @@ nonisolated(unsafe) let substitutionTests: [(String, () throws -> Void)] = [
             resolved.config.mounts[0].source,
             "${devcontainerId}-shellhistory"
         )
+        let stem = ContainerIdentity.bindResourceIdentityStem(
+            workspacePath: resolved.workspacePath,
+            configPath: resolved.configPath
+        )
         let expanded = VariableSubstitutor.expandDevcontainerId(
             in: resolved.config,
-            id: resolved.containerName
+            id: stem
         )
         try MiniTest.expectEqual(
             expanded.mounts[0].source,
-            "\(resolved.containerName)-shellhistory"
+            "\(stem)-shellhistory"
         )
         try MiniTest.expect(
             expanded.mounts[0].source.range(of: #"^[A-Za-z0-9][A-Za-z0-9_.-]*$"#, options: .regularExpression) != nil,
             "expanded volume name must match Apple volume regex"
         )
+    }),
+    ("featuresTagAndStemIgnoreConfigNameUseFolderBasename", {
+        let create = ContainerIdentity.containerName(
+            workspacePath: "/Projects/foo",
+            configPath: "/Projects/foo/.devcontainer/devcontainer.json",
+            configName: "My App"
+        )
+        try MiniTest.expectEqual(create, "my-app")
+        let base = ContainerIdentity.humanBase(workspacePath: "/Projects/foo")
+        try MiniTest.expectEqual(base, "foo")
+        let tag = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: [],
+            nameBase: base
+        )
+        try MiniTest.expect(tag.hasPrefix("adev-foo:"))
+        try MiniTest.expect(!tag.hasPrefix("adev-my-app:"))
+        let stem = ContainerIdentity.bindResourceIdentityStem(
+            workspacePath: "/Projects/foo",
+            configPath: "/Projects/foo/.devcontainer/devcontainer.json"
+        )
+        try MiniTest.expect(stem.hasPrefix("adev-foo-"))
+        try MiniTest.expect(!stem.contains("my-app"))
+        let expanded = VariableSubstitutor.expandDevcontainerId(
+            in: "${devcontainerId}-shellhistory",
+            id: stem
+        )
+        try MiniTest.expectEqual(expanded, "\(stem)-shellhistory")
+        try MiniTest.expect(expanded.hasPrefix("adev-foo-"))
+        let empty = DerivedImageTag.compute(baseImage: "alpine:3.20", ordered: [], nameBase: "")
+        try MiniTest.expect(empty.hasPrefix("adevcontainer:"))
+        let emptyStem = ContainerIdentity.resourceIdentityStem(base: "", hash12: "abcdef123456")
+        try MiniTest.expectEqual(emptyStem, "adev-abcdef123456")
+    }),
+    ("userLiteralVolumeSourceIsNotRewritten", {
+        let config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/ws",
+            mounts: [
+                MountSpec(type: .volume, source: "team-cache", target: "/cache")
+            ]
+        )
+        let req = CreateRequest.from(
+            resolved: config,
+            identityName: "my-app",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        )
+        try MiniTest.expectEqual(req.mounts[0].source, "team-cache")
+        try MiniTest.expect(!req.mounts[0].source.contains("my-app"))
+        try MiniTest.expect(!req.mounts[0].source.hasPrefix("adev-"))
+    }),
+    ("devcontainerIdExpandsToResourceIdentityStem", {
+        let stem = ContainerIdentity.bindResourceIdentityStem(
+            workspacePath: "/Projects/foo",
+            configPath: "/Projects/foo/.devcontainer/devcontainer.json"
+        )
+        try MiniTest.expect(stem.hasPrefix("adev-foo-"))
+        try MiniTest.expect(stem.hasSuffix(ContainerIdentity.bindWorkspaceHash12(
+            workspacePath: "/Projects/foo",
+            configPath: "/Projects/foo/.devcontainer/devcontainer.json"
+        )))
+        try MiniTest.expectEqual(stem.count, "adev-foo-".count + 12)
+        try MiniTest.expect(stem != "my-app")
+        let expanded = VariableSubstitutor.expandDevcontainerId(
+            in: "${devcontainerId}-shellhistory",
+            id: stem
+        )
+        try MiniTest.expectEqual(expanded, "\(stem)-shellhistory")
+        try MiniTest.expect(!expanded.hasPrefix("my-app-"))
+    }),
+    ("devcontainerIdEmptyHumanBaseUsesAdevHash12", {
+        let stem = ContainerIdentity.resourceIdentityStem(base: "", hash12: "abcdef123456")
+        try MiniTest.expectEqual(stem, "adev-abcdef123456")
+        let expanded = VariableSubstitutor.expandDevcontainerId(
+            in: "${devcontainerId}-shellhistory",
+            id: stem
+        )
+        try MiniTest.expectEqual(expanded, "adev-abcdef123456-shellhistory")
+    }),
+    ("devcontainerIdBindAndVolumeStemsStayDistinct", {
+        let bindStem = ContainerIdentity.bindResourceIdentityStem(
+            workspacePath: "/Projects/foo",
+            configPath: "/Projects/foo/.devcontainer/devcontainer.json"
+        )
+        let vol = ContainerIdentity.volumeModeIdentity(
+            gitURL: "https://github.com/org/foo.git",
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: "My App"
+        )
+        try MiniTest.expectEqual(bindStem, ContainerIdentity.resourceIdentityStem(
+            base: "foo",
+            hash12: ContainerIdentity.bindWorkspaceHash12(
+                workspacePath: "/Projects/foo",
+                configPath: "/Projects/foo/.devcontainer/devcontainer.json"
+            )
+        ))
+        try MiniTest.expectEqual(vol.resourceIdentityStem, ContainerIdentity.resourceIdentityStem(
+            base: vol.base,
+            hash12: vol.hash12
+        ))
+        try MiniTest.expectEqual(vol.workspaceVolumeName, "\(vol.resourceIdentityStem)-ws")
+        try MiniTest.expect(bindStem != vol.resourceIdentityStem, "bind and volume stems use distinct hash material")
+        try MiniTest.expectEqual(ContainerIdentity.containerName(
+            workspacePath: "/Projects/foo",
+            configPath: "/Projects/foo/.devcontainer/devcontainer.json"
+        ), "foo")
+        try MiniTest.expectEqual(vol.containerName, "my-app")
+        try MiniTest.expectEqual(vol.base, "foo")
+    }),
+    ("devcontainerIdConfigResolveExpandsToStemNotCreateName", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "name": "My App",
+          "image": "alpine:3.20",
+          "mounts": [
+            "source=${devcontainerId}-shellhistory,target=/cmdhist,type=volume"
+          ]
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        try MiniTest.expectEqual(resolved.containerName, "my-app")
+        let folderBase = ContainerIdentity.humanBase(workspacePath: resolved.workspacePath)
+        let stem = ContainerIdentity.bindResourceIdentityStem(
+            workspacePath: resolved.workspacePath,
+            configPath: resolved.configPath
+        )
+        try MiniTest.expect(stem.hasPrefix("adev-\(folderBase)-"))
+        try MiniTest.expect(!stem.contains("my-app"))
+        let expanded = VariableSubstitutor.expandDevcontainerId(
+            in: resolved.config,
+            id: stem
+        )
+        try MiniTest.expectEqual(expanded.mounts[0].source, "\(stem)-shellhistory")
+        try MiniTest.expect(expanded.mounts[0].source != "my-app-shellhistory")
     }),
     ("devcontainerIdFeatureMergeThenExpand", {
         let contrib = FeatureContributions(
@@ -658,11 +802,13 @@ nonisolated(unsafe) let substitutionTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(finalized.mounts[0].source, "\(id)-shellhistory")
         let req = CreateRequest.from(
             resolved: finalized,
-            identityName: id,
+            identityName: "my-app",
             labels: [:],
             configHash: "h",
-            workspacePath: "/ws"
+            workspacePath: "/ws",
+            devcontainerId: id
         )
+        try MiniTest.expectEqual(req.name, "my-app")
         try MiniTest.expectEqual(req.mounts[0].source, "\(id)-shellhistory")
     })
 ]
@@ -1923,34 +2069,64 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expectEqual(a, b)
         try MiniTest.expect(a.count <= 63)
-        try MiniTest.expect(a.hasPrefix("adev-proj-"))
+        try MiniTest.expectEqual(a, "proj")
+        try MiniTest.expect(!a.hasPrefix("adev-"))
         try MiniTest.expect(a.range(of: #"^[a-z0-9-]+$"#, options: .regularExpression) != nil)
     }),
     ("containerNamePrefersConfigName", {
         let withName = ContainerIdentity.containerName(
-            workspacePath: "/Users/me/proj",
-            configPath: "/Users/me/proj/.devcontainer/devcontainer.json",
-            configName: "My App!"
+            workspacePath: "/Users/me/other-folder",
+            configPath: "/Users/me/other-folder/.devcontainer/devcontainer.json",
+            configName: "My App"
         )
         let withoutName = ContainerIdentity.containerName(
-            workspacePath: "/Users/me/proj",
-            configPath: "/Users/me/proj/.devcontainer/devcontainer.json"
+            workspacePath: "/Users/me/other-folder",
+            configPath: "/Users/me/other-folder/.devcontainer/devcontainer.json"
         )
-        try MiniTest.expect(withName.hasPrefix("adev-my-app-"))
-        try MiniTest.expect(withoutName.hasPrefix("adev-proj-"))
-        // Hash material is path-only; short hash segment matches.
-        let hashWith = String(withName.split(separator: "-").last ?? "")
-        let hashWithout = String(withoutName.split(separator: "-").last ?? "")
-        try MiniTest.expectEqual(hashWith, hashWithout)
-        try MiniTest.expectEqual(hashWith.count, 12)
+        try MiniTest.expectEqual(withName, "my-app")
+        try MiniTest.expectEqual(withoutName, "other-folder")
+        try MiniTest.expect(!withName.hasPrefix("adev-"))
+        try MiniTest.expect(!withName.contains("hash"))
+        try MiniTest.expect(withName.range(of: #"[0-9a-f]{12}$"#, options: .regularExpression) == nil)
     }),
     ("containerNameIgnoresBlankConfigName", {
         let name = ContainerIdentity.containerName(
-            workspacePath: "/Users/me/proj",
-            configPath: "/Users/me/proj/.devcontainer/devcontainer.json",
+            workspacePath: "/Users/me/other-folder",
+            configPath: "/Users/me/other-folder/.devcontainer/devcontainer.json",
             configName: "   "
         )
-        try MiniTest.expect(name.hasPrefix("adev-proj-"))
+        try MiniTest.expectEqual(name, "other-folder")
+        try MiniTest.expect(!name.hasPrefix("adev-"))
+    }),
+    ("containerNameCollapsesPunctuationHyphens", {
+        let name = ContainerIdentity.containerName(
+            workspacePath: "/Users/me/proj",
+            configPath: "/Users/me/proj/.devcontainer/devcontainer.json",
+            configName: "C# (.NET)"
+        )
+        try MiniTest.expectEqual(name, "c-net")
+        try MiniTest.expectEqual(
+            ContainerIdentity.humanBase(workspacePath: "/Users/me/proj"),
+            "proj"
+        )
+    }),
+    ("containerNameAccepts63Characters", {
+        let raw = String(repeating: "a", count: 63)
+        let name = ContainerIdentity.containerName(
+            workspacePath: "/Users/me/proj",
+            configPath: "/Users/me/proj/.devcontainer/devcontainer.json",
+            configName: raw
+        )
+        try MiniTest.expectEqual(name, raw)
+        try MiniTest.expectEqual(name.count, 63)
+        try MiniTest.expect(!name.hasPrefix("adev-"))
+        let clipped = ContainerIdentity.containerName(
+            workspacePath: "/Users/me/proj",
+            configPath: "/Users/me/proj/.devcontainer/devcontainer.json",
+            configName: String(repeating: "b", count: 80)
+        )
+        try MiniTest.expectEqual(clipped.count, 63)
+        try MiniTest.expectEqual(clipped, String(repeating: "b", count: 63))
     }),
     ("resolverContainerNameFromConfigName", {
         let wsNamed = try TestRepo.makeTempWorkspace(configJSON: """
@@ -1958,13 +2134,32 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         """)
         defer { try? FileManager.default.removeItem(at: wsNamed) }
         let rNamed = try ConfigResolver.resolve(workspacePath: wsNamed.path, localEnv: [:])
-        try MiniTest.expect(rNamed.containerName.hasPrefix("adev-cool-app-"))
+        try MiniTest.expectEqual(rNamed.containerName, "cool-app")
+        try MiniTest.expect(!rNamed.containerName.hasPrefix("adev-"))
 
         let wsBare = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
         defer { try? FileManager.default.removeItem(at: wsBare) }
         let rBare = try ConfigResolver.resolve(workspacePath: wsBare.path, localEnv: [:])
-        let expectedBase = ContainerIdentity.humanBase(configName: nil, workspacePath: wsBare.path)
-        try MiniTest.expect(rBare.containerName.hasPrefix("adev-\(expectedBase)-"))
+        let expected = ContainerIdentity.sanitizeCreateName(
+            (wsBare.path as NSString).lastPathComponent
+        )
+        try MiniTest.expectEqual(rBare.containerName, expected)
+    }),
+    ("resolverEmptySanitizeAsksForDNSSafeName", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "name": "!!!", "image": "alpine:3.20" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try MiniTest.expectThrows({
+            _ = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.invalidCreateName)
+            try MiniTest.expectEqual(err.property, "name")
+            let text = (err.message + " " + (err.hint ?? "")).lowercased()
+            try MiniTest.expect(text.contains("dns-safe"), "error asks for a DNS-safe name")
+            try MiniTest.expect(!text.contains("adev-"), "must not fall back to adev-{hash12}")
+        }
     }),
     ("labelsKeys", {
         let labels = ContainerIdentity.labels(
@@ -4061,14 +4256,14 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         )
     }),
     ("featureDerivedTagUsesWorkspaceBasenameViaHumanBase", {
-        let base = ContainerIdentity.humanBase(configName: nil, workspacePath: "/Users/me/My_Project")
+        let base = ContainerIdentity.humanBase(workspacePath: "/Users/me/My_Project")
         try MiniTest.expectEqual(base, "my-project")
-        let named = ContainerIdentity.humanBase(configName: "Cool App", workspacePath: "/Users/me/My_Project")
-        try MiniTest.expectEqual(named, "cool-app")
+        let named = ContainerIdentity.humanBase(workspacePath: "/Users/me/My_Project")
+        try MiniTest.expectEqual(named, "my-project")
+        try MiniTest.expect(named != "cool-app", "config name must not drive resource base")
         // Collapse consecutive hyphens; clip ≤20; re-trim so base cannot end/start with `-`.
         let clipped = ContainerIdentity.humanBase(
-            configName: "test----------------end",
-            workspacePath: "/Users/me/My_Project"
+            workspacePath: "/Users/me/test----------------end"
         )
         try MiniTest.expectEqual(clipped, "test-end")
         try MiniTest.expect(!clipped.hasPrefix("-"))

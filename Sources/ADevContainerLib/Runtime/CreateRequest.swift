@@ -234,9 +234,15 @@ public struct CreateRequest: Equatable, Sendable {
         labels: [String: String],
         configHash: String,
         workspacePath: String,
-        platform: String? = ContainerPlatform.defaultLinuxPlatform
+        platform: String? = ContainerPlatform.defaultLinuxPlatform,
+        devcontainerId: String? = nil
     ) -> CreateRequest {
-        let expanded = VariableSubstitutor.expandDevcontainerId(in: resolved, id: identityName)
+        let expanded: ResolvedDevContainerConfig
+        if let stem = devcontainerId, !stem.isEmpty {
+            expanded = VariableSubstitutor.expandDevcontainerId(in: resolved, id: stem)
+        } else {
+            expanded = resolved
+        }
         let (memoryLimit, cpuLimit) = mergeMemoryCpuLimits(from: expanded)
         return CreateRequest(
             name: identityName,
@@ -271,9 +277,15 @@ public struct CreateRequest: Equatable, Sendable {
         configHash: String,
         workspaceVolumeName: String,
         platform: String? = ContainerPlatform.defaultLinuxPlatform,
-        enableSSHForward: Bool = false
+        enableSSHForward: Bool = false,
+        devcontainerId: String? = nil
     ) -> CreateRequest {
-        let expanded = VariableSubstitutor.expandDevcontainerId(in: resolved, id: identityName)
+        let expanded: ResolvedDevContainerConfig
+        if let stem = devcontainerId, !stem.isEmpty {
+            expanded = VariableSubstitutor.expandDevcontainerId(in: resolved, id: stem)
+        } else {
+            expanded = resolved
+        }
         let (memoryLimit, cpuLimit) = mergeMemoryCpuLimits(from: expanded)
         var runArgs = expanded.runArgs
         if enableSSHForward, !runArgs.contains(.ssh) {

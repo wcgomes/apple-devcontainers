@@ -3460,7 +3460,7 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(mock.calls.contains { $0.arguments.first == "create" })
         try MiniTest.expect(createHadPlatform)
         // Create uses derived features image, not raw base.
-        let expectedBase = ContainerIdentity.humanBase(configName: nil, workspacePath: ws.path)
+        let expectedBase = ContainerIdentity.humanBase(workspacePath: ws.path)
         try MiniTest.expect(imageInCreate?.hasPrefix("adev-\(expectedBase):") == true)
         try MiniTest.expect(imageInCreate?.contains("/features") != true)
         // No in-container feature install on up path.
@@ -3942,7 +3942,7 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expectEqual(result.outcome, "success")
         try MiniTest.expect(mock.calls.contains { $0.arguments.first == "build" })
-        let expectedBase = ContainerIdentity.humanBase(configName: nil, workspacePath: ws.path)
+        let expectedBase = ContainerIdentity.humanBase(workspacePath: ws.path)
         try MiniTest.expect(imageInCreate?.hasPrefix("adev-\(expectedBase):") == true)
         try MiniTest.expect(imageInCreate?.contains("/features") != true)
         // Dockerfile should install sample-a before sample-b
@@ -3956,5 +3956,145 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
                 try MiniTest.expect(idxA < idxB)
             }
         }
+    }),
+    ("upReusesSameWorkspaceSameNameOccupant", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        { "name": "My App", "image": "alpine:3.20" }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        try MiniTest.expectEqual(resolved.containerName, "my-app")
+        let entry = MockProcessRunner.containerListJSON(
+            id: "my-app",
+            state: "running",
+            labels: resolved.labels
+        )
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: try! JSONSerialization.data(withJSONObject: [entry]),
+                        stderr: Data()
+                    )
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        final class Writes: @unchecked Sendable { var lines: [String] = [] }
+        let writes = Writes()
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            isTTY: true,
+            openEditorPrompt: RecoveryOpenEditorPrompt(
+                readLine: { "y" },
+                writeError: { writes.lines.append($0) }
+            )
+        )
+        try MiniTest.expectEqual(result.containerId, "my-app")
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+        try MiniTest.expect(
+            !writes.lines.joined().contains(BringUpRecovery.changeNamePromptText),
+            "same-workspace reuse must not offer rename"
+        )
+    }),
+    ("upHashMismatchOnSameWorkspaceSameNameNoPicker", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        { "name": "My App", "image": "alpine:3.20" }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        var labels = resolved.labels
+        labels[ContainerIdentity.labelConfigHash] = "old-hash"
+        let entry = MockProcessRunner.containerListJSON(
+            id: "my-app",
+            state: "running",
+            labels: labels
+        )
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: try! JSONSerialization.data(withJSONObject: [entry]),
+                        stderr: Data()
+                    )
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        final class Writes: @unchecked Sendable { var lines: [String] = [] }
+        let writes = Writes()
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: workspace.path, skipPull: true),
+                runtime: runtime,
+                localEnv: [:],
+                isTTY: true,
+                openEditorPrompt: RecoveryOpenEditorPrompt(
+                    readLine: { "y" },
+                    writeError: { writes.lines.append($0) }
+                )
+            )
+        }) { error in
+            try MiniTest.expectEqual((error as? CLIError)?.code, CLIErrorCode.configHashMismatch)
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+        try MiniTest.expect(!writes.lines.joined().contains(BringUpRecovery.changeNamePromptText))
+    }),
+    ("upSameWorkspaceDifferentNameIsDeleteHint", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        { "name": "My App", "image": "alpine:3.20" }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        let leftover = MockProcessRunner.containerListJSON(
+            id: "adev-my-app-abc123def456",
+            state: "running",
+            labels: resolved.labels
+        )
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: try! JSONSerialization.data(withJSONObject: [leftover]),
+                        stderr: Data()
+                    )
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        final class Writes: @unchecked Sendable { var lines: [String] = [] }
+        let writes = Writes()
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: workspace.path, skipPull: true),
+                runtime: runtime,
+                localEnv: [:],
+                isTTY: true,
+                openEditorPrompt: RecoveryOpenEditorPrompt(
+                    readLine: { "y" },
+                    writeError: { writes.lines.append($0) }
+                )
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.workspaceContainerExists)
+            try MiniTest.expect(err.message.contains("adev-my-app-abc123def456"))
+            try MiniTest.expect(err.hint?.contains("delete") == true)
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+        try MiniTest.expect(!writes.lines.joined().contains(BringUpRecovery.changeNamePromptText))
     })
 ]

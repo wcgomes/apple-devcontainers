@@ -20,44 +20,98 @@ public enum ContainerIdentity {
     public static let workspaceModeVolume = "volume"
     public static let workspaceModeBind = "bind"
 
-    /// DNS-safe human base (≤20) from config `name` when non-empty after trim; else workspace basename.
-    public static func humanBase(configName: String?, workspacePath: String) -> String {
-        let raw: String
-        if let name = configName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
-            raw = name
-        } else {
-            raw = ((workspacePath as NSString).standardizingPath as NSString).lastPathComponent
-        }
+    /// Resource base (≤20) from workspace folder basename only. MUST NOT use config `name`.
+    public static func humanBase(workspacePath: String) -> String {
+        let raw = ((workspacePath as NSString).standardizingPath as NSString).lastPathComponent
         return sanitizeBase(raw)
+    }
+
+    /// Shared DNS-safe sanitize: lowercase; non-[a-z0-9-] → `-`; collapse hyphens; trim hyphens.
+    public static func sanitizeDNS(_ raw: String) -> String {
+        raw
+            .lowercased()
+            .replacingOccurrences(of: "[^a-z0-9-]", with: "-", options: .regularExpression)
+            .replacingOccurrences(of: "-{2,}", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
     /// Sanitize a human-readable name to DNS-safe base (≤20).
     /// Non-[a-z0-9-] → `-`, collapse consecutive hyphens, trim leading/trailing hyphens, clip ≤20.
     public static func sanitizeBase(_ raw: String) -> String {
-        let base = raw
-            .lowercased()
-            .replacingOccurrences(of: "[^a-z0-9-]", with: "-", options: .regularExpression)
-            .replacingOccurrences(of: "-{2,}", with: "-", options: .regularExpression)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        return String(base.prefix(20)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        String(sanitizeDNS(raw).prefix(20)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
-    /// Deterministic DNS-safe container name ≤ 63 chars from workspace + config path.
-    /// Human segment prefers config `name` when set; hash material remains workspace|config paths.
-    public static func containerName(
-        workspacePath: String,
-        configPath: String,
-        configName: String? = nil
-    ) -> String {
+    /// Sanitize a create `--name` / DNS hostname (≤63). No `adev-` prefix and no identity hash.
+    public static func sanitizeCreateName(_ raw: String) -> String {
+        String(sanitizeDNS(raw).prefix(63)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
+    /// Bind-mode identity hash12 (workspace path + config path). Used for occupancy tests and
+    /// any hashed sidecar that still keys off bind identity — not appended to the create name.
+    public static func bindWorkspaceHash12(workspacePath: String, configPath: String) -> String {
         let workspace = (workspacePath as NSString).standardizingPath
         let config = (configPath as NSString).standardizingPath
         let material = "\(workspace)|\(config)"
         let digest = SHA256.hash(data: Data(material.utf8))
         let hex = digest.map { String(format: "%02x", $0) }.joined()
-        let short = String(hex.prefix(12))
+        return String(hex.prefix(12))
+    }
 
-        let clippedBase = humanBase(configName: configName, workspacePath: workspace)
-        return composeContainerName(base: clippedBase, hash12: short)
+    /// Structured error when sanitize yields an empty create name. No invented `adev-{hash12}` fallback.
+    public static func emptyCreateNameError() -> CLIError {
+        CLIError(
+            code: CLIErrorCode.invalidCreateName,
+            property: "name",
+            message: "Create name is empty after DNS-safe sanitize",
+            hint: "Set a DNS-safe \"name\" in devcontainer.json (letters, digits, hyphens)"
+        )
+    }
+
+    /// DNS-friendly create name from config `name` or a mode-specific fallback. Empty after sanitize
+    /// returns `""` — callers that create (`up`/`clone`/resolve) MUST fail via `requireCreateName`.
+    public static func createName(configName: String?, fallback: String) -> String {
+        let raw: String
+        if let name = configName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            raw = name
+        } else {
+            raw = fallback
+        }
+        return sanitizeCreateName(raw)
+    }
+
+    public static func requireCreateName(_ name: String) throws -> String {
+        guard !name.isEmpty else { throw emptyCreateNameError() }
+        return name
+    }
+
+    /// Resource identity stem `adev-{base}-{hash12}` (empty base → `adev-{hash12}`).
+    /// Same stem used for product workspace volumes (`{stem}-ws`). Not the DNS create name.
+    public static func resourceIdentityStem(base: String, hash12: String) -> String {
+        composeContainerName(base: base, hash12: hash12)
+    }
+
+    /// Bind-mode `${devcontainerId}` stem: folder basename + path+config `hash12`.
+    public static func bindResourceIdentityStem(
+        workspacePath: String,
+        configPath: String
+    ) -> String {
+        resourceIdentityStem(
+            base: humanBase(workspacePath: workspacePath),
+            hash12: bindWorkspaceHash12(workspacePath: workspacePath, configPath: configPath)
+        )
+    }
+
+    /// Deterministic DNS-safe create name ≤ 63 chars. Prefers config `name`; else workspace basename.
+    /// MUST NOT prefix `adev-` or append an identity hash.
+    public static func containerName(
+        workspacePath: String,
+        configPath: String,
+        configName: String? = nil
+    ) -> String {
+        _ = configPath
+        let workspace = (workspacePath as NSString).standardizingPath
+        let fallback = (workspace as NSString).lastPathComponent
+        return createName(configName: configName, fallback: fallback)
     }
 
     /// Stable hash of resolved config fields that affect runtime shape.
@@ -166,6 +220,11 @@ public enum ContainerIdentity {
         public var workspaceVolumeName: String
         public var normalizedGitURL: String
         public var configRelativePath: String
+
+        /// `${devcontainerId}` stem: `adev-{base}-{hash12}` (same material as `workspaceVolumeName`).
+        public var resourceIdentityStem: String {
+            ContainerIdentity.resourceIdentityStem(base: base, hash12: hash12)
+        }
     }
 
     public static func volumeModeIdentity(
@@ -180,14 +239,10 @@ public enum ContainerIdentity {
         let hex = digest.map { String(format: "%02x", $0) }.joined()
         let hash12 = String(hex.prefix(12))
 
-        let base: String
-        if let name = configName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
-            base = sanitizeBase(name)
-        } else {
-            base = sanitizeBase(repoBasename(fromGitURL: gitURL))
-        }
-
-        let container = composeContainerName(base: base, hash12: hash12)
+        let fallback = repoBasename(fromGitURL: gitURL)
+        // Resource base is repo basename only — config `name` drives create name, not `*-ws`/stem.
+        let base = sanitizeBase(fallback)
+        let container = createName(configName: configName, fallback: fallback)
         let volume = composeWorkspaceVolumeName(base: base, hash12: hash12)
         return VolumeModeIdentity(
             hash12: hash12,
@@ -221,6 +276,104 @@ public enum ContainerIdentity {
             labels[labelConfigVolumes] = configVolumeNames.joined(separator: ",")
         }
         return labels
+    }
+
+    // MARK: - Create-name occupancy
+
+    public enum WorkspaceIdentityKey: Equatable, Sendable {
+        case bind(localFolder: String, configFile: String)
+        case volume(gitURL: String, configIdentity: String)
+    }
+
+    public enum CreateNameOccupancy: Equatable, Sendable {
+        case none
+        case sameWorkspaceSameName(ContainerInfo)
+        case sameWorkspaceDifferentName(ContainerInfo)
+        case foreign(ContainerInfo)
+    }
+
+    public static func matchesWorkspace(
+        _ info: ContainerInfo,
+        workspace: WorkspaceIdentityKey
+    ) -> Bool {
+        switch workspace {
+        case .bind(let localFolder, let configFile):
+            let folder = (localFolder as NSString).standardizingPath
+            let config = (configFile as NSString).standardizingPath
+            let stampedFolder = (info.labels[labelLocalFolder] ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let stampedConfig = (info.labels[labelConfigFile] ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return (stampedFolder as NSString).standardizingPath == folder
+                && (stampedConfig as NSString).standardizingPath == config
+        case .volume(let gitURL, let configIdentity):
+            let wantURL = normalizeGitURL(gitURL)
+            let stampedURL = normalizeGitURL(info.labels[labelGitURL] ?? "")
+            guard !wantURL.isEmpty, stampedURL == wantURL else { return false }
+            return configIdentityMatches(
+                stamped: info.labels[labelConfigFile] ?? "",
+                expected: configIdentity
+            )
+        }
+    }
+
+    public static func configIdentityMatches(stamped: String, expected: String) -> Bool {
+        let a = stamped.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let b = expected.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if a.isEmpty || b.isEmpty { return false }
+        if a == b { return true }
+        return a.hasSuffix("/" + b) || b.hasSuffix("/" + a)
+    }
+
+    public static func containerHasName(_ info: ContainerInfo, _ name: String) -> Bool {
+        info.id == name || info.name == name
+    }
+
+    /// Classify occupants of `desiredName` and any same-workspace leftover under another name.
+    /// Same-workspace leftover wins over a foreign occupant of the desired name (delete-hint).
+    public static func classifyOccupancy(
+        desiredName: String,
+        containers: [ContainerInfo],
+        workspace: WorkspaceIdentityKey
+    ) -> CreateNameOccupancy {
+        let sameWorkspace = containers.filter { matchesWorkspace($0, workspace: workspace) }
+        if let same = sameWorkspace.first(where: { containerHasName($0, desiredName) }) {
+            return .sameWorkspaceSameName(same)
+        }
+        if let leftover = sameWorkspace.first {
+            return .sameWorkspaceDifferentName(leftover)
+        }
+        if let occupant = containers.first(where: { containerHasName($0, desiredName) }) {
+            return .foreign(occupant)
+        }
+        return .none
+    }
+
+    public static func nameInUseError(name: String) -> CLIError {
+        CLIError(
+            code: CLIErrorCode.containerNameInUse,
+            property: "name",
+            message: "Container name '\(name)' is in use and is not this workspace",
+            hint: "Change \"name\" in devcontainer.json, or delete the occupant: adevcontainer delete --name \(name)"
+        )
+    }
+
+    public static func workspaceExistsError(existingName: String) -> CLIError {
+        CLIError(
+            code: CLIErrorCode.workspaceContainerExists,
+            message: "This workspace already has a managed container '\(existingName)'",
+            hint: "Delete it first: adevcontainer delete --name \(existingName)"
+        )
+    }
+
+    public static func cloneFailClosedError(existingName: String) -> CLIError {
+        CLIError(
+            code: CLIErrorCode.workspaceContainerExists,
+            message: "Container '\(existingName)' already exists for this repository",
+            hint: "Delete it first: adevcontainer delete --name \(existingName)"
+        )
     }
 
     /// Parse `devcontainer.config_volumes` label (comma-separated sources).

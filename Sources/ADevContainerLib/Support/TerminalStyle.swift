@@ -172,6 +172,12 @@ public enum TerminalStyle {
             return true
         }
         if token.hasPrefix("adev-") { return true }
+        // DNS-friendly create names (e.g. my-app) after the adev- prefix went away.
+        if token.contains("-"),
+           token.range(of: #"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"#, options: .regularExpression) != nil
+        {
+            return true
+        }
         if token.contains("/") || token.contains(":") || token.contains("@") { return true }
         // Dotted refs (ghcr.io/… already has /; alpine.x rare) — require a dot not only extension-less words
         if token.contains("."), token.contains(where: { $0.isLetter }) { return true }

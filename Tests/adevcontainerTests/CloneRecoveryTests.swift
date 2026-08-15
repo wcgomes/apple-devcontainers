@@ -667,5 +667,125 @@ nonisolated(unsafe) let cloneRecoveryTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(editorRunner.calls.isEmpty, "no editable config → no recovery editor")
         try MiniTest.expect(persistWrites(in: mock).isEmpty, "no overlay when fetch fails before a config exists")
         try MiniTest.expect(files.files.isEmpty)
+    }),
+
+    ("cloneTTYRenamePersistsNameWithoutEditorAndOverlaysAfterPopulate", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let retainedRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clone-rename-\(UUID().uuidString)", isDirectory: true).path
+        CloneCommand.retainedCheckoutRootOverride = retainedRoot
+        defer {
+            CloneCommand.retainedCheckoutRootOverride = nil
+            try? FileManager.default.removeItem(atPath: retainedRoot)
+        }
+
+        let gitURL = "https://github.com/org/my-app.git"
+        let dest = cloneWorkspaceConfigPath(gitURL: gitURL)
+        let files = CloneWorkspaceFiles()
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "name": "My App", "image": "alpine:3.20" }"#
+        let other = ContainerIdentity.volumeModeIdentity(
+            gitURL: "https://github.com/other/repo.git",
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: "My App"
+        )
+        let occupant = MockProcessRunner.containerListJSON(
+            id: "my-app",
+            state: "running",
+            labels: ContainerIdentity.volumeModeLabels(identity: other, configHash: "h")
+        )
+        var lists = 0
+        let (runtime, mock, _) = persistAwareRuntime(workspaceConfigPath: dest, files: files)
+        mock.handlers.insert({ args in
+            if args.starts(with: ["list"]) {
+                lists += 1
+                let payload: [[String: Any]] = lists == 1 ? [occupant] : []
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: try! JSONSerialization.data(withJSONObject: payload),
+                    stderr: Data()
+                )
+            }
+            return nil
+        }, at: 0)
+
+        let (editor, editorRunner) = cloneEditor()
+        let result = try CloneCommand.run(
+            options: CloneOptions(gitURL: gitURL, skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:],
+            isTTY: true,
+            openEditorPrompt: clonePrompt(answers: ["y", "My App 2"]),
+            editor: editor
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(editorRunner.calls.isEmpty, "foreign rename must not open the recovery editor")
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+        let writes = persistWrites(in: mock)
+        try MiniTest.expectEqual(writes.count, 1, "rename retry overlays persisted name after populate")
+        let overlay = String(data: writes[0].stdinData ?? Data(), encoding: .utf8) ?? ""
+        try MiniTest.expect(overlay.contains("my-app-2"))
+        try MiniTest.expectEqual(files.files[dest].flatMap { String(data: $0, encoding: .utf8) }?.contains("my-app-2"), true)
+    }),
+
+    ("cloneNonTTYAndJsonNeverPromptOnForeignName", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let gitURL = "https://github.com/org/my-app.git"
+        let dest = cloneWorkspaceConfigPath(gitURL: gitURL)
+        let files = CloneWorkspaceFiles()
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "name": "My App", "image": "alpine:3.20" }"#
+        let other = ContainerIdentity.volumeModeIdentity(
+            gitURL: "https://github.com/other/repo.git",
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: "My App"
+        )
+        let occupant = MockProcessRunner.containerListJSON(
+            id: "my-app",
+            state: "running",
+            labels: ContainerIdentity.volumeModeLabels(identity: other, configHash: "h")
+        )
+        let (runtime, mock, createCount) = persistAwareRuntime(workspaceConfigPath: dest, files: files)
+        mock.handlers.insert({ args in
+            if args.starts(with: ["list"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: try! JSONSerialization.data(withJSONObject: [occupant]),
+                    stderr: Data()
+                )
+            }
+            return nil
+        }, at: 0)
+        let (editor, editorRunner) = cloneEditor()
+        final class Writes: @unchecked Sendable { var lines: [String] = [] }
+        let writes = Writes()
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(gitURL: gitURL, skipPull: true, jsonOutput: true),
+                runtime: runtime,
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:],
+                isTTY: true,
+                openEditorPrompt: RecoveryOpenEditorPrompt(
+                    readLine: { "y" },
+                    writeError: { writes.lines.append($0) }
+                ),
+                editor: editor
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.containerNameInUse)
+            try MiniTest.expect(err.hint?.contains("devcontainer.json") == true)
+            try MiniTest.expect(err.hint?.contains("clone") == true)
+        }
+        try MiniTest.expectEqual(createCount(), 0)
+        try MiniTest.expect(editorRunner.calls.isEmpty)
+        try MiniTest.expect(writes.lines.isEmpty)
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
     })
 ]
