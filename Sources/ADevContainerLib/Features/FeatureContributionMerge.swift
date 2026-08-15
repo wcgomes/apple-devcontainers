@@ -6,22 +6,22 @@ public struct FeatureContributions: Equatable, Sendable {
     public var capAdd: [String]
     public var containerEnv: [String: String]
     public var mounts: [MountSpec]
-    public var onCreateCommands: [LifecycleCommand]
-    public var updateContentCommands: [LifecycleCommand]
-    public var postCreateCommands: [LifecycleCommand]
-    public var postStartCommands: [LifecycleCommand]
-    public var postAttachCommands: [LifecycleCommand]
+    public var onCreateCommands: [NamedLifecycleCommand]
+    public var updateContentCommands: [NamedLifecycleCommand]
+    public var postCreateCommands: [NamedLifecycleCommand]
+    public var postStartCommands: [NamedLifecycleCommand]
+    public var postAttachCommands: [NamedLifecycleCommand]
 
     public init(
         initProcess: Bool = false,
         capAdd: [String] = [],
         containerEnv: [String: String] = [:],
         mounts: [MountSpec] = [],
-        onCreateCommands: [LifecycleCommand] = [],
-        updateContentCommands: [LifecycleCommand] = [],
-        postCreateCommands: [LifecycleCommand] = [],
-        postStartCommands: [LifecycleCommand] = [],
-        postAttachCommands: [LifecycleCommand] = []
+        onCreateCommands: [NamedLifecycleCommand] = [],
+        updateContentCommands: [NamedLifecycleCommand] = [],
+        postCreateCommands: [NamedLifecycleCommand] = [],
+        postStartCommands: [NamedLifecycleCommand] = [],
+        postAttachCommands: [NamedLifecycleCommand] = []
     ) {
         self.initProcess = initProcess
         self.capAdd = capAdd
@@ -56,11 +56,22 @@ public enum FeatureContributionMerge {
                 }
             }
             result.mounts.append(contentsOf: meta.mounts)
-            if let c = meta.onCreateCommand { result.onCreateCommands.append(c) }
-            if let c = meta.updateContentCommand { result.updateContentCommands.append(c) }
-            if let c = meta.postCreateCommand { result.postCreateCommands.append(c) }
-            if let c = meta.postStartCommand { result.postStartCommands.append(c) }
-            if let c = meta.postAttachCommand { result.postAttachCommands.append(c) }
+            let name = FeatureRef.hookDisplayName(metadataId: meta.id, reference: f.admitted.reference)
+            if let c = meta.onCreateCommand {
+                result.onCreateCommands.append(NamedLifecycleCommand(name: name, command: c))
+            }
+            if let c = meta.updateContentCommand {
+                result.updateContentCommands.append(NamedLifecycleCommand(name: name, command: c))
+            }
+            if let c = meta.postCreateCommand {
+                result.postCreateCommands.append(NamedLifecycleCommand(name: name, command: c))
+            }
+            if let c = meta.postStartCommand {
+                result.postStartCommands.append(NamedLifecycleCommand(name: name, command: c))
+            }
+            if let c = meta.postAttachCommand {
+                result.postAttachCommands.append(NamedLifecycleCommand(name: name, command: c))
+            }
         }
         return result
     }

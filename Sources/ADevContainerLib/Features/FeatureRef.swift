@@ -115,6 +115,23 @@ public enum FeatureRef {
         return (withoutTag as NSString).lastPathComponent
     }
 
+    /// Phase-item name for a feature hook: metadata `id` when present, else last-segment ref.
+    public static func hookDisplayName(metadataId: String?, reference: String? = nil) -> String {
+        if let metadataId {
+            let trimmed = metadataId.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return featureId(from: trimmed)
+            }
+        }
+        if let reference {
+            let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return featureId(from: trimmed)
+            }
+        }
+        return ""
+    }
+
     /// Match dependsOn / installsAfter keys against selected refs (id, full ref, or prefix).
     public static func matchesDependencyKey(_ key: String, selectedRef: String) -> Bool {
         if key == selectedRef { return true }

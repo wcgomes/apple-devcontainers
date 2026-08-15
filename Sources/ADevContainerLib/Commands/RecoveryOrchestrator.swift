@@ -912,7 +912,7 @@ public enum RecoveryOrchestrator {
     private static func isPostAttachFailure(_ error: Error) -> Bool {
         guard let property = (error as? CLIError)?.property else { return false }
         return property == "postAttachCommand"
-            || property.hasPrefix("postAttachCommand (feature")
+            || property.hasPrefix("postAttachCommand (")
     }
 
     private static func sanitizedHelperID(_ helperID: String) -> String {

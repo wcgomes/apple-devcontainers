@@ -136,7 +136,12 @@ public enum PostAttachConfigLoader {
         cacheRoot: String = FeatureCache.defaultRoot(),
         fileManager: FileManager = .default
     ) {
-        if !config.featurePostStartCommands.isEmpty && !config.featurePostAttachCommands.isEmpty {
+        let needsNames = config.featurePostStartCommands.contains { $0.name.isEmpty }
+            || config.featurePostAttachCommands.contains { $0.name.isEmpty }
+        if !config.featurePostStartCommands.isEmpty
+            && !config.featurePostAttachCommands.isEmpty
+            && !needsNames
+        {
             return
         }
         guard !config.features.isEmpty else { return }
@@ -160,18 +165,47 @@ public enum PostAttachConfigLoader {
         guard let contrib = try? FeatureContributionMerge.collect(from: ordered) else { return }
         if config.featurePostStartCommands.isEmpty && !contrib.postStartCommands.isEmpty {
             config.featurePostStartCommands = contrib.postStartCommands
+        } else {
+            config.featurePostStartCommands = overlayNames(
+                config.featurePostStartCommands,
+                contrib.postStartCommands
+            )
         }
         if config.featurePostAttachCommands.isEmpty && !contrib.postAttachCommands.isEmpty {
             config.featurePostAttachCommands = contrib.postAttachCommands
+        } else {
+            config.featurePostAttachCommands = overlayNames(
+                config.featurePostAttachCommands,
+                contrib.postAttachCommands
+            )
+        }
+    }
+
+    private static func overlayNames(
+        _ existing: [NamedLifecycleCommand],
+        _ named: [NamedLifecycleCommand]
+    ) -> [NamedLifecycleCommand] {
+        existing.map { entry in
+            if !entry.name.isEmpty { return entry }
+            guard let match = named.first(where: { $0.command == entry.command && !$0.name.isEmpty }) else {
+                return entry
+            }
+            return NamedLifecycleCommand(name: match.name, command: entry.command)
         }
     }
 
     private static func uniqueAppend(
-        _ first: [LifecycleCommand],
-        _ second: [LifecycleCommand]
-    ) -> [LifecycleCommand] {
+        _ first: [NamedLifecycleCommand],
+        _ second: [NamedLifecycleCommand]
+    ) -> [NamedLifecycleCommand] {
         var out = first
-        for cmd in second where !out.contains(cmd) {
+        for cmd in second {
+            if let idx = out.firstIndex(where: { $0.command == cmd.command }) {
+                if out[idx].name.isEmpty && !cmd.name.isEmpty {
+                    out[idx] = cmd
+                }
+                continue
+            }
             out.append(cmd)
         }
         return out

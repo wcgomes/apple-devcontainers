@@ -108,7 +108,7 @@ public enum TerminalStyle {
     /// Phase line: bold blue. Trailing "item" (parenthetical or resource token) is bold white.
     ///
     /// Examples (color on):
-    /// - `==> Running postStartCommand (feature 1)` → blue head + white `(feature 1)`
+    /// - `==> Running postStartCommand (agents-workspace)` → blue head + white `(agents-workspace)`
     /// - `==> Pulling image alpine:3.20` → blue head + white `alpine:3.20`
     /// - `==> Ready` → all blue
     public static func stylePhase(_ text: String, color: Bool? = nil) -> String {
@@ -138,7 +138,7 @@ public enum TerminalStyle {
         }
         guard !body.isEmpty else { return nil }
 
-        // 1) Trailing parenthetical: "Running postStartCommand (feature 1)"
+        // 1) Trailing parenthetical: "Running postStartCommand (agents-workspace)"
         if body.hasSuffix(")"), let open = body.lastIndex(of: "("), open > body.startIndex {
             let before = body.index(before: open)
             if body[before] == " " {
@@ -268,6 +268,26 @@ public enum TerminalStyle {
         return ansiDim + text + ansiReset
     }
 
+    /// Official-style `[<id>-<hook>]` prefix (e.g. `[agents-workspace-poststart]`).
+    /// Display-only: capture buffers stay raw.
+    public static func stripLifecycleHookLogPrefix(_ line: String) -> String {
+        guard line.first == "[", let close = line.firstIndex(of: "]") else {
+            return line
+        }
+        let tag = String(line[line.index(after: line.startIndex)..<close])
+        guard let dash = tag.lastIndex(of: "-") else { return line }
+        let hook = String(tag[tag.index(after: dash)...]).lowercased()
+        let known: Set<String> = [
+            "initialize", "oncreate", "updatecontent", "postcreate", "poststart", "postattach"
+        ]
+        guard known.contains(hook) else { return line }
+        var rest = String(line[line.index(after: close)...])
+        if rest.hasPrefix(" ") {
+            rest.removeFirst()
+        }
+        return rest
+    }
+
     /// Frame one display line of internal tool output: indent + `| ` + content.
     public static func frameToolLine(_ line: String, color: Bool? = nil) -> String {
         // Normalize CR leftovers from CRLF without double-prefixing.
@@ -275,6 +295,7 @@ public enum TerminalStyle {
         if content.hasSuffix("\r") {
             content = String(content.dropLast())
         }
+        content = stripLifecycleHookLogPrefix(content)
         let framed = nestIndent + toolPipePrefix + content
         return styleToolLine(framed, color: color)
     }

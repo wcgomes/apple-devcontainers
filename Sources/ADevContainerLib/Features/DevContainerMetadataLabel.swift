@@ -34,9 +34,13 @@ public enum DevContainerMetadataLabel {
     /// Used to bake `devcontainer.metadata` onto a derived image so resume can remelt.
     public static func encodeFragments(_ contributions: FeatureContributions) -> String? {
         var fragments: [[String: Any]] = []
-        func append(_ key: String, _ commands: [LifecycleCommand]) {
-            for cmd in commands {
-                fragments.append([key: cmd.hashEncoding])
+        func append(_ key: String, _ commands: [NamedLifecycleCommand]) {
+            for entry in commands {
+                var fragment: [String: Any] = [key: entry.command.hashEncoding]
+                if !entry.name.isEmpty {
+                    fragment["id"] = entry.name
+                }
+                fragments.append(fragment)
             }
         }
         append("onCreateCommand", contributions.onCreateCommands)
@@ -159,23 +163,35 @@ public enum DevContainerMetadataLabel {
         if let rawMounts = dict["mounts"], let mounts = try? MountParser.parse(rawMounts) {
             c.mounts = mounts
         }
-        if let cmd = try? LifecycleCommand.parse(dict["onCreateCommand"], property: "onCreateCommand") {
-            c.onCreateCommands = [cmd]
+        if let hook = namedHook(dict["onCreateCommand"], property: "onCreateCommand", fragment: dict) {
+            c.onCreateCommands = [hook]
         }
-        if let cmd = try? LifecycleCommand.parse(dict["updateContentCommand"], property: "updateContentCommand") {
-            c.updateContentCommands = [cmd]
+        if let hook = namedHook(dict["updateContentCommand"], property: "updateContentCommand", fragment: dict) {
+            c.updateContentCommands = [hook]
         }
-        if let cmd = try? LifecycleCommand.parse(dict["postCreateCommand"], property: "postCreateCommand") {
-            c.postCreateCommands = [cmd]
+        if let hook = namedHook(dict["postCreateCommand"], property: "postCreateCommand", fragment: dict) {
+            c.postCreateCommands = [hook]
         }
-        if let cmd = try? LifecycleCommand.parse(dict["postStartCommand"], property: "postStartCommand") {
-            c.postStartCommands = [cmd]
+        if let hook = namedHook(dict["postStartCommand"], property: "postStartCommand", fragment: dict) {
+            c.postStartCommands = [hook]
         }
-        if let cmd = try? LifecycleCommand.parse(dict["postAttachCommand"], property: "postAttachCommand") {
-            c.postAttachCommands = [cmd]
+        if let hook = namedHook(dict["postAttachCommand"], property: "postAttachCommand", fragment: dict) {
+            c.postAttachCommands = [hook]
         }
         // privileged / securityOpt are not merged; caller warns via warnStripUnsafe.
         return c
+    }
+
+    private static func namedHook(
+        _ value: Any?,
+        property: String,
+        fragment: [String: Any]
+    ) -> NamedLifecycleCommand? {
+        guard let command = try? LifecycleCommand.parse(value, property: property) else {
+            return nil
+        }
+        let name = FeatureRef.hookDisplayName(metadataId: fragment["id"] as? String)
+        return NamedLifecycleCommand(name: name, command: command)
     }
 
     private static func union(_ a: FeatureContributions, _ b: FeatureContributions) -> FeatureContributions {
