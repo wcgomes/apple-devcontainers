@@ -202,6 +202,12 @@ public enum CLIErrorOutput {
 public enum CLIErrorCode {
     public static let configNotFound = "config_not_found"
     public static let configParse = "config_parse"
+    /// Create `--name` is empty after DNS-safe sanitize (no invented fallback).
+    public static let invalidCreateName = "invalid_create_name"
+    /// Desired create name is taken by a different workspace or an unmanaged container.
+    public static let containerNameInUse = "container_name_in_use"
+    /// This workspace already has a managed container (same name or leftover under another name).
+    public static let workspaceContainerExists = "workspace_container_exists"
     public static let unsupportedProperty = "unsupported_property"
     public static let unsupportedFeature = "unsupported_feature"
     public static let unsupportedSubstitution = "unsupported_substitution"

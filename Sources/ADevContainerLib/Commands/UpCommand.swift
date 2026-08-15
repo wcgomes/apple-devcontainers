@@ -72,6 +72,33 @@ public enum UpCommand {
                 hostResources: hostResources
             )
         } catch let failure as BringUpRecovery.EligibleFailure {
+            let editHost = {
+                try editUpConfig(
+                    filePath: configPath,
+                    workspacePath: options.workspacePath,
+                    localEnv: localEnv,
+                    editor: editor
+                )
+            }
+            if BringUpRecovery.isNameInUse(failure) {
+                return try BringUpRecovery.runNameCollision(
+                    failure: failure,
+                    guidance: guidance,
+                    createName: BringUpRecovery.createName(fromCollision: failure) ?? "",
+                    isTTY: isTTY,
+                    jsonOutput: options.jsonOutput,
+                    prompt: openEditorPrompt,
+                    persistName: { try ConfigNameWriter.persistCreateName($0, inFileAt: configPath) },
+                    retry: {
+                        try runBringUp(
+                            options: options,
+                            runtime: runtime,
+                            localEnv: localEnv,
+                            hostResources: hostResources
+                        )
+                    }
+                )
+            }
             // Each recoverable retry may report a different leftover. Capture the latest
             // identity so the next runBringUp deletes/recreates that container, not only
             // the one from the first EligibleFailure.
@@ -82,14 +109,7 @@ public enum UpCommand {
                 isTTY: isTTY,
                 jsonOutput: options.jsonOutput,
                 openEditorPrompt: openEditorPrompt,
-                edit: {
-                    try editUpConfig(
-                        filePath: configPath,
-                        workspacePath: options.workspacePath,
-                        localEnv: localEnv,
-                        editor: editor
-                    )
-                },
+                edit: editHost,
                 retry: {
                     do {
                         return try runBringUp(
@@ -145,11 +165,36 @@ public enum UpCommand {
             throw BringUpRecovery.eligible(error)
         }
 
-        var existing = try runtime.findByName(resolved.containerName)
+        let occupants = try runtime.listAll()
+        let occupancy = ContainerIdentity.classifyOccupancy(
+            desiredName: resolved.containerName,
+            containers: occupants,
+            workspace: .bind(
+                localFolder: resolved.workspacePath,
+                configFile: resolved.configPath
+            )
+        )
+
+        switch occupancy {
+        case .sameWorkspaceDifferentName(let leftover):
+            throw ContainerIdentity.workspaceExistsError(existingName: leftover.name)
+        case .foreign:
+            throw BringUpRecovery.eligible(
+                ContainerIdentity.nameInUseError(name: resolved.containerName)
+            )
+        case .none, .sameWorkspaceSameName:
+            break
+        }
+
+        var existing: ContainerInfo?
+        if case .sameWorkspaceSameName(let occupant) = occupancy {
+            existing = occupant
+        }
 
         // A stopped existing container may have failed during start, and a running one may
         // have failed during restart postStart. Recovery must not see either as a successful
         // reuse on the next attempt: remove it before entering the fresh create path.
+        // Never reset a foreign occupant — only the same-workspace container we own.
         if let existingContainer = existing, let resetExistingName,
            resetExistingName == existingContainer.name || resetExistingName == resolved.containerName
         {
@@ -301,10 +346,7 @@ public enum UpCommand {
                 cacheRoot: cacheRoot,
                 platform: platform
             )
-            let nameBase = ContainerIdentity.humanBase(
-                configName: resolved.config.name,
-                workspacePath: resolved.workspacePath
-            )
+            let nameBase = ContainerIdentity.humanBase(workspacePath: resolved.workspacePath)
             let featuresResult = try FeaturesRunner.run(
                 features: resolved.config.features,
                 baseImage: resolved.config.image,
@@ -337,10 +379,13 @@ public enum UpCommand {
             knownMetadataUsers = applied.users
         }
 
-        // Expand `${devcontainerId}` in feature/config mounts before volume ensure + create.
+        // Expand `${devcontainerId}` to the bind resource stem, never the DNS create name.
         effectiveConfig = VariableSubstitutor.expandDevcontainerId(
             in: effectiveConfig,
-            id: resolved.containerName
+            id: ContainerIdentity.bindResourceIdentityStem(
+                workspacePath: resolved.workspacePath,
+                configPath: resolved.configPath
+            )
         )
 
         // Resolve connection user (config > metadata > OCI USER > root) before labels/create.

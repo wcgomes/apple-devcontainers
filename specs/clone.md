@@ -342,8 +342,6 @@ On successful `clone` **without** `--json`, stdout MUST emit a human key/value d
 | `gitUrl` | Normalized git URL used for identity/labels (userinfo stripped for `scheme://`) |
 | `workspaceVolume` | Workspace named volume name |
 
-Optional `containerName` MUST appear in the digest when present (same as `up`/`rebuild`).
-
 When `--json` is set, stdout MUST emit machine-readable JSON including at least the same fields (pretty-printed). Additional fields (e.g. `containerName`) MAY be included. Human digest MUST NOT appear with `--json`.
 
 Progress remains on stderr; `ADEVCONTAINER_QUIET=1` silences progress status as today. Connection hints follow the digest or JSON per [terminal-output.md](terminal-output.md).

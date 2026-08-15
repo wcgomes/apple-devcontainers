@@ -614,5 +614,377 @@ nonisolated(unsafe) let upCommandRecoveryTests: [(String, () throws -> Void)] = 
             !mock.calls.contains { $0.arguments.first == "cp" || $0.arguments.first == "copy" },
             "bind up recovery must not container-cp the edited config"
         )
+    }),
+
+    ("upTTYAsksWhetherToChangeNameThenPersistsFullName", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        { "name": "My App", "image": "alpine:3.20" }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        try MiniTest.expectEqual(resolved.containerName, "my-app")
+        let foreign = MockProcessRunner.containerListJSON(
+            id: "my-app",
+            state: "running",
+            labels: [
+                ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+                ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeBind,
+                ContainerIdentity.labelLocalFolder: "/other/workspace",
+                ContainerIdentity.labelConfigFile: "/other/workspace/.devcontainer/devcontainer.json",
+                ContainerIdentity.labelConfigHash: "other"
+            ]
+        )
+        var lists = 0
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    lists += 1
+                    let payload: [[String: Any]] = lists == 1 ? [foreign] : []
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: try! JSONSerialization.data(withJSONObject: payload),
+                        stderr: Data()
+                    )
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
+            { args in
+                if args.first == "create" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("my-app-2\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "start" || args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let editorRunner = UpRecoveryEditorRunner(payloads: [Data()])
+        final class Writes: @unchecked Sendable { var lines: [String] = [] }
+        let writes = Writes()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            isTTY: true,
+            recoveryEditor: upRecoveryEditor(runner: editorRunner),
+            openEditorPrompt: upRecoveryPrompt(answers: ["y", "My App 2"]) { writes.lines.append($0) }
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(editorRunner.launches, 0, "foreign rename must not open an editor")
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+        let joined = writes.lines.joined()
+        try MiniTest.expect(joined.contains("not this workspace"))
+        try MiniTest.expect(joined.contains(BringUpRecovery.changeNamePromptText))
+        try MiniTest.expect(joined.contains(BringUpRecovery.newNamePromptText))
+        try MiniTest.expect(!joined.contains("Type a suffix"))
+        try MiniTest.expect(!joined.contains("Open the recovery editor"))
+        try MiniTest.expect(!joined.contains(RecoveryOpenEditorPrompt.promptText))
+        let host = try String(contentsOfFile: resolved.configPath, encoding: .utf8)
+        try MiniTest.expect(host.contains("my-app-2"))
+        let createArgs = mock.calls.first { $0.arguments.first == "create" }?.arguments ?? []
+        if let nameIdx = createArgs.firstIndex(of: "--name"), nameIdx + 1 < createArgs.count {
+            try MiniTest.expectEqual(createArgs[nameIdx + 1], "my-app-2")
+        } else {
+            try MiniTest.expect(false, "expected create --name my-app-2")
+        }
+    }),
+
+    ("upTTYEmptyOrInvalidNameRePromptsWithoutPersist", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        { "name": "My App", "image": "alpine:3.20" }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        let foreign = MockProcessRunner.containerListJSON(
+            id: "my-app",
+            state: "running",
+            labels: [
+                ContainerIdentity.labelLocalFolder: "/other/workspace",
+                ContainerIdentity.labelConfigFile: "/other/workspace/.devcontainer/devcontainer.json"
+            ]
+        )
+        var lists = 0
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    lists += 1
+                    let payload: [[String: Any]] = lists == 1 ? [foreign] : []
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: try! JSONSerialization.data(withJSONObject: payload),
+                        stderr: Data()
+                    )
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
+            { args in
+                if args.first == "create" || args.first == "start" || args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data("free-name\n".utf8), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let editorRunner = UpRecoveryEditorRunner(payloads: [Data()])
+        final class Counter: @unchecked Sendable { var namePrompts = 0 }
+        let counter = Counter()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            isTTY: true,
+            recoveryEditor: upRecoveryEditor(runner: editorRunner),
+            openEditorPrompt: upRecoveryPrompt(answers: ["y", "!!!", "free-name"]) { line in
+                if line.contains(BringUpRecovery.newNamePromptText) { counter.namePrompts += 1 }
+            }
+        )
+        try MiniTest.expectEqual(editorRunner.launches, 0)
+        try MiniTest.expect(counter.namePrompts >= 2, "empty/invalid name must re-prompt")
+        let host = try String(contentsOfFile: resolved.configPath, encoding: .utf8)
+        try MiniTest.expect(host.contains("free-name"))
+        try MiniTest.expect(!host.contains("!!!"))
+    }),
+
+    ("upTTYStillCollidingNameReAsksWithoutDeleting", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        { "name": "My App", "image": "alpine:3.20" }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let first = MockProcessRunner.containerListJSON(
+            id: "my-app",
+            state: "running",
+            labels: [
+                ContainerIdentity.labelLocalFolder: "/other/a",
+                ContainerIdentity.labelConfigFile: "/other/a/.devcontainer/devcontainer.json"
+            ]
+        )
+        let second = MockProcessRunner.containerListJSON(
+            id: "taken-two",
+            state: "running",
+            labels: [
+                ContainerIdentity.labelLocalFolder: "/other/b",
+                ContainerIdentity.labelConfigFile: "/other/b/.devcontainer/devcontainer.json"
+            ]
+        )
+        var lists = 0
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    lists += 1
+                    let payload: [[String: Any]]
+                    if lists == 1 { payload = [first] }
+                    else if lists == 2 { payload = [first, second] }
+                    else { payload = [first, second] }
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: try! JSONSerialization.data(withJSONObject: payload),
+                        stderr: Data()
+                    )
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
+            { args in
+                if args.first == "create" || args.first == "start" || args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data("free-name\n".utf8), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        final class Counter: @unchecked Sendable { var ynPrompts = 0 }
+        let counter = Counter()
+        let editorRunner = UpRecoveryEditorRunner(payloads: [Data()])
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            isTTY: true,
+            recoveryEditor: upRecoveryEditor(runner: editorRunner),
+            openEditorPrompt: upRecoveryPrompt(
+                answers: ["y", "taken-two", "y", "free-name"]
+            ) { line in
+                if line.contains(BringUpRecovery.changeNamePromptText) { counter.ynPrompts += 1 }
+            }
+        )
+        try MiniTest.expect(counter.ynPrompts >= 2, "still-colliding name must re-ask Y/n")
+        try MiniTest.expectEqual(editorRunner.launches, 0)
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+    }),
+
+    ("upTTYDeclineLeavesOccupantUntouched", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        { "name": "My App", "image": "alpine:3.20" }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        let original = try String(contentsOfFile: resolved.configPath, encoding: .utf8)
+        let foreign = MockProcessRunner.containerListJSON(
+            id: "my-app",
+            state: "running",
+            labels: [
+                ContainerIdentity.labelLocalFolder: "/other/workspace",
+                ContainerIdentity.labelConfigFile: "/other/workspace/.devcontainer/devcontainer.json"
+            ]
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: try! JSONSerialization.data(withJSONObject: [foreign]),
+                        stderr: Data()
+                    )
+                }
+                return nil
+            }
+        ]
+        let editorRunner = UpRecoveryEditorRunner(payloads: [Data()])
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: workspace.path, skipPull: true),
+                runtime: runtime,
+                localEnv: [:],
+                isTTY: true,
+                recoveryEditor: upRecoveryEditor(runner: editorRunner),
+                openEditorPrompt: upRecoveryPrompt(answers: ["n"])
+            )
+        }) { error in
+            try MiniTest.expectEqual((error as? CLIError)?.code, CLIErrorCode.containerNameInUse)
+        }
+        try MiniTest.expectEqual(editorRunner.launches, 0)
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+        let after = try String(contentsOfFile: resolved.configPath, encoding: .utf8)
+        try MiniTest.expectEqual(after, original)
+    }),
+
+    ("upRenamePromptsRemainUsableUnderQuiet", {
+        let previous = StatusPrinter.enabled
+        StatusPrinter.enabled = false
+        defer { StatusPrinter.enabled = previous }
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        { "name": "My App", "image": "alpine:3.20" }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let foreign = MockProcessRunner.containerListJSON(
+            id: "my-app",
+            state: "running",
+            labels: [
+                ContainerIdentity.labelLocalFolder: "/other/workspace",
+                ContainerIdentity.labelConfigFile: "/other/workspace/.devcontainer/devcontainer.json"
+            ]
+        )
+        var lists = 0
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    lists += 1
+                    let payload: [[String: Any]] = lists == 1 ? [foreign] : []
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: try! JSONSerialization.data(withJSONObject: payload),
+                        stderr: Data()
+                    )
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
+            { args in
+                if args.first == "create" || args.first == "start" || args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data("free-name\n".utf8), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        final class Writes: @unchecked Sendable { var lines: [String] = [] }
+        let writes = Writes()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            isTTY: true,
+            openEditorPrompt: upRecoveryPrompt(answers: ["y", "free-name"]) { writes.lines.append($0) }
+        )
+        let joined = writes.lines.joined()
+        try MiniTest.expect(joined.contains("not this workspace"))
+        try MiniTest.expect(joined.contains(BringUpRecovery.changeNamePromptText))
+        try MiniTest.expect(joined.contains(BringUpRecovery.newNamePromptText))
+    }),
+
+    ("upNonTTYAndJsonNeverPromptOnForeignName", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        { "name": "My App", "image": "alpine:3.20" }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let foreign = MockProcessRunner.containerListJSON(
+            id: "my-app",
+            state: "running",
+            labels: [
+                ContainerIdentity.labelLocalFolder: "/other/workspace",
+                ContainerIdentity.labelConfigFile: "/other/workspace/.devcontainer/devcontainer.json"
+            ]
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: try! JSONSerialization.data(withJSONObject: [foreign]),
+                        stderr: Data()
+                    )
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let editorRunner = UpRecoveryEditorRunner(payloads: [Data()])
+        final class Writes: @unchecked Sendable { var lines: [String] = [] }
+        let writes = Writes()
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: workspace.path, jsonOutput: true, skipPull: true),
+                runtime: runtime,
+                localEnv: [:],
+                isTTY: true,
+                recoveryEditor: upRecoveryEditor(runner: editorRunner),
+                openEditorPrompt: upRecoveryPrompt(answers: ["y", "other"]) { writes.lines.append($0) }
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.containerNameInUse)
+            try MiniTest.expect(err.hint?.contains("devcontainer.json") == true)
+        }
+        try MiniTest.expectEqual(editorRunner.launches, 0)
+        try MiniTest.expect(writes.lines.isEmpty, "--json must not prompt")
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: workspace.path, skipPull: true),
+                runtime: runtime,
+                localEnv: [:],
+                isTTY: false,
+                recoveryEditor: upRecoveryEditor(runner: editorRunner)
+            )
+        }) { error in
+            try MiniTest.expectEqual((error as? CLIError)?.code, CLIErrorCode.containerNameInUse)
+        }
+        try MiniTest.expectEqual(editorRunner.launches, 0)
     })
 ]

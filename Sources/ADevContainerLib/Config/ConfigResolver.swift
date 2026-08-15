@@ -87,10 +87,12 @@ public enum ConfigResolver {
         let normalized = MountNormalizer.normalize(mounts: resolved.mounts, fileManager: fileManager)
         resolved.mounts = normalized.mounts
         let hash = ContainerIdentity.configHash(from: resolved.hashMaterial())
-        let name = ContainerIdentity.containerName(
-            workspacePath: workspace,
-            configPath: path,
-            configName: resolved.name
+        let name = try ContainerIdentity.requireCreateName(
+            ContainerIdentity.containerName(
+                workspacePath: workspace,
+                configPath: path,
+                configName: resolved.name
+            )
         )
         let configVolumeNames = resolved.mounts
             .filter { $0.type == .volume }

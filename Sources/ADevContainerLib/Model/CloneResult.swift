@@ -6,9 +6,13 @@ public struct CloneResult: Equatable, Sendable, Codable {
     public var containerId: String
     public var remoteUser: String
     public var remoteWorkspaceFolder: String
-    public var containerName: String?
+    public var containerName: String? = nil
     public var gitUrl: String
     public var workspaceVolume: String
+
+    enum CodingKeys: String, CodingKey {
+        case outcome, containerId, remoteUser, remoteWorkspaceFolder, gitUrl, workspaceVolume
+    }
 
     public init(
         outcome: String = "success",

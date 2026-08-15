@@ -49,8 +49,7 @@ public enum SuccessPresentation {
         outcome: String,
         containerId: String,
         remoteUser: String,
-        remoteWorkspaceFolder: String,
-        containerName: String?
+        remoteWorkspaceFolder: String
     ) {
         // Nested under `==> Ready` (same indent as connection hints).
         let pad = TerminalStyle.nestIndent
@@ -63,9 +62,6 @@ public enum SuccessPresentation {
         print("\(pad)containerId: \(containerId)")
         print("\(pad)remoteUser: \(remoteUser)")
         print("\(pad)remoteWorkspaceFolder: \(remoteWorkspaceFolder)")
-        if let containerName {
-            print("\(pad)containerName: \(containerName)")
-        }
     }
 
     public static func emitHumanDigest(_ result: UpResult) {
@@ -73,8 +69,7 @@ public enum SuccessPresentation {
             outcome: result.outcome,
             containerId: result.containerId,
             remoteUser: result.remoteUser,
-            remoteWorkspaceFolder: result.remoteWorkspaceFolder,
-            containerName: result.containerName
+            remoteWorkspaceFolder: result.remoteWorkspaceFolder
         )
     }
 
@@ -83,8 +78,7 @@ public enum SuccessPresentation {
             outcome: result.outcome,
             containerId: result.containerId,
             remoteUser: result.remoteUser,
-            remoteWorkspaceFolder: result.remoteWorkspaceFolder,
-            containerName: result.containerName
+            remoteWorkspaceFolder: result.remoteWorkspaceFolder
         )
     }
 
@@ -94,8 +88,7 @@ public enum SuccessPresentation {
             outcome: result.outcome,
             containerId: result.containerId,
             remoteUser: result.remoteUser,
-            remoteWorkspaceFolder: result.remoteWorkspaceFolder,
-            containerName: result.containerName
+            remoteWorkspaceFolder: result.remoteWorkspaceFolder
         )
         let pad = TerminalStyle.nestIndent
         print("\(pad)gitUrl: \(result.gitUrl)")

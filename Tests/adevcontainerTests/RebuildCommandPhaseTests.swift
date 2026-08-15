@@ -414,14 +414,19 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         let result = try RebuildCommand.run(options: RebuildOptions(), runtime: s.runtime)
         try MiniTest.expectEqual(result.outcome, "success")
         try MiniTest.expectEqual(result.containerId, s.newContainerId)
-        try MiniTest.expectEqual(result.containerName, info.id)
+        let expectedName = ContainerIdentity.containerName(
+            workspacePath: ws.path,
+            configPath: ws.appendingPathComponent(".devcontainer/devcontainer.json").path,
+            configName: nil
+        )
+        try MiniTest.expectEqual(result.containerName, expectedName)
         let deletes = s.mock.calls.filter { $0.arguments.first == "delete" }
         try MiniTest.expectEqual(deletes.count, 1, "old container deleted exactly once")
         try MiniTest.expectEqual(deletes.first?.arguments.last, info.id)
         let creates = s.mock.calls.filter { $0.arguments.first == "create" }
         try MiniTest.expectEqual(creates.count, 1, "new container created once")
         let createArgs = creates[0].arguments
-        try MiniTest.expect(createArgs.contains("adev-mybase-abc123def456"), "create reuses old container name")
+        try MiniTest.expect(createArgs.contains(expectedName), "create uses live computed name")
     }),
 
     ("rebuildFailsContainerNotFoundNoDelete", {
@@ -670,10 +675,11 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         """)
         defer { try? FileManager.default.removeItem(at: ws) }
         let fetcher = MockFeatureFetcher(packagesByRef: [ref: fixture])
+        let nameBase = ContainerIdentity.humanBase(workspacePath: ws.path)
         let derivedTag = DerivedImageTag.compute(
             baseImage: "alpine:3.20",
             ordered: [try rebuildOrderedFeature(ref: ref, fixture: fixture, options: ["greeting": .string("hi")])],
-            nameBase: "mybase"
+            nameBase: nameBase
         )
         let s = RebuildScenario()
         let info = RebuildScenario.container(
@@ -710,10 +716,11 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         """)
         defer { try? FileManager.default.removeItem(at: ws) }
         let fetcher = MockFeatureFetcher(packagesByRef: [ref: fixture])
+        let nameBase = ContainerIdentity.humanBase(workspacePath: ws.path)
         let derivedTag = DerivedImageTag.compute(
             baseImage: "alpine:3.20",
             ordered: [try rebuildOrderedFeature(ref: ref, fixture: fixture, options: ["greeting": .string("hi")])],
-            nameBase: "mybase"
+            nameBase: nameBase
         )
         let s = RebuildScenario()
         let info = RebuildScenario.container(
@@ -791,12 +798,17 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         s.containers = [info]
         s.install()
         _ = try RebuildCommand.run(options: RebuildOptions(), runtime: s.runtime)
+        let cfgFile = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+        let expectedName = ContainerIdentity.containerName(
+            workspacePath: ws.path,
+            configPath: cfgFile,
+            configName: nil
+        )
         let createArgs = s.mock.calls.first { $0.arguments.first == "create" }!.arguments
-        try MiniTest.expect(createArgs.contains("adev-mybase-abc123def456"), "keeps old container name")
+        try MiniTest.expect(createArgs.contains(expectedName), "create uses live computed name")
         try MiniTest.expect(createArgs.contains("devcontainer.managed=adevcontainer"), "managed label preserved")
         try MiniTest.expect(createArgs.contains("devcontainer.workspace_mode=bind"), "workspace_mode label preserved")
         try MiniTest.expect(createArgs.contains("devcontainer.local_folder=\(ws.path)"), "local_folder preserved")
-        let cfgFile = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
         try MiniTest.expect(createArgs.contains("devcontainer.config_file=\(cfgFile)"), "config_file preserved")
         try MiniTest.expect(createArgs.contains("devcontainer.workspace_folder=/workspaces/new"), "workspace_folder drift-updated")
         try MiniTest.expect(createArgs.contains("devcontainer.remote_user=vscode"), "remote_user drift-updated")
@@ -2423,10 +2435,15 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         let obj = result.jsonObject()
         let parsed = try JSONSerialization.jsonObject(with: result.jsonString().data(using: .utf8)!) as? [String: Any]
         try MiniTest.expect(parsed?["outcome"] as? String == "success", "json round-trip")
+        let expectedName = ContainerIdentity.containerName(
+            workspacePath: ws.path,
+            configPath: ws.appendingPathComponent(".devcontainer/devcontainer.json").path,
+            configName: nil
+        )
         try MiniTest.expect(parsed?["containerId"] as? String == s.newContainerId, "json containerId")
-        try MiniTest.expect(obj["containerName"] as? String == "adev-mybase-abc123def456", "json containerName")
+        try MiniTest.expect(obj["containerName"] == nil, "json omits containerName")
         try MiniTest.expect(obj["gitUrl"] == nil && obj["workspaceVolume"] == nil, "bind json omits volume fields")
-        try expectPostSuccessConnectionHints(stderr, nameOrId: "adev-mybase-abc123def456")
+        try expectPostSuccessConnectionHints(stderr, nameOrId: expectedName)
     }),
 
     ("rebuildVolumeResultExposesGitUrlWorkspaceVolume", {

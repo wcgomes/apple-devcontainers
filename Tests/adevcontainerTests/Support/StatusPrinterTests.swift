@@ -243,7 +243,7 @@ nonisolated(unsafe) let statusPrinterTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(captured.contains("\(pad)containerId: ctr-1\n"))
         try MiniTest.expect(captured.contains("\(pad)remoteUser: vscode\n"))
         try MiniTest.expect(captured.contains("\(pad)remoteWorkspaceFolder: /workspaces/app\n"))
-        try MiniTest.expect(captured.contains("\(pad)containerName: adev-app-deadbeef\n"))
+        try MiniTest.expect(!captured.contains("containerName:"))
         try MiniTest.expect(captured.contains("\(pad)gitUrl: https://github.com/org/app\n"))
         try MiniTest.expect(captured.contains("\(pad)workspaceVolume: adev-app-deadbeef-ws\n"))
         try MiniTest.expect(!captured.contains("{"), "human digest is not JSON")
@@ -263,7 +263,7 @@ nonisolated(unsafe) let statusPrinterTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(obj["containerId"] as? String, "ctr-1")
         try MiniTest.expectEqual(obj["remoteUser"] as? String, "root")
         try MiniTest.expectEqual(obj["remoteWorkspaceFolder"] as? String, "/workspaces/app")
-        try MiniTest.expectEqual(obj["containerName"] as? String, "adev-app-deadbeef")
+        try MiniTest.expect(obj["containerName"] == nil)
         try MiniTest.expectEqual(obj["gitUrl"] as? String, "https://github.com/org/app")
         try MiniTest.expectEqual(obj["workspaceVolume"] as? String, "adev-app-deadbeef-ws")
     }),

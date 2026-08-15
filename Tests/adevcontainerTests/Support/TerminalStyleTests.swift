@@ -192,6 +192,17 @@ nonisolated(unsafe) let terminalStyleTests: [(String, () throws -> Void)] = [
             TerminalStyle.stylePhaseHead("==> Ready", color: true)
         )
     }),
+    ("terminalStylePhaseItemShortCreateNameWhite", {
+        try MiniTest.expect(TerminalStyle.looksLikePhaseItem("my-app"))
+        try MiniTest.expect(TerminalStyle.looksLikePhaseItem("adev-myapp-abc123def456"))
+        try MiniTest.expect(!TerminalStyle.looksLikePhaseItem("Ready"))
+        let line = TerminalStyle.stylePhase("==> Reusing running container my-app", color: true)
+        try MiniTest.expectEqual(
+            TerminalStyle.stripANSI(line),
+            "==> Reusing running container my-app"
+        )
+        try MiniTest.expect(line.contains(TerminalStyle.styleCommand("my-app", color: true)))
+    }),
     ("terminalStylePhaseItemMonochromeUnchanged", {
         let line = TerminalStyle.stylePhase(
             "==> Running postStartCommand (feature 1)",

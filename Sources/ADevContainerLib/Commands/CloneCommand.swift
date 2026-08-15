@@ -208,24 +208,41 @@ public enum CloneCommand {
             )
 
             persistEditedConfig = true
-            let recovered = try BringUpRecovery.run(
-                failure: failure,
-                guidance: guidance,
-                isTTY: isTTY,
-                jsonOutput: options.jsonOutput,
-                openEditorPrompt: openEditorPrompt,
-                edit: {
-                    try Self.editRetainedConfig(
-                        configPath: retainedConfigPath,
-                        checkoutDir: retainedCheckoutDir.path,
-                        repoBasename: repoBasename,
-                        localEnv: localEnv,
-                        fileManager: fileManager,
-                        editor: resolvedEditor
-                    )
-                },
-                retry: { try pipeline() }
-            )
+            let editRetained = {
+                try Self.editRetainedConfig(
+                    configPath: retainedConfigPath,
+                    checkoutDir: retainedCheckoutDir.path,
+                    repoBasename: repoBasename,
+                    localEnv: localEnv,
+                    fileManager: fileManager,
+                    editor: resolvedEditor
+                )
+            }
+            let recovered: CloneResult
+            if BringUpRecovery.isNameInUse(failure) {
+                recovered = try BringUpRecovery.runNameCollision(
+                    failure: failure,
+                    guidance: guidance,
+                    createName: BringUpRecovery.createName(fromCollision: failure) ?? "",
+                    isTTY: isTTY,
+                    jsonOutput: options.jsonOutput,
+                    prompt: openEditorPrompt,
+                    persistName: {
+                        try ConfigNameWriter.persistCreateName($0, inFileAt: retainedConfigPath)
+                    },
+                    retry: { try pipeline() }
+                )
+            } else {
+                recovered = try BringUpRecovery.run(
+                    failure: failure,
+                    guidance: guidance,
+                    isTTY: isTTY,
+                    jsonOutput: options.jsonOutput,
+                    openEditorPrompt: openEditorPrompt,
+                    edit: editRetained,
+                    retry: { try pipeline() }
+                )
+            }
             // Recovery succeeded: the retained checkout has served its purpose. Only
             // retained on failure (decline/EOF/non-TTY) for a later `--resume`.
             removeRetainedCheckout(retainedCheckoutDir, fileManager: fileManager)
@@ -289,13 +306,27 @@ public enum CloneCommand {
             configRelativePath: configRelPath,
             configName: resolved.config.name
         )
+        _ = try ContainerIdentity.requireCreateName(identity.containerName)
 
-        // Spec does not require reuse on clone; fail if name already taken.
-        if try runtime.findByName(identity.containerName) != nil {
-            throw CLIError(
-                code: CLIErrorCode.runtimeFailed,
-                message: "Container '\(identity.containerName)' already exists",
-                hint: "Stop/delete or prune the existing managed container, or use a different URL/config"
+        let occupants = try runtime.listAll()
+        let occupancy = ContainerIdentity.classifyOccupancy(
+            desiredName: identity.containerName,
+            containers: occupants,
+            workspace: .volume(
+                gitURL: url,
+                configIdentity: configRelPath
+            )
+        )
+        switch occupancy {
+        case .none:
+            break
+        case .sameWorkspaceSameName(let existing):
+            throw ContainerIdentity.cloneFailClosedError(existingName: existing.name)
+        case .sameWorkspaceDifferentName(let leftover):
+            throw ContainerIdentity.workspaceExistsError(existingName: leftover.name)
+        case .foreign:
+            throw BringUpRecovery.eligible(
+                ContainerIdentity.nameInUseError(name: identity.containerName)
             )
         }
 
@@ -366,10 +397,10 @@ public enum CloneCommand {
             knownMetadataUsers = applied.users
         }
 
-        // Expand `${devcontainerId}` with volume-mode create name (not bind-mode resolve name).
+        // Expand `${devcontainerId}` to the volume-mode resource stem, never the DNS create name.
         effectiveConfig = VariableSubstitutor.expandDevcontainerId(
             in: effectiveConfig,
-            id: identity.containerName
+            id: identity.resourceIdentityStem
         )
 
         // Hash from config material before stamping OCI-resolved connection user.

@@ -192,7 +192,8 @@ nonisolated(unsafe) let cloneIdentityTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(id1.hash12, id2.hash12)
         try MiniTest.expectEqual(id1.containerName, id2.containerName)
         try MiniTest.expectEqual(id1.workspaceVolumeName, id2.workspaceVolumeName)
-        try MiniTest.expect(id1.containerName.hasPrefix("adev-myapp-"))
+        try MiniTest.expectEqual(id1.containerName, "myapp")
+        try MiniTest.expect(!id1.containerName.hasPrefix("adev-"))
         try MiniTest.expect(id1.workspaceVolumeName.hasSuffix("-ws"))
         try MiniTest.expect(id1.workspaceVolumeName.contains(id1.hash12))
     }),
@@ -202,12 +203,15 @@ nonisolated(unsafe) let cloneIdentityTests: [(String, () throws -> Void)] = [
             configRelativePath: ".devcontainer/devcontainer.json",
             configName: "myapp"
         )
-        try MiniTest.expectEqual(id.containerName, "adev-myapp-\(id.hash12)")
+        try MiniTest.expectEqual(id.containerName, "myapp")
+        try MiniTest.expectEqual(id.base, "myapp")
         try MiniTest.expectEqual(id.workspaceVolumeName, "adev-myapp-\(id.hash12)-ws")
         try MiniTest.expect(id.containerName.count <= 63)
         try MiniTest.expect(id.workspaceVolumeName.count <= 63)
         try MiniTest.expect(id.workspaceVolumeName.hasSuffix("-ws"))
         try MiniTest.expect(id.workspaceVolumeName.contains(id.hash12))
+        try MiniTest.expect(!id.containerName.hasPrefix("adev-"))
+        try MiniTest.expect(!id.workspaceVolumeName.hasPrefix("myapp"))
     }),
     ("humanBaseFromRepoBasenameWhenNameOmitted", {
         let id = ContainerIdentity.volumeModeIdentity(
@@ -216,7 +220,18 @@ nonisolated(unsafe) let cloneIdentityTests: [(String, () throws -> Void)] = [
             configName: nil
         )
         try MiniTest.expectEqual(id.base, "sample-repo")
-        try MiniTest.expect(id.containerName.hasPrefix("adev-sample-repo-"))
+        try MiniTest.expectEqual(id.containerName, "sample-repo")
+        let named = ContainerIdentity.volumeModeIdentity(
+            gitURL: "https://github.com/org/sample-repo.git",
+            configRelativePath: ".devcontainer.json",
+            configName: "My App"
+        )
+        try MiniTest.expectEqual(named.containerName, "my-app")
+        try MiniTest.expectEqual(named.base, "sample-repo")
+        try MiniTest.expectEqual(named.workspaceVolumeName, "adev-sample-repo-\(named.hash12)-ws")
+        try MiniTest.expect(named.resourceIdentityStem.hasPrefix("adev-sample-repo-"))
+        try MiniTest.expect(!named.resourceIdentityStem.contains("my-app"))
+        try MiniTest.expect(!id.containerName.hasPrefix("adev-"))
         try MiniTest.expect(!id.containerName.contains("tmp"))
         try MiniTest.expect(!id.containerName.contains("var"))
     }),
@@ -276,10 +291,41 @@ nonisolated(unsafe) let cloneIdentityTests: [(String, () throws -> Void)] = [
             configRelativePath: ".devcontainer/devcontainer.json",
             configName: nil
         )
-        // Same basename "foo" but different hash material → names not required to match
-        try MiniTest.expect(bindName.hasPrefix("adev-foo-"))
-        try MiniTest.expect(vol.containerName.hasPrefix("adev-foo-"))
-        try MiniTest.expect(bindName != vol.containerName)
+        // Same sanitized fallback "foo"; hash material stays mode-specific.
+        try MiniTest.expectEqual(bindName, "foo")
+        try MiniTest.expectEqual(vol.containerName, "foo")
+        let bindHash = ContainerIdentity.bindWorkspaceHash12(
+            workspacePath: "/Projects/foo",
+            configPath: "/Projects/foo/.devcontainer/devcontainer.json"
+        )
+        try MiniTest.expect(bindHash != vol.hash12, "bind and volume hash material must differ")
+        try MiniTest.expectEqual(vol.workspaceVolumeName, "adev-foo-\(vol.hash12)-ws")
+    }),
+    ("bindAndVolumeStemsIgnoreSharedConfigName", {
+        let bindStem = ContainerIdentity.bindResourceIdentityStem(
+            workspacePath: "/Projects/foo",
+            configPath: "/Projects/foo/.devcontainer/devcontainer.json"
+        )
+        let vol = ContainerIdentity.volumeModeIdentity(
+            gitURL: "https://github.com/org/bar.git",
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: "My App"
+        )
+        try MiniTest.expectEqual(
+            ContainerIdentity.containerName(
+                workspacePath: "/Projects/foo",
+                configPath: "/Projects/foo/.devcontainer/devcontainer.json",
+                configName: "My App"
+            ),
+            "my-app"
+        )
+        try MiniTest.expectEqual(vol.containerName, "my-app")
+        try MiniTest.expect(bindStem.hasPrefix("adev-foo-"))
+        try MiniTest.expect(vol.resourceIdentityStem.hasPrefix("adev-bar-"))
+        try MiniTest.expectEqual(vol.workspaceVolumeName, "\(vol.resourceIdentityStem)-ws")
+        try MiniTest.expect(bindStem != vol.resourceIdentityStem)
+        try MiniTest.expect(!bindStem.contains("my-app"))
+        try MiniTest.expect(!vol.resourceIdentityStem.contains("my-app"))
     }),
     ("volumeModeLabelsPresent", {
         let id = ContainerIdentity.volumeModeIdentity(
@@ -944,7 +990,7 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(result.gitUrl, "https://github.com/org/clone-app")
         try MiniTest.expect(result.workspaceVolume.hasSuffix("-ws"))
         try MiniTest.expect(result.workspaceVolume.hasPrefix("adev-"))
-        try MiniTest.expect(result.containerName?.hasPrefix("adev-cloneapp-") == true)
+        try MiniTest.expectEqual(result.containerName, "cloneapp")
         try MiniTest.expect(!result.containerId.isEmpty)
         try MiniTest.expectEqual(result.remoteWorkspaceFolder, "/workspaces/clone-app")
         try MiniTest.expect(!result.remoteWorkspaceFolder.contains("adev-clone-cfg"))
@@ -1166,7 +1212,7 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         } else {
             try MiniTest.expect(false, "expected -w workdir on create")
         }
-        try MiniTest.expect(result.containerName?.hasPrefix("adev-apple-devcontainers-") == true)
+        try MiniTest.expectEqual(result.containerName, "apple-devcontainers")
     }),
     ("cloneHonorsExplicitWorkspaceFolder", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
@@ -1922,6 +1968,154 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
                 && !$0.arguments.contains("-lc")
         }
         try MiniTest.expect(populateCalls.contains { $0.streamStderr == true && $0.teeStdoutToStderr == true })
+    }),
+    ("cloneFailsClosedOnSameWorkspaceSameName", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "name": "My App", "image": "alpine:3.20" }"#
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: "https://github.com/org/sample-repo.git",
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: "My App"
+        )
+        try MiniTest.expectEqual(identity.containerName, "my-app")
+        let entry = MockProcessRunner.containerListJSON(
+            id: "my-app",
+            state: "running",
+            labels: ContainerIdentity.volumeModeLabels(
+                identity: identity,
+                configHash: "h"
+            )
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: try! JSONSerialization.data(withJSONObject: [entry]),
+                        stderr: Data()
+                    )
+                }
+                return nil
+            }
+        ] + CloneRuntimeMock.handlers()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(gitURL: "https://github.com/org/sample-repo.git", skipPull: true),
+                runtime: runtime,
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:],
+                isTTY: true,
+                openEditorPrompt: RecoveryOpenEditorPrompt(readLine: { "y" })
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.workspaceContainerExists)
+            try MiniTest.expect(err.message.contains("my-app"))
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+    }),
+    ("cloneSameWorkspaceDifferentNameIsDeleteHint", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "name": "My App", "image": "alpine:3.20" }"#
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: "https://github.com/org/sample-repo.git",
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: "My App"
+        )
+        var labels = ContainerIdentity.volumeModeLabels(identity: identity, configHash: "h")
+        let leftover = MockProcessRunner.containerListJSON(
+            id: "adev-my-app-abc123def456",
+            state: "running",
+            labels: labels
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: try! JSONSerialization.data(withJSONObject: [leftover]),
+                        stderr: Data()
+                    )
+                }
+                return nil
+            }
+        ] + CloneRuntimeMock.handlers()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(gitURL: "https://github.com/org/sample-repo.git", skipPull: true),
+                runtime: runtime,
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:],
+                isTTY: true,
+                openEditorPrompt: RecoveryOpenEditorPrompt(readLine: { "y" })
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.workspaceContainerExists)
+            try MiniTest.expect(err.message.contains("adev-my-app-abc123def456"))
+            try MiniTest.expect(err.hint?.contains("delete") == true)
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+        _ = labels
+    }),
+    ("cloneForeignOccupantOffersCollisionRecovery", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "name": "My App", "image": "alpine:3.20" }"#
+        let other = ContainerIdentity.volumeModeIdentity(
+            gitURL: "https://github.com/other/repo.git",
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: "My App"
+        )
+        let occupant = MockProcessRunner.containerListJSON(
+            id: "my-app",
+            state: "running",
+            labels: ContainerIdentity.volumeModeLabels(identity: other, configHash: "h")
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: try! JSONSerialization.data(withJSONObject: [occupant]),
+                        stderr: Data()
+                    )
+                }
+                return nil
+            }
+        ] + CloneRuntimeMock.handlers()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(gitURL: "https://github.com/org/sample-repo.git", skipPull: true),
+                runtime: runtime,
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:],
+                isTTY: false
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.containerNameInUse)
+            try MiniTest.expect(err.message.contains("my-app"))
+            try MiniTest.expect(err.message.lowercased().contains("not this workspace"))
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
     }),
 ]
 

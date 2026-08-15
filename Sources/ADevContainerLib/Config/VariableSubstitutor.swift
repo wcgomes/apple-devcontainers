@@ -5,9 +5,8 @@ public struct SubstitutionContext: Sendable {
     public var localWorkspaceFolderBasename: String
     public var containerWorkspaceFolder: String
     public var localEnv: [String: String]
-    /// Managed container name (`adev-{base}-{hash12}` / create `--name`).
-    /// When nil, `${devcontainerId}` is left unsubstituted for a later identity-known pass
-    /// (feature mounts; clone volume-mode name differs from bind-mode resolve).
+    /// Resource identity stem `adev-{base}-{hash12}` (not the DNS create `--name`).
+    /// When nil, `${devcontainerId}` is left unsubstituted for a later identity-known pass.
     public var devcontainerId: String?
 
     public init(
@@ -80,7 +79,8 @@ public enum VariableSubstitutor {
         return value
     }
 
-    /// Expand `${devcontainerId}` once create identity is known (idempotent if already expanded).
+    /// Expand `${devcontainerId}` to the resource identity stem (idempotent if already expanded).
+    /// `id` MUST be `adev-{base}-{hash12}`, never the DNS create name.
     public static func expandDevcontainerId(in input: String, id: String) -> String {
         guard input.contains(devcontainerIdToken) else { return input }
         return input.replacingOccurrences(of: devcontainerIdToken, with: id)
@@ -131,8 +131,7 @@ public enum VariableSubstitutor {
             return context.containerWorkspaceFolder
         }
         if token == "devcontainerId" {
-            // Expand when known; otherwise leave the token for the identity-known pass
-            // (create name differs for bind vs volume-mode / clone).
+            // Expand when the resource identity stem is known; otherwise leave the token.
             if let id = context.devcontainerId, !id.isEmpty {
                 return id
             }

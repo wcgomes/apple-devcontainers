@@ -123,6 +123,104 @@ public struct InteractivePicker: Sendable {
         return try pickNumbered(from: containers)
     }
 
+    /// Numbered / navigable list of labels (same stderr style as managed-container selection).
+    /// Not QUIET-gated — writes go through `writeError`.
+    public func pickLabel(from labels: [String], prompt: String) throws -> Int {
+        if let readInput {
+            return try pickNavigableLabels(labels, prompt: prompt, readInput: readInput)
+        }
+        if prefersLiveRawInput,
+           TerminalRawInput.canUseRawInput,
+           let picked = try TerminalRawInput.withRawStdin({
+               try pickNavigableLabels(
+                   labels,
+                   prompt: prompt,
+                   readInput: TerminalRawInput.readPickerInput
+               )
+           })
+        {
+            return picked
+        }
+        return try pickNumberedLabels(labels, prompt: prompt)
+    }
+
+    private func pickNumberedLabels(_ labels: [String], prompt: String) throws -> Int {
+        writeError(prompt + "\n")
+        let leadWidth = ManagedContainerTable.numberedLeadWidth(count: labels.count)
+        for (index, label) in labels.enumerated() {
+            writeError(ManagedContainerTable.numberedLead(index: index, width: leadWidth) + label + "\n")
+        }
+        writeError("Enter number: ")
+        guard let line = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let n = Int(line),
+              n >= 1, n <= labels.count
+        else {
+            throw CLIError(
+                code: CLIErrorCode.usage,
+                message: "Invalid selection",
+                hint: "Enter a number between 1 and \(labels.count)"
+            )
+        }
+        return n - 1
+    }
+
+    private func pickNavigableLabels(
+        _ labels: [String],
+        prompt: String,
+        readInput: @Sendable () -> InteractivePickerInput
+    ) throws -> Int {
+        precondition(!labels.isEmpty)
+        var selected = 0
+        writeError(prompt + "\n")
+        writeLabelRows(labels, selected: selected, clearLines: true)
+        writeError(hintLine())
+        let listLineCount = labels.count
+
+        while true {
+            switch readInput() {
+            case .up:
+                selected = selected == 0 ? labels.count - 1 : selected - 1
+                redrawLabelRows(labels, selected: selected, listLineCount: listLineCount)
+            case .down:
+                selected = selected == labels.count - 1 ? 0 : selected + 1
+                redrawLabelRows(labels, selected: selected, listLineCount: listLineCount)
+            case .enter:
+                writeError("\n")
+                return selected
+            case .escape, .eof:
+                writeError("\n")
+                throw CLIError(
+                    code: CLIErrorCode.usage,
+                    message: "Selection cancelled",
+                    hint: "Re-run and choose an option"
+                )
+            case .digit(let n):
+                if n >= 1, n <= labels.count {
+                    writeError("\n")
+                    return n - 1
+                }
+            case .other:
+                break
+            }
+        }
+    }
+
+    private func redrawLabelRows(_ labels: [String], selected: Int, listLineCount: Int) {
+        let up = listLineCount + 1
+        writeError("\u{001B}[\(up)A")
+        writeLabelRows(labels, selected: selected, clearLines: true)
+        writeError("\r\u{001B}[2K")
+        writeError(hintLine())
+    }
+
+    private func writeLabelRows(_ labels: [String], selected: Int, clearLines: Bool) {
+        for (index, label) in labels.enumerated() {
+            if clearLines { writeError("\r\u{001B}[2K") }
+            let lead = ManagedContainerTable.navigableLead(selected: index == selected)
+            writeError(lead + label + "\n")
+        }
+    }
+
     private func pickNumbered(from containers: [ContainerInfo]) throws -> ContainerInfo {
         let widths = tableWidths(containers: containers, numbered: true)
         writeError("Select a container:\n")

@@ -205,6 +205,65 @@ public enum RebuildCommand {
             fileManager: fileManager
         )
 
+        let replacementName = try replacementCreateName(
+            config: resolvedConfig,
+            labels: labels,
+            isVolumeMode: isVolumeMode
+        )
+        do {
+            try ensureReplacementNameOccupiable(
+                replacementName: replacementName,
+                selected: selected,
+                runtime: runtime
+            )
+        } catch let failure as BringUpRecovery.EligibleFailure where BringUpRecovery.isNameInUse(failure) {
+            let configPath = isVolumeMode
+                ? (volumeRead?.raw.pathInContainer ?? "")
+                : (labels[ContainerIdentity.labelConfigFile] ?? "")
+            let guidance = BringUpRecovery.Guidance(
+                configPath: configPath,
+                editCommand: configPath.isEmpty
+                    ? "recovery editor unavailable"
+                    : "edit \(configPath)",
+                retryCommand: "adevcontainer rebuild --name \(shellQuote(selected.name))"
+            )
+            return try BringUpRecovery.runNameCollision(
+                failure: failure,
+                guidance: guidance,
+                createName: replacementName,
+                isTTY: isTTY,
+                jsonOutput: options.jsonOutput,
+                prompt: openEditorPrompt,
+                persistName: { newName in
+                    try persistRebuildCreateName(
+                        newName,
+                        labels: labels,
+                        isVolumeMode: isVolumeMode,
+                        volumeRead: volumeRead,
+                        selected: selected,
+                        runtime: runtime
+                    )
+                },
+                retry: {
+                    try runInternal(
+                        options: options,
+                        runtime: runtime,
+                        picker: picker,
+                        localEnv: localEnv,
+                        hostResources: hostResources,
+                        fileManager: fileManager,
+                        recovery: recoveryContext,
+                        recoveryHelperID: recoveryEndpointID,
+                        selectedOverride: selected,
+                        allowRecovery: allowRecovery,
+                        isTTY: isTTY,
+                        recoveryEditor: recoveryEditor,
+                        openEditorPrompt: openEditorPrompt
+                    )
+                }
+            )
+        }
+
         var effectiveConfig = resolvedConfig
         let platform = ContainerPlatform.defaultLinuxPlatform
 
@@ -243,7 +302,6 @@ public enum RebuildCommand {
                 platform: platform
             )
             let nameBase = derivedNameBase(
-                containerName: selected.name,
                 labels: labels,
                 config: resolvedConfig,
                 isVolumeMode: isVolumeMode
@@ -279,10 +337,14 @@ public enum RebuildCommand {
             knownMetadataUsers = applied.users
         }
 
-        // Expand `${devcontainerId}` with the reused create name before hash / volume ensure.
+        // Expand `${devcontainerId}` to the resource identity stem (stable across create-name change).
         effectiveConfig = VariableSubstitutor.expandDevcontainerId(
             in: effectiveConfig,
-            id: selected.name
+            id: resourceIdentityStem(
+                config: resolvedConfig,
+                labels: labels,
+                isVolumeMode: isVolumeMode
+            )
         )
 
         // Identity. Bind: up parity → hash from the resolved (pre-feature) config. Volume:
@@ -304,8 +366,7 @@ public enum RebuildCommand {
 
         // Label dict = COPY of the selected container's labels with only drift-eligible
         // keys updated (config_hash, workspace_folder, remote_user, config_volumes).
-        // Never recomputed via ContainerIdentity volumeModeLabels/bindModeLabels; the
-        // container's name is reused verbatim.
+        // Create `--name` is the live computed name; labels are not rebuilt from scratch.
         let configVolumeNames = effectiveConfig.mounts
             .filter { $0.type == .volume }
             .map(\.source)
@@ -378,7 +439,7 @@ public enum RebuildCommand {
                 .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             request = CreateRequest.fromVolumeMode(
                 resolved: effectiveConfig,
-                identityName: selected.name,
+                identityName: replacementName,
                 labels: newLabels,
                 configHash: configHash,
                 workspaceVolumeName: stampedWorkspaceVolume(labels),
@@ -388,7 +449,7 @@ public enum RebuildCommand {
         } else {
             request = CreateRequest.from(
                 resolved: effectiveConfig,
-                identityName: selected.name,
+                identityName: replacementName,
                 labels: newLabels,
                 configHash: configHash,
                 workspacePath: stampedLocalFolder(labels),
@@ -451,7 +512,7 @@ public enum RebuildCommand {
                 hint: "Existing volumes were preserved"
             )
         }
-        StatusPrinter.status("Creating container", item: selected.name)
+        StatusPrinter.status("Creating container", item: replacementName)
         let id: String
         do {
             id = try runtime.create(request: request, ensureVolumes: false)
@@ -678,7 +739,7 @@ public enum RebuildCommand {
             result = try finish(
                 options: options,
                 id: id,
-                name: selected.name,
+                name: replacementName,
                 config: effectiveConfig,
                 imagesLabels: labels,
                 isVolumeMode: isVolumeMode,
@@ -1104,44 +1165,131 @@ public enum RebuildCommand {
         return effective != stamped
     }
 
-    /// Derived-tag nameBase for Features: reuse the OLD container-derived base so the
-    /// tag matches the original create even when config `name` was edited
-    /// (`adev-{base}-{hash12}` → base). Fallback: fresh-create parity.
-    private static func derivedNameBase(
-        containerName: String,
-        labels: [String: String],
+    /// Resource identity stem for `${devcontainerId}` — same hash material as `*-ws`, not the DNS name.
+    private static func resourceIdentityStem(
         config: ResolvedDevContainerConfig,
+        labels: [String: String],
         isVolumeMode: Bool
     ) -> String {
-        if let base = baseFromContainerName(containerName) {
-            return base
+        if isVolumeMode {
+            let wsVol = stampedWorkspaceVolume(labels)
+            if wsVol.hasSuffix("-ws"), wsVol.count > 3 {
+                return String(wsVol.dropLast(3))
+            }
+            let identity = ContainerIdentity.volumeModeIdentity(
+                gitURL: labels[ContainerIdentity.labelGitURL] ?? "",
+                configRelativePath: labels[ContainerIdentity.labelConfigFile] ?? "",
+                configName: config.name
+            )
+            return identity.resourceIdentityStem
         }
+        return ContainerIdentity.bindResourceIdentityStem(
+            workspacePath: stampedLocalFolder(labels),
+            configPath: labels[ContainerIdentity.labelConfigFile] ?? ""
+        )
+    }
+
+    /// Live create name from the resolved config (same sanitize / fallback as `up` / `clone`).
+    private static func replacementCreateName(
+        config: ResolvedDevContainerConfig,
+        labels: [String: String],
+        isVolumeMode: Bool
+    ) throws -> String {
         if isVolumeMode {
             let identity = ContainerIdentity.volumeModeIdentity(
                 gitURL: labels[ContainerIdentity.labelGitURL] ?? "",
                 configRelativePath: labels[ContainerIdentity.labelConfigFile] ?? "",
                 configName: config.name
             )
-            return identity.base
+            return try ContainerIdentity.requireCreateName(identity.containerName)
         }
-        return ContainerIdentity.humanBase(
-            configName: config.name,
-            workspacePath: stampedLocalFolder(labels)
+        return try ContainerIdentity.requireCreateName(
+            ContainerIdentity.containerName(
+                workspacePath: stampedLocalFolder(labels),
+                configPath: labels[ContainerIdentity.labelConfigFile] ?? "",
+                configName: config.name
+            )
         )
     }
 
-    /// `adev-{base}-{hash12}` → `{base}` (sanitized); nil when the name does not match.
-    private static func baseFromContainerName(_ name: String) -> String? {
-        var s = name
-        guard s.hasPrefix("adev-") else { return nil }
-        s = String(s.dropFirst("adev-".count))
-        let parts = s.split(separator: "-")
-        guard let last = parts.last,
-              last.count == 12,
-              last.allSatisfy({ $0.isHexDigit })
-        else { return nil }
-        s = String(s.dropLast(last.count + 1))
-        guard !s.isEmpty else { return nil }
-        return ContainerIdentity.sanitizeBase(s)
+    /// Block create until the replacement name is free or is the selected container.
+    /// Leftover same-workspace `adev-*` (the selected container) is not a delete-hint.
+    /// A foreign occupant of the new name must not delete the selected container.
+    private static func ensureReplacementNameOccupiable(
+        replacementName: String,
+        selected: ContainerInfo,
+        runtime: AppleContainerRuntime
+    ) throws {
+        let occupants = try runtime.listAll()
+        let occupant = occupants.first {
+            ContainerIdentity.containerHasName($0, replacementName)
+                && $0.id != selected.id
+                && $0.name != selected.name
+        }
+        guard occupant != nil else { return }
+        throw BringUpRecovery.eligible(
+            ContainerIdentity.nameInUseError(name: replacementName)
+        )
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Persist a collision rename into the live config this rebuild is reading.
+    private static func persistRebuildCreateName(
+        _ name: String,
+        labels: [String: String],
+        isVolumeMode: Bool,
+        volumeRead: ResolvedVolumeConfigRead?,
+        selected: ContainerInfo,
+        runtime: AppleContainerRuntime
+    ) throws {
+        if isVolumeMode, let volumeRead {
+            let updated = ConfigNameWriter.upsertName(
+                name,
+                in: String(data: volumeRead.raw.bytes, encoding: .utf8) ?? ""
+            )
+            let dest = volumeRead.raw.pathInContainer
+            let result = try runtime.exec(
+                nameOrId: selected.id,
+                command: [
+                    "sh", "-c", "cat > \"$1\"",
+                    "adevcontainer-rebuild-persist",
+                    dest
+                ],
+                workdir: volumeRead.raw.workspaceFolder,
+                stdinData: Data(updated.utf8)
+            )
+            guard result.succeeded else {
+                throw CLIError(
+                    code: CLIErrorCode.configParse,
+                    property: "name",
+                    message: "Could not persist name into the live volume config",
+                    hint: "The selected container was not deleted"
+                )
+            }
+            return
+        }
+        let path = labels[ContainerIdentity.labelConfigFile] ?? ""
+        try ConfigNameWriter.persistCreateName(name, inFileAt: path)
+    }
+
+    /// Features `nameBase` is folder/repo resource base — never live config `name`.
+    private static func derivedNameBase(
+        labels: [String: String],
+        config: ResolvedDevContainerConfig,
+        isVolumeMode: Bool
+    ) -> String {
+        _ = config
+        if isVolumeMode {
+            let identity = ContainerIdentity.volumeModeIdentity(
+                gitURL: labels[ContainerIdentity.labelGitURL] ?? "",
+                configRelativePath: labels[ContainerIdentity.labelConfigFile] ?? "",
+                configName: nil
+            )
+            return identity.base
+        }
+        return ContainerIdentity.humanBase(workspacePath: stampedLocalFolder(labels))
     }
 }

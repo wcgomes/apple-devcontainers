@@ -6,7 +6,11 @@ public struct UpResult: Equatable, Sendable, Codable {
     public var containerId: String
     public var remoteUser: String
     public var remoteWorkspaceFolder: String
-    public var containerName: String?
+    public var containerName: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case outcome, containerId, remoteUser, remoteWorkspaceFolder
+    }
 
     public init(
         outcome: String = "success",
