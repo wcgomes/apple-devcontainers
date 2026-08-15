@@ -166,7 +166,7 @@ public enum LifecycleRunner {
         runtime: AppleContainerRuntime,
         failurePolicy: FailurePolicy
     ) throws {
-        StatusPrinter.status("Running", item: property)
+        emitRunningStatus(property)
         // Stream hook logs live (teed to host stderr) so long postCreate/etc scripts do not
         // look stuck. Capture is retained for failure diagnostics; QUIET only silences status.
         let execResult = try runtime.exec(
@@ -302,7 +302,7 @@ public enum LifecycleRunner {
 
     private static func createPathStages(
         config: ResolvedDevContainerConfig
-    ) -> [(String, LifecycleCommand?, [LifecycleCommand])] {
+    ) -> [(String, LifecycleCommand?, [NamedLifecycleCommand])] {
         [
             ("onCreateCommand", config.onCreateCommand, config.featureOnCreateCommands),
             ("updateContentCommand", config.updateContentCommand, config.featureUpdateContentCommands),
@@ -338,12 +338,14 @@ public enum LifecycleRunner {
                 failurePolicy: .deleteContainerThenFail
             )
             for (extraIndex, extra) in extras.enumerated() {
-                let label = extras.count == 1
-                    ? "\(property) (feature)"
-                    : "\(property) (feature \(extraIndex + 1))"
                 try runIfPresent(
-                    property: label,
-                    command: extra,
+                    property: featureHookProperty(
+                        property,
+                        name: extra.name,
+                        index: extraIndex,
+                        count: extras.count
+                    ),
+                    command: extra.command,
                     containerId: containerId,
                     config: config,
                     runtime: runtime,
@@ -372,12 +374,14 @@ public enum LifecycleRunner {
             failurePolicy: .failKeepContainer
         )
         for (index, extra) in config.featurePostStartCommands.enumerated() {
-            let label = config.featurePostStartCommands.count == 1
-                ? "postStartCommand (feature)"
-                : "postStartCommand (feature \(index + 1))"
             try runIfPresent(
-                property: label,
-                command: extra,
+                property: featureHookProperty(
+                    "postStartCommand",
+                    name: extra.name,
+                    index: index,
+                    count: config.featurePostStartCommands.count
+                ),
+                command: extra.command,
                 containerId: containerId,
                 config: config,
                 runtime: runtime,
@@ -424,12 +428,14 @@ public enum LifecycleRunner {
             failurePolicy: .failKeepContainer
         )
         for (index, extra) in config.featurePostAttachCommands.enumerated() {
-            let label = config.featurePostAttachCommands.count == 1
-                ? "postAttachCommand (feature)"
-                : "postAttachCommand (feature \(index + 1))"
             try runIfPresent(
-                property: label,
-                command: extra,
+                property: featureHookProperty(
+                    "postAttachCommand",
+                    name: extra.name,
+                    index: index,
+                    count: config.featurePostAttachCommands.count
+                ),
+                command: extra.command,
                 containerId: containerId,
                 config: config,
                 runtime: runtime,
@@ -561,7 +567,7 @@ public enum LifecycleRunner {
         command: LifecycleCommand,
         currentDirectory: String
     ) throws {
-        StatusPrinter.status("Running", item: property)
+        emitRunningStatus(property)
         let invocation = hostInvocation(command)
         let runner = hostProcessRunner()
         let result: ProcessResult
@@ -599,6 +605,38 @@ public enum LifecycleRunner {
             return (first, Array(argv.dropFirst()))
         }
         return ("/usr/bin/env", argv)
+    }
+
+    /// Phase target is the feature id when known; fall back to "feature" / "feature N".
+    static func featureHookProperty(
+        _ property: String,
+        name: String,
+        index: Int,
+        count: Int
+    ) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            return "\(property) (\(trimmed))"
+        }
+        if count == 1 {
+            return "\(property) (feature)"
+        }
+        return "\(property) (feature \(index + 1))"
+    }
+
+    /// Prefer `item:` for the parenthetical target (feature name / object-map entry).
+    static func emitRunningStatus(_ property: String) {
+        if property.hasSuffix(")"),
+           let range = property.range(of: " (", options: .backwards)
+        {
+            let base = String(property[..<range.lowerBound])
+            let item = String(property[range.upperBound..<property.index(before: property.endIndex)])
+            if !base.isEmpty && !item.isEmpty {
+                StatusPrinter.status("Running \(base)", item: "(\(item))")
+                return
+            }
+        }
+        StatusPrinter.status("Running", item: property)
     }
 
     private static func lifecycleError(

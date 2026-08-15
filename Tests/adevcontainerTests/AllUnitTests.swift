@@ -2471,6 +2471,7 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
             "postAttachCommand",
             "postCreateCommand (feature)",
             "postStartCommand (setup)",
+            "postStartCommand (agents-workspace)",
             "postCreateCommand (feature 2)",
         ]
         for property in cases {
@@ -2502,6 +2503,57 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
             failurePolicy: .failKeepContainer
         )
         try MiniTest.expectEqual(String(data: buffer, encoding: .utf8) ?? "", "")
+    }),
+    ("lifecycleRunnerFeatureHookPhaseUsesFeatureName", {
+        let previousEnabled = StatusPrinter.enabled
+        let previousWrite = StatusPrinter.writeStderr
+        let previousPhase = StatusPrinter.hasEmittedPhase
+        let previousColor = TerminalStyle.colorOverride
+        defer {
+            StatusPrinter.enabled = previousEnabled
+            StatusPrinter.writeStderr = previousWrite
+            StatusPrinter.hasEmittedPhase = previousPhase
+            TerminalStyle.colorOverride = previousColor
+        }
+        TerminalStyle.colorOverride = false
+        StatusPrinter.enabled = true
+        var buffer = Data()
+        StatusPrinter.writeStderr = { buffer.append($0) }
+
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/app",
+            userEnvProbe: .none,
+            featurePostStartCommands: [
+                NamedLifecycleCommand(
+                    name: "agents-workspace",
+                    command: .shell("echo hi")
+                )
+            ]
+        )
+        StatusPrinter.resetSectionState()
+        try LifecycleRunner.runRestartPostStart(
+            containerId: "ctr-named-feature",
+            config: config,
+            runtime: runtime
+        )
+        let out = String(data: buffer, encoding: .utf8) ?? ""
+        try MiniTest.expect(
+            out.contains("==> Running postStartCommand (agents-workspace)\n"),
+            "feature hook phase item is the feature name"
+        )
+        try MiniTest.expect(!out.contains("(feature 1)"), "must not use feature-N labels when the name is known")
+        try MiniTest.expect(!out.contains("[agents-workspace-poststart]"), "must not prefix hook bodies with [slug-hook]")
     }),
     ("lifecycleObjectMapRunsInParallel", {
         let rendezvous = DispatchGroup()
@@ -3643,8 +3695,14 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         let parsed = DevContainerMetadataLabel.parseContributions(from: [
             DevContainerMetadataLabel.labelKey: encoded!
         ])
-        try MiniTest.expectEqual(parsed.postStartCommands, [.shell("echo baked-postStart")])
-        try MiniTest.expectEqual(parsed.postAttachCommands, [.shell("echo baked-postAttach")])
+        try MiniTest.expectEqual(
+            parsed.postStartCommands,
+            [NamedLifecycleCommand(name: "hook-feature", command: .shell("echo baked-postStart"))]
+        )
+        try MiniTest.expectEqual(
+            parsed.postAttachCommands,
+            [NamedLifecycleCommand(name: "hook-feature", command: .shell("echo baked-postAttach"))]
+        )
     }),
     ("featureDockerfileGeneratorBakesUnionedBaseAndFeatureMetadata", {
         // Derived LABEL must persist base-image hooks, not overwrite with features-only.
@@ -3714,13 +3772,15 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             DevContainerMetadataLabel.labelKey: encoded!
         ])
         try MiniTest.expectEqual(
-            parsed.postStartCommands,
+            parsed.postStartCommands.map(\.command),
             [.shell("echo base-postStart"), .shell("echo feature-postStart")]
         )
+        try MiniTest.expectEqual(parsed.postStartCommands.map(\.name), ["", "hook-feature"])
         try MiniTest.expectEqual(
-            parsed.postAttachCommands,
+            parsed.postAttachCommands.map(\.command),
             [.shell("echo base-postAttach"), .shell("echo feature-postAttach")]
         )
+        try MiniTest.expectEqual(parsed.postAttachCommands.map(\.name), ["", "hook-feature"])
     }),
     ("featureDockerfileGeneratorInstallSeesContainerEnv", {
         // Feature metadata containerEnv (e.g. DOTNET_ROOT) must reach install.sh.

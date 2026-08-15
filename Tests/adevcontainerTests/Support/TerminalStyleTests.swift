@@ -124,6 +124,21 @@ nonisolated(unsafe) let terminalStyleTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(framed, "    | npm install")
         let mono = TerminalStyle.frameToolLine("line\r", color: false)
         try MiniTest.expectEqual(mono, "    | line")
+        try MiniTest.expectEqual(
+            TerminalStyle.frameToolLine(
+                "[agents-workspace-poststart] Marker found, checking for updates...",
+                color: false
+            ),
+            "    | Marker found, checking for updates..."
+        )
+        try MiniTest.expectEqual(
+            TerminalStyle.stripLifecycleHookLogPrefix("[agents-workspace-poststart] agents-workspace update available (092b07a)"),
+            "agents-workspace update available (092b07a)"
+        )
+        try MiniTest.expectEqual(
+            TerminalStyle.stripLifecycleHookLogPrefix("[INFO] keep this"),
+            "[INFO] keep this"
+        )
     }),
     ("terminalStyleMonochromeWhenColorFalse", {
         let phase = TerminalStyle.stylePhase("==> Ready", color: false)
@@ -161,17 +176,17 @@ nonisolated(unsafe) let terminalStyleTests: [(String, () throws -> Void)] = [
     }),
     ("terminalStylePhaseItemParentheticalWhite", {
         let line = TerminalStyle.stylePhase(
-            "==> Running postStartCommand (feature 1)",
+            "==> Running postStartCommand (agents-workspace)",
             color: true
         )
         try MiniTest.expectEqual(
             TerminalStyle.stripANSI(line),
-            "==> Running postStartCommand (feature 1)"
+            "==> Running postStartCommand (agents-workspace)"
         )
         try MiniTest.expect(line.contains(TerminalStyle.ansiPhaseCyan))
         try MiniTest.expect(line.contains(TerminalStyle.ansiBold))
         // Item is white (bold default), not blue-wrapped alone as full line.
-        let item = TerminalStyle.styleCommand("(feature 1)", color: true)
+        let item = TerminalStyle.styleCommand("(agents-workspace)", color: true)
         try MiniTest.expect(line.contains(item))
         let head = TerminalStyle.stylePhaseHead("==> Running postStartCommand ", color: true)
         try MiniTest.expect(line.hasPrefix(head) || line.contains(head))
@@ -205,10 +220,10 @@ nonisolated(unsafe) let terminalStyleTests: [(String, () throws -> Void)] = [
     }),
     ("terminalStylePhaseItemMonochromeUnchanged", {
         let line = TerminalStyle.stylePhase(
-            "==> Running postStartCommand (feature 1)",
+            "==> Running postStartCommand (agents-workspace)",
             color: false
         )
-        try MiniTest.expectEqual(line, "==> Running postStartCommand (feature 1)")
+        try MiniTest.expectEqual(line, "==> Running postStartCommand (agents-workspace)")
         try MiniTest.expect(!line.contains("\u{001B}"))
     }),
 ]

@@ -1,6 +1,7 @@
 import Foundation
 
-/// One entry in a lifecycle object-map (name → leaf command).
+/// One entry in a lifecycle object-map (name → leaf command), or a
+/// feature-contributed hook labeled with the feature id.
 public struct NamedLifecycleCommand: Equatable, Sendable {
     public var name: String
     public var command: LifecycleCommand
@@ -8,6 +9,13 @@ public struct NamedLifecycleCommand: Equatable, Sendable {
     public init(name: String, command: LifecycleCommand) {
         self.name = name
         self.command = command
+    }
+
+    public var execArguments: [String] { command.execArguments }
+
+    /// Unnamed leaf — used when remelted metadata has no feature `id`.
+    public static func shell(_ value: String) -> NamedLifecycleCommand {
+        NamedLifecycleCommand(name: "", command: .shell(value))
     }
 }
 
@@ -267,11 +275,12 @@ public struct ResolvedDevContainerConfig: Equatable {
     /// Admitted OCI features (empty = no Features runner work).
     public var features: [AdmittedFeature]
     /// Extra lifecycle hooks contributed by features (run after config hooks per stage).
-    public var featureOnCreateCommands: [LifecycleCommand]
-    public var featureUpdateContentCommands: [LifecycleCommand]
-    public var featurePostCreateCommands: [LifecycleCommand]
-    public var featurePostStartCommands: [LifecycleCommand]
-    public var featurePostAttachCommands: [LifecycleCommand]
+    /// `name` is the feature id when known (phase item); empty when remelted metadata has none.
+    public var featureOnCreateCommands: [NamedLifecycleCommand]
+    public var featureUpdateContentCommands: [NamedLifecycleCommand]
+    public var featurePostCreateCommands: [NamedLifecycleCommand]
+    public var featurePostStartCommands: [NamedLifecycleCommand]
+    public var featurePostAttachCommands: [NamedLifecycleCommand]
 
     public init(
         name: String? = nil,
@@ -298,11 +307,11 @@ public struct ResolvedDevContainerConfig: Equatable {
         vscodeExtensions: [String] = [],
         vscodeSettingsJSON: Data = Data("{}".utf8),
         features: [AdmittedFeature] = [],
-        featureOnCreateCommands: [LifecycleCommand] = [],
-        featureUpdateContentCommands: [LifecycleCommand] = [],
-        featurePostCreateCommands: [LifecycleCommand] = [],
-        featurePostStartCommands: [LifecycleCommand] = [],
-        featurePostAttachCommands: [LifecycleCommand] = []
+        featureOnCreateCommands: [NamedLifecycleCommand] = [],
+        featureUpdateContentCommands: [NamedLifecycleCommand] = [],
+        featurePostCreateCommands: [NamedLifecycleCommand] = [],
+        featurePostStartCommands: [NamedLifecycleCommand] = [],
+        featurePostAttachCommands: [NamedLifecycleCommand] = []
     ) {
         self.name = name
         self.image = image
