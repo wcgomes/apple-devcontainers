@@ -5,11 +5,12 @@ private func pickerContainers() -> [ContainerInfo] {
     [
         ContainerInfo(id: "adev-a-111", name: "adev-a-111", state: "running", labels: [
             ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
-            ContainerIdentity.labelGitURL: "https://example.com/a.git",
+            ContainerIdentity.labelLocalFolder: "/host/workspace/a",
             ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeBind,
         ], image: "alpine"),
         ContainerInfo(id: "adev-b-222", name: "adev-b-222", state: "stopped", labels: [
             ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelGitURL: "https://example.com/b.git",
             ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
         ], image: "alpine"),
         ContainerInfo(id: "adev-c-333", name: "adev-c-333", state: "running", labels: [
@@ -163,7 +164,7 @@ nonisolated(unsafe) let interactivePickerTests: [(String, () throws -> Void)] = 
         let plain = TerminalStyle.stripANSI(box.text)
         try MiniTest.expect(plain.contains("Select a container:"))
         try MiniTest.expect(plain.contains("NAME") && plain.contains("STATE") && plain.contains("MODE"))
-        try MiniTest.expect(plain.contains("GIT_URL"))
+        try MiniTest.expect(plain.contains("SOURCE"))
         try MiniTest.expect(plain.contains("adev-a-111"))
         try MiniTest.expect(plain.contains("adev-b-222"))
         // Table state cells are plain text (no [brackets]), matching list.
@@ -201,10 +202,12 @@ nonisolated(unsafe) let interactivePickerTests: [(String, () throws -> Void)] = 
         try MiniTest.expect(box.text.contains(TerminalStyle.stylePhaseHead(aName, color: true)))
         try MiniTest.expect(box.text.contains(TerminalStyle.styleSuccess("running", color: true)))
         try MiniTest.expect(box.text.contains(TerminalStyle.styleMuted("stopped", color: true)))
-        // GIT_URL: default fg, normal weight (unstyled when color on).
-        try MiniTest.expect(box.text.contains("https://example.com/a.git"))
-        try MiniTest.expect(!box.text.contains(TerminalStyle.styleInfo("https://example.com/a.git", color: true)))
-        try MiniTest.expect(!box.text.contains(TerminalStyle.styleCommand("https://example.com/a.git", color: true)))
+        // SOURCE: default fg, normal weight (unstyled when color on).
+        // Bind row shows local_folder path; volume row shows git URL.
+        try MiniTest.expect(box.text.contains("/host/workspace/a"))
+        try MiniTest.expect(box.text.contains("https://example.com/b.git"))
+        try MiniTest.expect(!box.text.contains(TerminalStyle.styleInfo("/host/workspace/a", color: true)))
+        try MiniTest.expect(!box.text.contains(TerminalStyle.styleCommand("/host/workspace/a", color: true)))
         try MiniTest.expect(box.text.contains(TerminalStyle.styleCommand("bind  ", color: true)))
         try MiniTest.expect(box.text.contains(TerminalStyle.styleCommand("volume", color: true)))
         // Missing mode shows "-" like list.
@@ -245,10 +248,12 @@ nonisolated(unsafe) let interactivePickerTests: [(String, () throws -> Void)] = 
         try MiniTest.expect(box.text.contains(TerminalStyle.stylePhaseHead(bName, color: true)))
         try MiniTest.expect(box.text.contains(TerminalStyle.styleSuccess("running", color: true)))
         try MiniTest.expect(box.text.contains(TerminalStyle.styleMuted("stopped", color: true)))
-        // GIT_URL: default fg, normal weight (unstyled when color on).
-        try MiniTest.expect(box.text.contains("https://example.com/a.git"))
-        try MiniTest.expect(!box.text.contains(TerminalStyle.styleInfo("https://example.com/a.git", color: true)))
-        try MiniTest.expect(!box.text.contains(TerminalStyle.styleCommand("https://example.com/a.git", color: true)))
+        // SOURCE: default fg, normal weight (unstyled when color on).
+        // Bind row shows local_folder path; volume row shows git URL.
+        try MiniTest.expect(box.text.contains("/host/workspace/a"))
+        try MiniTest.expect(box.text.contains("https://example.com/b.git"))
+        try MiniTest.expect(!box.text.contains(TerminalStyle.styleInfo("/host/workspace/a", color: true)))
+        try MiniTest.expect(!box.text.contains(TerminalStyle.styleCommand("/host/workspace/a", color: true)))
         try MiniTest.expect(box.text.contains(TerminalStyle.styleCommand("bind  ", color: true)))
         try MiniTest.expect(box.text.contains(TerminalStyle.styleCommand("volume", color: true)))
         let plain = TerminalStyle.stripANSI(box.text)
@@ -260,7 +265,8 @@ nonisolated(unsafe) let interactivePickerTests: [(String, () throws -> Void)] = 
         try MiniTest.expect(plain.contains("running"))
         try MiniTest.expect(plain.contains("stopped"))
         try MiniTest.expect(!plain.contains("[running]"))
-        try MiniTest.expect(plain.contains("https://example.com/a.git"))
+        try MiniTest.expect(plain.contains("/host/workspace/a"))
+        try MiniTest.expect(plain.contains("https://example.com/b.git"))
         try MiniTest.expect(plain.contains("volume"))
     }),
     ("pickerListLineMonochromeWhenColorDisabled", {
@@ -289,11 +295,11 @@ nonisolated(unsafe) let interactivePickerTests: [(String, () throws -> Void)] = 
         try MiniTest.expect(box.text.contains("NAME"))
         try MiniTest.expect(box.text.contains("STATE"))
         try MiniTest.expect(box.text.contains("MODE"))
-        try MiniTest.expect(box.text.contains("GIT_URL"))
+        try MiniTest.expect(box.text.contains("SOURCE"))
         try MiniTest.expect(box.text.contains("  1) "))
         try MiniTest.expect(box.text.contains("adev-a-111"))
         try MiniTest.expect(box.text.contains("running"))
-        try MiniTest.expect(box.text.contains("https://example.com/a.git"))
+        try MiniTest.expect(box.text.contains("/host/workspace/a"))
         try MiniTest.expect(box.text.contains("bind"))
         try MiniTest.expect(box.text.contains("  2) "))
         try MiniTest.expect(box.text.contains("adev-b-222"))

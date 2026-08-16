@@ -218,7 +218,7 @@ Apple named volumes mount **root:root** ([gaps](../domain/devcontainer-apple-gap
 
 ### InteractivePicker (multi-container)
 
-`ManagedContainers.resolveSelection` → **`InteractivePicker`** when `--name` omitted and more than one managed container. Code: `ManagedContainers.swift`, `TerminalRawInput.swift`. Rows/header via shared **`ManagedContainerTable`** (NAME STATE MODE GIT_URL; lead `>` / `N)` — [terminal-output](terminal-output.md#managed-container-table-list--interactivepicker)). Foreign create-name collision does not use this picker.
+`ManagedContainers.resolveSelection` → **`InteractivePicker`** when `--name` omitted and more than one managed container. Code: `ManagedContainers.swift`, `TerminalRawInput.swift`. Rows/header via shared **`ManagedContainerTable`** (NAME STATE MODE SOURCE; lead `>` / `N)` — [terminal-output](terminal-output.md#managed-container-table-list--interactivepicker)). Foreign create-name collision does not use this picker.
 
 | Mode | When | Behavior |
 |------|------|----------|

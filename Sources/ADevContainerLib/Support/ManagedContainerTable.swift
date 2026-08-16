@@ -17,6 +17,25 @@ public enum ManagedContainerTable {
         return s + String(repeating: " ", count: width - s.count)
     }
 
+    /// Display-only abbreviation of a path under the user's home directory:
+    /// equal to home (trailing `/` included) → `~`, under home → `~/…`, otherwise unchanged.
+    /// Operates on the standardized path as-is: no normalization of `..` / duplicate slashes
+    /// (labels are standardized at stamp time).
+    /// Explicit home-prefix logic (not `NSString.abbreviatingWithTildeInPath`; Linux-portable).
+    public static func abbreviatePath(
+        _ path: String,
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+    ) -> String {
+        if path == homeDirectory || path == homeDirectory + "/" {
+            return "~"
+        }
+        let prefix = homeDirectory + "/"
+        if path.hasPrefix(prefix) {
+            return "~" + path.dropFirst(homeDirectory.count)
+        }
+        return path
+    }
+
     /// Column widths for a container set. `lead` is the picker prefix column (0 for `list`).
     public struct Widths: Sendable {
         public let lead: Int
@@ -40,7 +59,7 @@ public enum ManagedContainerTable {
         4 + String(max(count, 1)).count
     }
 
-    /// Dim header: optional blank lead, then NAME STATE MODE GIT_URL.
+    /// Dim header: optional blank lead, then NAME STATE MODE SOURCE.
     public static func header(widths: Widths) -> String {
         TerminalStyle.styleInfo(plainHeader(widths: widths))
     }
@@ -53,7 +72,7 @@ public enum ManagedContainerTable {
         s += pad("NAME", widths.name)
             + gap + pad("STATE", widths.state)
             + gap + pad("MODE", modeWidth)
-            + gap + "GIT_URL"
+            + gap + "SOURCE"
         return s
     }
 
@@ -65,7 +84,14 @@ public enum ManagedContainerTable {
     ) -> String {
         let name = displayName(for: info)
         let mode = info.labels[ContainerIdentity.labelWorkspaceMode] ?? "-"
-        let git = info.labels[ContainerIdentity.labelGitURL] ?? ""
+        let path: String
+        if info.labels[ContainerIdentity.labelWorkspaceMode] == ContainerIdentity.workspaceModeBind {
+            path = abbreviatePath(info.labels[ContainerIdentity.labelLocalFolder] ?? "")
+        } else if info.labels[ContainerIdentity.labelWorkspaceMode] == ContainerIdentity.workspaceModeVolume {
+            path = info.labels[ContainerIdentity.labelGitURL] ?? ""
+        } else {
+            path = ""
+        }
 
         var out = ""
         if widths.lead > 0 {
@@ -80,7 +106,7 @@ public enum ManagedContainerTable {
         out += TerminalStyle.styleCommand(pad(mode, modeWidth))
         out += gap
         // Default foreground, normal weight (not dim, not bold).
-        out += git
+        out += path
         return out
     }
 

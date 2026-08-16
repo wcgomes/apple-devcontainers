@@ -3,7 +3,7 @@ import Foundation
 
 /// Human `list` table color / monochrome / JSON contracts (InteractivePicker-aligned cells).
 nonisolated(unsafe) let listCommandTests: [(String, () throws -> Void)] = [
-    ("listHumanTableColorsNameStateModeGit", {
+    ("listHumanTableColorsNameStateModeSource", {
         let previousColor = TerminalStyle.colorOverride
         defer { TerminalStyle.colorOverride = previousColor }
         TerminalStyle.colorOverride = true
@@ -20,7 +20,8 @@ nonisolated(unsafe) let listCommandTests: [(String, () throws -> Void)] = [
                     id: "adev-stop-ddddeeeeffff",
                     state: "stopped",
                     mode: "bind",
-                    git: ""
+                    git: "",
+                    localFolder: "/host/workspace/app"
                 ),
             ]
         )
@@ -37,10 +38,12 @@ nonisolated(unsafe) let listCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(table.contains(TerminalStyle.styleMuted("stopped", color: true)))
         try MiniTest.expect(table.contains(TerminalStyle.styleCommand("volume", color: true)))
         try MiniTest.expect(table.contains(TerminalStyle.styleCommand("bind  ", color: true)))
-        // GIT_URL: default fg, normal weight (unstyled when color on).
+        // SOURCE: default fg, normal weight (unstyled when color on).
         try MiniTest.expect(table.contains("https://github.com/org/app"))
         try MiniTest.expect(!table.contains(TerminalStyle.styleInfo("https://github.com/org/app", color: true)))
         try MiniTest.expect(!table.contains(TerminalStyle.styleCommand("https://github.com/org/app", color: true)))
+        // SOURCE cell is mode-dependent: bind row shows local_folder path.
+        try MiniTest.expect(table.contains("/host/workspace/app"))
         // Header is dim chrome; stopped STATE uses muted gray (not the same SGR as dim).
         let headerLine = plain.split(separator: "\n", omittingEmptySubsequences: false).first.map(String.init) ?? ""
         try MiniTest.expect(headerLine.contains("NAME") && headerLine.contains("STATE") && headerLine.contains("MODE"))
@@ -51,6 +54,78 @@ nonisolated(unsafe) let listCommandTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expect(plain.contains("adev-run-aaaabbbbcccc"))
         try MiniTest.expect(plain.contains("adev-stop-ddddeeeeffff"))
+    }),
+    ("managedContainerTableAbbreviatePathRules", {
+        let home = "/home/dev"
+        // Equal to home → "~".
+        try MiniTest.expectEqual(
+            ManagedContainerTable.abbreviatePath(home, homeDirectory: home),
+            "~"
+        )
+        // Home with a trailing slash → "~" (collapse, not "~/").
+        try MiniTest.expectEqual(
+            ManagedContainerTable.abbreviatePath(home + "/", homeDirectory: home),
+            "~"
+        )
+        // Under home → "~/…", remainder preserved (including deeper nesting).
+        try MiniTest.expectEqual(
+            ManagedContainerTable.abbreviatePath(home + "/workspace/app", homeDirectory: home),
+            "~/workspace/app"
+        )
+        try MiniTest.expectEqual(
+            ManagedContainerTable.abbreviatePath(home + "/a/b/c", homeDirectory: home),
+            "~/a/b/c"
+        )
+        // Outside home → unchanged.
+        try MiniTest.expectEqual(
+            ManagedContainerTable.abbreviatePath("/host/workspace/app", homeDirectory: home),
+            "/host/workspace/app"
+        )
+        // Home-prefix sibling ("/home/dev2") is not under home.
+        try MiniTest.expectEqual(
+            ManagedContainerTable.abbreviatePath("/home/dev2/app", homeDirectory: home),
+            "/home/dev2/app"
+        )
+        // Empty path → unchanged.
+        try MiniTest.expectEqual(
+            ManagedContainerTable.abbreviatePath("", homeDirectory: home),
+            ""
+        )
+    }),
+    ("listHumanTableAbbreviatesHomeUnderBindPath", {
+        let previousColor = TerminalStyle.colorOverride
+        defer { TerminalStyle.colorOverride = previousColor }
+        TerminalStyle.colorOverride = false
+
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let bindPath = home + "/workspace/app"
+        let runtime = try listTestRuntime(
+            entries: [
+                listManagedEntry(
+                    id: "adev-bind-hhhhhhhh",
+                    state: "running",
+                    mode: "bind",
+                    git: "",
+                    localFolder: bindPath
+                ),
+                listManagedEntry(
+                    id: "adev-vol-gggggggg",
+                    state: "running",
+                    mode: "volume",
+                    git: "https://github.com/org/app"
+                ),
+            ]
+        )
+        let table = try ListCommand.run(options: ListOptions(jsonOutput: false), runtime: runtime)
+        // Bind-mode SOURCE under the real home renders ~/… (display-only).
+        try MiniTest.expect(table.contains("~/workspace/app"))
+        try MiniTest.expect(!table.contains(bindPath))
+        // Volume-mode SOURCE (git URL) is never abbreviated.
+        try MiniTest.expect(table.contains("https://github.com/org/app"))
+        // Label stays unchanged: list JSON still carries the full local_folder path
+        // (JSONSerialization pretty-printed output escapes "/" as "\/").
+        let json = try ListCommand.run(options: ListOptions(jsonOutput: true), runtime: runtime)
+        try MiniTest.expect(json.contains(bindPath.replacingOccurrences(of: "/", with: "\\/")))
     }),
     ("listHumanTableMonochromeWhenColorDisabled", {
         let previousColor = TerminalStyle.colorOverride
@@ -81,7 +156,7 @@ nonisolated(unsafe) let listCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(table.contains("NAME"))
         try MiniTest.expect(table.contains("STATE"))
         try MiniTest.expect(table.contains("MODE"))
-        try MiniTest.expect(table.contains("GIT_URL"))
+        try MiniTest.expect(table.contains("SOURCE"))
     }),
     ("listJSONUnchangedMonochromeEvenWhenColorEnabled", {
         let previousColor = TerminalStyle.colorOverride
@@ -151,7 +226,8 @@ nonisolated(unsafe) let listCommandTests: [(String, () throws -> Void)] = [
                     id: "short",
                     state: "running",
                     mode: "bind",
-                    git: "https://example.com/a.git"
+                    git: "",
+                    localFolder: "/host/workspace/app"
                 ),
                 listManagedEntry(
                     id: "longer-name-here",
@@ -192,7 +268,8 @@ private func listManagedEntry(
     id: String,
     state: String,
     mode: String,
-    git: String
+    git: String,
+    localFolder: String = ""
 ) -> [String: Any] {
     var labels: [String: String] = [
         ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
@@ -200,6 +277,9 @@ private func listManagedEntry(
     ]
     if !git.isEmpty {
         labels[ContainerIdentity.labelGitURL] = git
+    }
+    if !localFolder.isEmpty {
+        labels[ContainerIdentity.labelLocalFolder] = localFolder
     }
     return MockProcessRunner.containerListJSON(id: id, state: state, labels: labels)
 }

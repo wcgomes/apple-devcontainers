@@ -68,7 +68,7 @@ Live-tee internal tools (hooks, Features build, clone populate `streamOutput: tr
 
 **`ManagedContainerTable`** shared human layout for `list` (stdout) and **InteractivePicker** (stderr). Code: `ManagedContainerTable.swift`.
 
-Columns (header dim `styleInfo`): **NAME STATE MODE GIT_URL**. Pad plain cells, then style (ANSI must not skew columns). Cell styles (color on): name `stylePhaseHead`; state `styleSuccess` when running else **`styleMuted`** (bold + 256 fg `245` — not weight-normal; distinct from header `styleInfo` dim); mode `styleCommand`; git plain default foreground (not dim, not bold). Recovery helpers append ` [RECOVERY]` on the name. Monochrome when color off; `list --json` monochrome.
+Columns (header dim `styleInfo`): **NAME STATE MODE SOURCE**. Pad plain cells, then style (ANSI must not skew columns). Cell styles (color on): name `stylePhaseHead`; state `styleSuccess` when running else **`styleMuted`** (bold + 256 fg `245` — not weight-normal; distinct from header `styleInfo` dim); mode `styleCommand`; SOURCE plain default foreground (not dim, not bold), showing `devcontainer.local_folder` for bind-mode containers and `devcontainer.git_url` for volume-mode containers (empty otherwise). Bind-mode paths under the user's home directory are displayed with `~` (`~/…`) — a display-only abbreviation; the `devcontainer.local_folder` label stays unchanged, and volume-mode git URLs are never abbreviated. Recovery helpers append ` [RECOVERY]` on the name. Monochrome when color off; `list --json` monochrome.
 
 | Surface | Stream | Lead column |
 |---------|--------|-------------|
