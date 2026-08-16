@@ -1,7 +1,7 @@
 # Apple Dev Container CLI (adevcontainer)
 
 [![CI](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml/badge.svg)](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-843%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
+[![tests](https://img.shields.io/badge/tests-845%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Native Swift CLI that reads `devcontainer.json` and runs development environments on Apple [`container`](https://github.com/apple/container).
