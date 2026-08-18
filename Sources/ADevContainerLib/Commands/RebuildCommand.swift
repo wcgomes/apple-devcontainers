@@ -1,5 +1,49 @@
 import Foundation
 
+public protocol RebuildLocalIdentityReader: Sendable {
+    func readHostWorkspace(path: String) -> GitAuthorIdentity
+    func readOldContainerWorkspace(
+        containerId: String,
+        workspaceFolder: String,
+        user: String?,
+        runtime: AppleContainerRuntime
+    ) -> GitAuthorIdentity
+}
+
+public struct DefaultRebuildLocalIdentityReader: RebuildLocalIdentityReader {
+    public init() {}
+
+    public func readHostWorkspace(path: String) -> GitAuthorIdentity {
+        HostGitClient().readLocalAuthorIdentity(in: path)
+    }
+
+    public func readOldContainerWorkspace(
+        containerId: String,
+        workspaceFolder: String,
+        user: String?,
+        runtime: AppleContainerRuntime
+    ) -> GitAuthorIdentity {
+        func read(_ key: String) -> String? {
+            guard let result = try? runtime.exec(
+                nameOrId: containerId,
+                command: ["git", "-C", workspaceFolder, "config", "--local", "--get", key],
+                user: user,
+                workdir: workspaceFolder,
+                env: [:]
+            ), result.succeeded else {
+                return nil
+            }
+            let value = result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : value
+        }
+
+        return GitAuthorIdentity(
+            name: read("user.name"),
+            email: read("user.email")
+        )
+    }
+}
+
 /// `adevcontainer rebuild`: force-rebuild a managed container from its current
 /// devcontainer.json, preserving the container identity (same name / same workspace
 /// volume). Two phases split at the delete of the old container:
@@ -23,6 +67,8 @@ public enum RebuildCommand {
     nonisolated(unsafe) public static var featuresCacheRootOverride: String?
     /// Optional override for native-arm BuildKit ensure (tests inject no-op / mock).
     nonisolated(unsafe) public static var ensureNativeArmBuildOverride: (() throws -> Void)?
+    /// Optional local identity reader override for rebuild tests.
+    nonisolated(unsafe) public static var localIdentityReaderOverride: (any RebuildLocalIdentityReader)?
 
     public static func run(
         options: RebuildOptions,
@@ -33,11 +79,13 @@ public enum RebuildCommand {
         fileManager: FileManager = .default,
         isTTY: Bool = AppleContainerConfig.stdinIsTTY(),
         recoveryEditor: RecoveryEditor? = nil,
-        openEditorPrompt: RecoveryOpenEditorPrompt = .default
+        openEditorPrompt: RecoveryOpenEditorPrompt = .default,
+        credentials: any GitCredentialProviding = HostGitCredential()
     ) throws -> RebuildResult {
         try runInternal(
             options: options,
             runtime: runtime,
+            credentials: credentials,
             picker: picker,
             localEnv: localEnv,
             hostResources: hostResources,
@@ -51,6 +99,7 @@ public enum RebuildCommand {
     private static func runInternal(
         options: RebuildOptions,
         runtime: AppleContainerRuntime,
+        credentials: any GitCredentialProviding,
         picker: InteractivePicker,
         localEnv: [String: String],
         hostResources: any HostResourceProviding,
@@ -172,6 +221,21 @@ public enum RebuildCommand {
             resolvedConfig = config
         }
 
+        let localIdentityReader = localIdentityReaderOverride ?? DefaultRebuildLocalIdentityReader()
+        let capturedLocalIdentity: GitAuthorIdentity
+        if isVolumeMode {
+            capturedLocalIdentity = localIdentityReader.readOldContainerWorkspace(
+                containerId: selected.id,
+                workspaceFolder: resolvedConfig.workspaceFolder,
+                user: labels[ContainerIdentity.labelRemoteUser],
+                runtime: runtime
+            )
+        } else {
+            capturedLocalIdentity = localIdentityReader.readHostWorkspace(
+                path: stampedLocalFolder(labels)
+            )
+        }
+
         if recoveryContext == nil, RecoveryHelper.isEligible(labels: labels), let volumeRead {
             // This is deliberately before host/Features work and before the old-container
             // delete. Preparation failures therefore leave the selected container untouched.
@@ -248,6 +312,7 @@ public enum RebuildCommand {
                     try runInternal(
                         options: options,
                         runtime: runtime,
+                        credentials: credentials,
                         picker: picker,
                         localEnv: localEnv,
                         hostResources: hostResources,
@@ -533,6 +598,7 @@ public enum RebuildCommand {
                         try runInternal(
                             options: options,
                             runtime: runtime,
+                            credentials: credentials,
                             picker: picker,
                             localEnv: localEnv,
                             hostResources: hostResources,
@@ -554,6 +620,7 @@ public enum RebuildCommand {
                     selected: selected,
                     labels: labels,
                     runtime: runtime,
+                    credentials: credentials,
                     options: options,
                     localEnv: localEnv,
                     hostResources: hostResources,
@@ -588,6 +655,7 @@ public enum RebuildCommand {
                         try runInternal(
                             options: options,
                             runtime: runtime,
+                            credentials: credentials,
                             picker: picker,
                             localEnv: localEnv,
                             hostResources: hostResources,
@@ -609,6 +677,7 @@ public enum RebuildCommand {
                     selected: selected,
                     labels: labels,
                     runtime: runtime,
+                    credentials: credentials,
                     options: options,
                     localEnv: localEnv,
                     hostResources: hostResources,
@@ -669,6 +738,41 @@ public enum RebuildCommand {
             )
         }
 
+        // Forward host git credentials into the new container's store before hooks.
+        // Bind mode enumerates host remotes; volume mode seeds the stamped git_url.
+        // Soft-fail like the chown blocks above: warn and continue, never delete.
+        do {
+            try GuestGitCredentialSeed(
+                credentials: credentials,
+                runner: LifecycleRunner.hostProcessRunnerOverride ?? FoundationProcessRunner()
+            ).seed(
+                containerId: id,
+                hostWorkspace: isVolumeMode ? nil : stampedLocalFolder(labels),
+                gitURL: isVolumeMode ? labels[ContainerIdentity.labelGitURL] : nil,
+                connectionUser: effectiveConfig.connectionUser,
+                runtime: runtime
+            )
+        } catch {
+            StatusPrinter.warning(
+                "Git credential seeding failed; continuing without forwarded credentials: \(error.localizedDescription)"
+            )
+        }
+
+        if capturedLocalIdentity.isComplete {
+            do {
+                try GitAuthorIdentitySync().write(
+                    identity: capturedLocalIdentity,
+                    containerId: id,
+                    connectionUser: effectiveConfig.connectionUser,
+                    runtime: runtime
+                )
+            } catch {
+                StatusPrinter.warning(
+                    "Global git author identity synchronization failed; continuing: \(error.localizedDescription)"
+                )
+            }
+        }
+
         // Create-path hooks split at waitFor (delete-on-fail of the new container).
         // Delete-on-fail must run exactly once. runCreatePath already deletes the
         // new container when a create-path hook exits non-zero; only an exec-level
@@ -693,6 +797,7 @@ public enum RebuildCommand {
                         try runInternal(
                             options: options,
                             runtime: runtime,
+                            credentials: credentials,
                             picker: picker,
                             localEnv: localEnv,
                             hostResources: hostResources,
@@ -714,6 +819,7 @@ public enum RebuildCommand {
                     selected: selected,
                     labels: labels,
                     runtime: runtime,
+                    credentials: credentials,
                     options: options,
                     localEnv: localEnv,
                     hostResources: hostResources,
@@ -850,6 +956,7 @@ public enum RebuildCommand {
         selected: ContainerInfo,
         labels: [String: String],
         runtime: AppleContainerRuntime,
+        credentials: any GitCredentialProviding,
         options: RebuildOptions,
         localEnv: [String: String],
         hostResources: any HostResourceProviding,
@@ -883,6 +990,7 @@ public enum RebuildCommand {
                 return try runInternal(
                     options: retryOptions,
                     runtime: runtime,
+                    credentials: credentials,
                     picker: picker,
                     localEnv: localEnv,
                     hostResources: hostResources,

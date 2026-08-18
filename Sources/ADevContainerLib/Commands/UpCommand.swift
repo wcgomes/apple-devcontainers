@@ -35,7 +35,8 @@ public enum UpCommand {
         hostResources: any HostResourceProviding = SystemHostResourceInfo(),
         isTTY: Bool = AppleContainerConfig.stdinIsTTY(),
         recoveryEditor: RecoveryEditor? = nil,
-        openEditorPrompt: RecoveryOpenEditorPrompt = .default
+        openEditorPrompt: RecoveryOpenEditorPrompt = .default,
+        credentials: any GitCredentialProviding = HostGitCredential()
     ) throws -> UpResult {
         let editor = recoveryEditor ?? RecoveryEditor(environment: localEnv)
 
@@ -54,7 +55,8 @@ public enum UpCommand {
                 options: options,
                 runtime: runtime,
                 localEnv: localEnv,
-                hostResources: hostResources
+                hostResources: hostResources,
+                credentials: credentials
             )
         }
         let guidance = BringUpRecovery.Guidance(
@@ -69,7 +71,8 @@ public enum UpCommand {
                 options: options,
                 runtime: runtime,
                 localEnv: localEnv,
-                hostResources: hostResources
+                hostResources: hostResources,
+                credentials: credentials
             )
         } catch let failure as BringUpRecovery.EligibleFailure {
             let editHost = {
@@ -94,7 +97,8 @@ public enum UpCommand {
                             options: options,
                             runtime: runtime,
                             localEnv: localEnv,
-                            hostResources: hostResources
+                            hostResources: hostResources,
+                            credentials: credentials
                         )
                     }
                 )
@@ -117,7 +121,8 @@ public enum UpCommand {
                             runtime: runtime,
                             localEnv: localEnv,
                             hostResources: hostResources,
-                            resetExistingName: resetExistingName
+                            resetExistingName: resetExistingName,
+                            credentials: credentials
                         )
                     } catch let next as BringUpRecovery.EligibleFailure {
                         resetExistingName = next.resetExistingName
@@ -138,7 +143,8 @@ public enum UpCommand {
         runtime: AppleContainerRuntime,
         localEnv: [String: String],
         hostResources: any HostResourceProviding,
-        resetExistingName: String? = nil
+        resetExistingName: String? = nil,
+        credentials: any GitCredentialProviding
     ) throws -> UpResult {
         StatusPrinter.status("Resolving configuration")
         let resolved: ResolvedWorkspace
@@ -451,6 +457,23 @@ public enum UpCommand {
         } catch {
             try? runtime.delete(nameOrId: id, force: true)
             throw BringUpRecovery.eligible(error)
+        }
+
+        // Forward host git credentials into the fresh container's store before hooks
+        // (fresh-create bind path only). Soft-fail: warn and continue; never delete.
+        do {
+            try GuestGitCredentialSeed(
+                credentials: credentials,
+                runner: LifecycleRunner.hostProcessRunnerOverride ?? FoundationProcessRunner()
+            ).seed(
+                containerId: id,
+                hostWorkspace: resolved.workspacePath,
+                gitURL: nil,
+                connectionUser: connectionUser,
+                runtime: runtime
+            )
+        } catch {
+            StatusPrinter.warning("Git credential seeding failed; continuing without forwarded credentials: \(error.localizedDescription)")
         }
 
         do {

@@ -141,7 +141,7 @@ private func persistAwareRuntime(
                 return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
             }
             // In-container git populate restores the original remote config.
-            if args.contains("-c"), !args.contains("-lc") {
+            if args.contains("-c"), !args.contains("-lc"), !(args.last?.contains("--global") == true) {
                 files.files[workspaceConfigPath] = Data(cloneOriginalConfigJSON.utf8)
             }
             return nil

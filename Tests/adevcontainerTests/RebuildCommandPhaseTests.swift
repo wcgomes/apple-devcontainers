@@ -212,6 +212,42 @@ final class RebuildScenario {
     }
 }
 
+final class RebuildIdentityReaderFixture: RebuildLocalIdentityReader, @unchecked Sendable {
+    var hostIdentity = GitAuthorIdentity()
+    var guestIdentity = GitAuthorIdentity()
+    var hostPaths: [String] = []
+    var guestCalls: [(containerId: String, workspaceFolder: String, user: String?)] = []
+    var onHostRead: (() -> Void)?
+    var onGuestRead: (() -> Void)?
+
+    func readHostWorkspace(path: String) -> GitAuthorIdentity {
+        hostPaths.append(path)
+        onHostRead?()
+        return hostIdentity
+    }
+
+    func readOldContainerWorkspace(
+        containerId: String,
+        workspaceFolder: String,
+        user: String?,
+        runtime: AppleContainerRuntime
+    ) -> GitAuthorIdentity {
+        guestCalls.append((containerId, workspaceFolder, user))
+        onGuestRead?()
+        return guestIdentity
+    }
+}
+
+func withRebuildIdentityReader(
+    _ reader: any RebuildLocalIdentityReader,
+    _ body: () throws -> Void
+) throws {
+    let previous = RebuildCommand.localIdentityReaderOverride
+    RebuildCommand.localIdentityReaderOverride = reader
+    defer { RebuildCommand.localIdentityReaderOverride = previous }
+    try body()
+}
+
 // MARK: - Test doubles
 
 /// Non-interactive picker (`selectionRequired` on multiple containers).
@@ -1636,7 +1672,11 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         defer { try? FileManager.default.removeItem(at: ws) }
         var events: [String] = []
         let host = RecordingHostProcessRunner()
-        host.handler = { _ in
+        host.handler = { call in
+            // Non-repo temp workspace: the credential-seeding remote probe reports no remotes.
+            if call.arguments.contains("remote") {
+                return ProcessResult(exitCode: 128, stdout: Data(), stderr: Data("fatal: not a git repository".utf8))
+            }
             events.append("initialize")
             return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
         }
@@ -1671,7 +1711,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         let createIdx = s.mock.calls.firstIndex { $0.arguments.first == "create" }
         try MiniTest.expect(createIdx != nil, "new container is created after host initialize")
         try MiniTest.expectEqual(events.first, "initialize")
-        try MiniTest.expectEqual(host.calls.count, 1)
+        try MiniTest.expectEqual(host.calls.filter { $0.arguments.contains("echo init-rebuild") }.count, 1)
         try MiniTest.expect(host.calls[0].arguments.contains("echo init-rebuild"))
         try MiniTest.expectEqual(
             (host.calls[0].currentDirectory as NSString?)?.standardizingPath,
@@ -2583,6 +2623,486 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
             try MiniTest.expect(cli != nil, "CLIError surfaced")
             try MiniTest.expectEqual(cli?.exitCode, 1)
         })
+    }),
+
+    // ═══════════════════════ Section 6: git credential seeding ═══════════════════════
+
+    ("rebuildBindSeedsFromHostRemotesBeforeHooks", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "vscode",
+          "postCreateCommand": "echo postCreateCustom"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "old-bind-id",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.install()
+        let hostRunner = RecordingHostProcessRunner()
+        hostRunner.handler = { call in
+            if call.arguments == ["-C", ws.path, "remote", "-v"] {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: Data("origin\thttps://github.com/wcgomes/repo.git (fetch)\n".utf8),
+                    stderr: Data()
+                )
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restore = RecordingHostProcessRunner.install(hostRunner)
+        defer { restore() }
+        let creds = SeedMockCredential()
+        creds.results["https://github.com/wcgomes/repo.git"] = .success(
+            GitHTTPSCredentials(username: "x-access-token", password: "ghp_secret")
+        )
+        let result = try RebuildCommand.run(options: RebuildOptions(), runtime: s.runtime, credentials: creds)
+        try MiniTest.expectEqual(result.outcome, "success")
+        let calls = s.mock.calls.map(\.arguments)
+        let deleteIdx = calls.firstIndex { $0.first == "delete" }!
+        let createIdx = calls.firstIndex { $0.first == "create" }!
+        let startIdx = calls.firstIndex { $0.first == "start" }!
+        let seedIdx = calls.firstIndex { $0.first == "exec" && $0.last?.contains("credential.helper") == true }!
+        let hookIdx = calls.firstIndex { $0.first == "exec" && $0.last?.contains("postCreateCustom") == true }!
+        try MiniTest.expect(deleteIdx < createIdx, "old deleted before new created")
+        try MiniTest.expect(createIdx < startIdx, "new created before start")
+        try MiniTest.expect(startIdx < seedIdx, "seeding after start")
+        try MiniTest.expect(seedIdx < hookIdx, "seeding before first hook exec")
+        let seedCall = s.mock.calls[seedIdx]
+        let seedArgs = seedCall.arguments
+        try MiniTest.expect(seedArgs.contains("-u") && seedArgs.contains("vscode"), "seeds as connection user")
+        try MiniTest.expectEqual(
+            String(data: seedCall.stdinData ?? Data(), encoding: .utf8) ?? "",
+            "protocol=https\nhost=github.com\nusername=x-access-token\npassword=ghp_secret\n\n"
+        )
+        try MiniTest.expect(!seedArgs.contains(where: { $0.contains("ghp_secret") }))
+        try MiniTest.expect(seedCall.environment?.values.contains("ghp_secret") != true)
+        let script = seedArgs.last ?? ""
+        try MiniTest.expect(script.contains("git config --global --add credential.helper"))
+        try MiniTest.expect(!script.contains("ghp_secret"), "secrets never in the exec command")
+        try MiniTest.expect(!script.contains("github.com"), "no host/path in the script")
+    }),
+    ("rebuildVolumeSeedsFromStampedGitURLWithoutEnumeration", {
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(id: "vol-old", labels: s.volumeLabels())
+        s.containers = [info]
+        s.install()
+        let hostRunner = RecordingHostProcessRunner()
+        hostRunner.handler = { _ in
+            ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restore = RecordingHostProcessRunner.install(hostRunner)
+        defer { restore() }
+        let creds = SeedMockCredential()
+        creds.results["https://github.com/example/repo.git"] = .success(
+            GitHTTPSCredentials(username: "x-access-token", password: "ghp_secret")
+        )
+        var result: RebuildResult?
+        try withRebuildVolumeOverrides {
+            result = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime, credentials: creds)
+        }
+        try MiniTest.expectEqual(result?.outcome, "success")
+        let calls = s.mock.calls.map(\.arguments)
+        let seedIdx = calls.firstIndex { $0.first == "exec" && $0.last?.contains("credential.helper") == true }!
+        let seedCall = s.mock.calls[seedIdx]
+        let seedArgs = seedCall.arguments
+        try MiniTest.expectEqual(
+            String(data: seedCall.stdinData ?? Data(), encoding: .utf8) ?? "",
+            "protocol=https\nhost=github.com\nusername=x-access-token\npassword=ghp_secret\n\n",
+            "volume seeds from the stamped git_url"
+        )
+        try MiniTest.expect(!seedArgs.contains(where: { $0.contains("ghp_secret") }))
+        try MiniTest.expect(seedCall.environment?.values.contains("ghp_secret") != true)
+        try MiniTest.expect(seedArgs.contains("-u") && seedArgs.contains("vscode"))
+        try MiniTest.expect(hostRunner.calls.isEmpty, "volume mode must not enumerate host remotes")
+    }),
+    ("rebuildVolumeMissingGitURLSkipsSilently", {
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(id: "vol-old", labels: s.volumeLabels(gitURL: ""))
+        s.containers = [info]
+        s.install()
+        let creds = SeedMockCredential()
+        creds.defaultResult = .success(GitHTTPSCredentials(username: "u", password: "p"))
+        var warnings: [String] = []
+        let prevWarning = StatusPrinter.onWarning
+        StatusPrinter.onWarning = { warnings.append($0) }
+        defer { StatusPrinter.onWarning = prevWarning }
+        var result: RebuildResult?
+        try withRebuildVolumeOverrides {
+            result = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime, credentials: creds)
+        }
+        try MiniTest.expectEqual(result?.outcome, "success")
+        try MiniTest.expect(creds.fillCalls.isEmpty, "missing git_url never fills")
+        try MiniTest.expect(
+            !s.mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("git config --global --add credential.helper") == true },
+            "no seeding exec without git_url"
+        )
+        try MiniTest.expect(warnings.isEmpty, "silent skip emits no warning")
+    }),
+    ("rebuildSeedingFailureWarnsAndContinues", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "vscode",
+          "postCreateCommand": "echo postCreateCustom"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "old-bind-id",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.failingExecSubstrings = ["git-credential-adev"]
+        s.install()
+        let hostRunner = RecordingHostProcessRunner()
+        hostRunner.handler = { call in
+            if call.arguments == ["-C", ws.path, "remote", "-v"] {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: Data("origin\thttps://github.com/wcgomes/repo.git (fetch)\n".utf8),
+                    stderr: Data()
+                )
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restore = RecordingHostProcessRunner.install(hostRunner)
+        defer { restore() }
+        let creds = SeedMockCredential()
+        creds.results["https://github.com/wcgomes/repo.git"] = .success(
+            GitHTTPSCredentials(username: "x-access-token", password: "ghp_secret")
+        )
+        var warnings: [String] = []
+        let prevWarning = StatusPrinter.onWarning
+        StatusPrinter.onWarning = { warnings.append($0) }
+        defer { StatusPrinter.onWarning = prevWarning }
+        let result = try RebuildCommand.run(options: RebuildOptions(), runtime: s.runtime, credentials: creds)
+        try MiniTest.expectEqual(result.outcome, "success", "seeding failure is soft-fail")
+        try MiniTest.expectEqual(warnings.count, 1, "exactly one seeding warning")
+        try MiniTest.expect(!warnings[0].contains("ghp_secret"), "warning redacts credential material")
+        try MiniTest.expect(!warnings[0].contains("x-access-token"), "warning redacts username")
+        let deletes = s.mock.calls.filter { $0.arguments.first == "delete" }
+        try MiniTest.expectEqual(deletes.count, 1, "only the old container is deleted")
+        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("postCreateCustom") == true },
+            "hooks still run after seeding failure")
+    }),
+    ("rebuildNeverSeedsOldContainerBeforeDelete", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20","remoteUser":"vscode"}"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "old-bind-id",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.install()
+        let hostRunner = RecordingHostProcessRunner()
+        hostRunner.handler = { call in
+            if call.arguments == ["-C", ws.path, "remote", "-v"] {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: Data("origin\thttps://github.com/wcgomes/repo.git (fetch)\n".utf8),
+                    stderr: Data()
+                )
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restore = RecordingHostProcessRunner.install(hostRunner)
+        defer { restore() }
+        let creds = SeedMockCredential()
+        creds.results["https://github.com/wcgomes/repo.git"] = .success(
+            GitHTTPSCredentials(username: "x-access-token", password: "ghp_secret")
+        )
+        let result = try RebuildCommand.run(options: RebuildOptions(), runtime: s.runtime, credentials: creds)
+        try MiniTest.expectEqual(result.outcome, "success")
+        let calls = s.mock.calls.map(\.arguments)
+        let deleteIdx = calls.firstIndex { $0.first == "delete" }!
+        try MiniTest.expect(
+            !calls.prefix(deleteIdx + 1).contains { $0.first == "exec" && $0.last?.contains("git config --global --add credential.helper") == true },
+            "no seeding exec on the old container before delete"
+        )
+        let seeds = calls.filter { $0.first == "exec" && $0.last?.contains("git config --global --add credential.helper") == true }
+        try MiniTest.expectEqual(seeds.count, 1, "exactly one seeding exec, on the new container")
+    }),
+    ("rebuildBindIdentityOrderAndConnectionUser", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "alice",
+          "postCreateCommand": "echo identity-hook"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        var events: [String] = []
+        let reader = RebuildIdentityReaderFixture()
+        reader.hostIdentity = GitAuthorIdentity(name: "Ada Lovelace", email: "ada@example.com")
+        reader.onHostRead = { events.append("host-read") }
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "old-bind-id",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path,
+                remoteUser: "alice"
+            )
+        )
+        s.containers = [info]
+        s.install()
+        s.mock.handlers.insert({ args in
+            if args.first == "delete" { events.append("old-delete") }
+            if args.first == "create" { events.append("replacement-create") }
+            if args.first == "start" { events.append("replacement-start") }
+            if args.first == "exec", let script = args.last {
+                if script.contains("git config --global --add credential.helper") {
+                    events.append("credential")
+                } else if script.contains("git config --global --replace-all user.name") {
+                    events.append("global")
+                } else if script.contains("chown") {
+                    events.append("ownership")
+                } else if script.contains("identity-hook") {
+                    events.append("hook")
+                }
+            }
+            return nil
+        }, at: 0)
+        let hostRunner = RecordingHostProcessRunner()
+        hostRunner.handler = { call in
+            if call.arguments == ["-C", ws.path, "remote", "-v"] {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: Data("origin\thttps://github.com/example/repo.git (fetch)\n".utf8),
+                    stderr: Data()
+                )
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restoreHost = RecordingHostProcessRunner.install(hostRunner)
+        defer { restoreHost() }
+        let credentials = SeedMockCredential()
+        credentials.results["https://github.com/example/repo.git"] = .success(
+            GitHTTPSCredentials(username: "alice", password: "token")
+        )
+        try withRebuildIdentityReader(reader) {
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(skipPull: true),
+                runtime: s.runtime,
+                credentials: credentials
+            )
+        }
+        try MiniTest.expectEqual(reader.hostPaths, [ws.path])
+        try MiniTest.expect(reader.guestCalls.isEmpty, "bind mode uses the host local reader")
+        try MiniTest.expectEqual(
+            events,
+            ["host-read", "old-delete", "replacement-create", "replacement-start", "ownership", "credential", "global", "hook"]
+        )
+        let global = s.mock.calls.first { $0.arguments.last?.contains("git config --global --replace-all user.name") == true }
+        try MiniTest.expect(global?.arguments.contains("-u") == true)
+        try MiniTest.expect(global?.arguments.contains("alice") == true)
+        try MiniTest.expectEqual(
+            String(data: global?.stdinData ?? Data(), encoding: .utf8),
+            "Ada Lovelace\nada@example.com\n"
+        )
+    }),
+    ("rebuildVolumeIdentityReadsGuestBeforeDelete", {
+        var events: [String] = []
+        let reader = RebuildIdentityReaderFixture()
+        reader.hostIdentity = GitAuthorIdentity(name: "Host", email: "host@example.com")
+        reader.guestIdentity = GitAuthorIdentity(name: "Ada Lovelace", email: "ada@example.com")
+        reader.onHostRead = { events.append("host-read") }
+        reader.onGuestRead = { events.append("guest-read") }
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "old-volume-id",
+            labels: s.volumeLabels(remoteUser: "alice")
+        )
+        s.containers = [info]
+        s.volumes = ["adev-repo-ws"]
+        s.volumeConfigText = #"{"image":"alpine:3.20","remoteUser":"alice","postCreateCommand":"echo identity-hook"}"#
+        s.install()
+        s.mock.handlers.insert({ args in
+            if args.first == "delete" { events.append("old-delete") }
+            if args.first == "create" { events.append("replacement-create") }
+            if args.first == "start" { events.append("replacement-start") }
+            if args.first == "exec", let script = args.last {
+                if script.contains("git config --global --add credential.helper") {
+                    events.append("credential")
+                } else if script.contains("git config --global --replace-all user.name") {
+                    events.append("global")
+                } else if script.contains("chown") {
+                    events.append("ownership")
+                } else if script.contains("identity-hook") {
+                    events.append("hook")
+                }
+            }
+            return nil
+        }, at: 0)
+        let credentials = SeedMockCredential()
+        credentials.results["https://github.com/example/repo.git"] = .success(
+            GitHTTPSCredentials(username: "alice", password: "token")
+        )
+        try withRebuildVolumeOverrides {
+            try withRebuildIdentityReader(reader) {
+                _ = try RebuildCommand.run(
+                    options: RebuildOptions(skipPull: true),
+                    runtime: s.runtime,
+                    credentials: credentials
+                )
+            }
+        }
+        try MiniTest.expectEqual(reader.hostPaths, [], "volume mode never uses a host local reader")
+        try MiniTest.expectEqual(reader.guestCalls.count, 1)
+        try MiniTest.expectEqual(reader.guestCalls[0].containerId, info.id)
+        try MiniTest.expectEqual(
+            events,
+            ["guest-read", "old-delete", "replacement-create", "replacement-start", "ownership", "credential", "global", "hook"]
+        )
+    }),
+    ("rebuildIncompleteIdentitySkipsGlobalWithoutPrompt", {
+        let reader = RebuildIdentityReaderFixture()
+        reader.guestIdentity = GitAuthorIdentity(name: "Only Name")
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(id: "old-volume-id", labels: s.volumeLabels())
+        s.containers = [info]
+        s.volumes = ["adev-repo-ws"]
+        s.install()
+        try withRebuildVolumeOverrides {
+            try withRebuildIdentityReader(reader) {
+                _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+            }
+        }
+        try MiniTest.expect(
+            !s.mock.calls.contains { $0.arguments.last?.contains("git config --global --replace-all user.name") == true },
+            "incomplete local identity does not invent a global pair"
+        )
+    }),
+    ("rebuildGlobalIdentityFailureWarnsAndContinues", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20","postCreateCommand":"echo identity-hook"}"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let reader = RebuildIdentityReaderFixture()
+        reader.hostIdentity = GitAuthorIdentity(name: "Ada", email: "ada@example.com")
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "old-bind-id",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.failingExecSubstrings = ["git config --global --replace-all user.name"]
+        s.install()
+        var warnings: [String] = []
+        let previousWarning = StatusPrinter.onWarning
+        StatusPrinter.onWarning = { warnings.append($0) }
+        defer { StatusPrinter.onWarning = previousWarning }
+        try withRebuildIdentityReader(reader) {
+            let result = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+            try MiniTest.expectEqual(result.outcome, "success")
+        }
+        try MiniTest.expectEqual(warnings.count, 1)
+        try MiniTest.expect(warnings[0].contains("Global git author identity synchronization failed"))
+        try MiniTest.expectEqual(s.mock.calls.filter { $0.arguments.first == "delete" }.count, 1)
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "create" && $0.arguments.contains(RecoveryHelper.helperImageReference) })
+        try MiniTest.expect(s.mock.calls.contains { $0.arguments.last?.contains("identity-hook") == true })
+    }),
+    ("rebuildManualLocalIdentityIsCapturedOnNextRebuild", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20"}"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let reader = RebuildIdentityReaderFixture()
+        reader.hostIdentity = GitAuthorIdentity(name: "First", email: "first@example.com")
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "old-bind-id",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.install()
+        try withRebuildIdentityReader(reader) {
+            _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+            reader.hostIdentity = GitAuthorIdentity(name: "Second", email: "second@example.com")
+            _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+        }
+        let writes = s.mock.calls.filter { $0.arguments.last?.contains("git config --global --replace-all user.name") == true }
+        try MiniTest.expectEqual(writes.count, 2)
+        try MiniTest.expectEqual(
+            writes.map { String(data: $0.stdinData ?? Data(), encoding: .utf8) ?? "" },
+            ["First\nfirst@example.com\n", "Second\nsecond@example.com\n"]
+        )
+    }),
+    ("rebuildVolumeGlobalFailurePreservesWorkspaceAndHook", {
+        let reader = RebuildIdentityReaderFixture()
+        reader.guestIdentity = GitAuthorIdentity(name: "Ada", email: "ada@example.com")
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "old-volume-id",
+            labels: s.volumeLabels(remoteUser: "alice")
+        )
+        s.containers = [info]
+        s.volumes = ["adev-repo-ws"]
+        s.volumeConfigText = #"{"image":"alpine:3.20","remoteUser":"alice","postCreateCommand":"echo identity-hook"}"#
+        s.failingExecSubstrings = ["git config --global --replace-all user.name"]
+        s.install()
+        var warnings: [String] = []
+        let previousWarning = StatusPrinter.onWarning
+        StatusPrinter.onWarning = { warnings.append($0) }
+        defer { StatusPrinter.onWarning = previousWarning }
+        try withRebuildVolumeOverrides {
+            try withRebuildIdentityReader(reader) {
+                let result = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+                try MiniTest.expectEqual(result.outcome, "success")
+            }
+        }
+        try MiniTest.expectEqual(warnings.count, 1)
+        try MiniTest.expectEqual(s.mock.calls.filter { $0.arguments.first == "delete" }.count, 1)
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.starts(with: ["volume", "delete"]) })
+        try MiniTest.expect(s.mock.calls.contains { $0.arguments.last?.contains("identity-hook") == true })
+    }),
+    ("rebuildIdentityThenHookFailureKeepsReplacementCleanup", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20","postCreateCommand":"echo identity-hook"}"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let reader = RebuildIdentityReaderFixture()
+        reader.hostIdentity = GitAuthorIdentity(name: "Ada", email: "ada@example.com")
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "old-bind-id",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.failingExecSubstrings = ["identity-hook"]
+        s.install()
+        try withRebuildIdentityReader(reader) {
+            try MiniTest.expectThrows({
+                _ = try RebuildCommand.run(
+                    options: RebuildOptions(skipPull: true, jsonOutput: true),
+                    runtime: s.runtime,
+                    isTTY: false
+                )
+            }) { _ in }
+        }
+        try MiniTest.expect(
+            s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.last == s.newContainerId },
+            "hook failure still deletes the replacement"
+        )
     })
 ]
 

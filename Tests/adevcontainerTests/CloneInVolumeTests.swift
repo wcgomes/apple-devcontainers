@@ -11,6 +11,8 @@ final class MockGitClient: GitClient, @unchecked Sendable {
     var fullCloneCalls: [(url: String, directory: String)] = []
     var resolveAuthorIdentityResult = GitAuthorIdentity(name: "Test User", email: "test@example.com")
     var resolveAuthorIdentityCalls: [String] = []
+    var readLocalAuthorIdentityResult = GitAuthorIdentity()
+    var readLocalAuthorIdentityCalls: [String] = []
     /// When set, write this config JSON into the fetch directory (nested path).
     var configJSONToWrite: String?
     var configRelativePath: String = ConfigDiscovery.nestedRelativePath
@@ -71,6 +73,11 @@ final class MockGitClient: GitClient, @unchecked Sendable {
     func resolveAuthorIdentity(in directory: String) -> GitAuthorIdentity {
         resolveAuthorIdentityCalls.append(directory)
         return resolveAuthorIdentityResult
+    }
+
+    func readLocalAuthorIdentity(in directory: String) -> GitAuthorIdentity {
+        readLocalAuthorIdentityCalls.append(directory)
+        return readLocalAuthorIdentityResult
     }
 }
 
@@ -689,6 +696,178 @@ nonisolated(unsafe) let gitClientTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(id.name, "Only Name")
         try MiniTest.expect(id.email == nil)
         try MiniTest.expect(!id.isComplete)
+    }),
+    ("readLocalAuthorIdentityUsesLocalScopeOnly", {
+        let runner = MockProcessRunner()
+        runner.handlers = [
+            { args in
+                if args.contains("user.name") {
+                    return ProcessResult(exitCode: 0, stdout: Data("Ada Lovelace\n".utf8), stderr: Data())
+                }
+                if args.contains("user.email") {
+                    return ProcessResult(exitCode: 0, stdout: Data("ada@example.com\n".utf8), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let client = HostGitClient(runner: runner, gitPathOverride: .some("/usr/bin/mock-git"))
+        let id = client.readLocalAuthorIdentity(in: "/tmp/local-worktree")
+        try MiniTest.expectEqual(id, GitAuthorIdentity(name: "Ada Lovelace", email: "ada@example.com"))
+        try MiniTest.expect(runner.calls.allSatisfy { $0.arguments.contains("--local") })
+        try MiniTest.expect(runner.calls.allSatisfy { !$0.arguments.contains("--global") })
+    }),
+    ("globalAuthorSyncSkipsIncompleteIdentity", {
+        let runner = MockProcessRunner()
+        let runtime = AppleContainerRuntime(executablePath: "container", runner: runner)
+        try GitAuthorIdentitySync().write(
+            identity: GitAuthorIdentity(name: "Only Name"),
+            containerId: "new",
+            connectionUser: "alice",
+            runtime: runtime
+        )
+        try MiniTest.expect(runner.calls.isEmpty)
+    }),
+    ("globalAuthorSyncUsesConnectionUserAndSafeStdin", {
+        let runner = MockProcessRunner()
+        let runtime = AppleContainerRuntime(executablePath: "container", runner: runner)
+        let identity = GitAuthorIdentity(
+            name: "Ada $(not-a-command)",
+            email: "ada@example.com; echo no"
+        )
+        try GitAuthorIdentitySync().write(
+            identity: identity,
+            containerId: "new",
+            connectionUser: "alice",
+            runtime: runtime
+        )
+        let call = runner.calls[0]
+        try MiniTest.expect(call.arguments.contains("-u") && call.arguments.contains("alice"))
+        try MiniTest.expectEqual(
+            String(data: call.stdinData ?? Data(), encoding: .utf8),
+            "Ada $(not-a-command)\nada@example.com; echo no\n"
+        )
+        try MiniTest.expect(call.arguments.allSatisfy { !$0.contains("not-a-command") && !$0.contains("ada@example.com") })
+        try MiniTest.expect(call.environment?.values.contains(identity.trimmedName) != true)
+        try MiniTest.expect(call.environment?.values.contains(identity.trimmedEmail) != true)
+        let script = call.arguments.last ?? ""
+        try MiniTest.expect(script.contains("getent passwd \"$uid\""))
+        try MiniTest.expect(script.contains("done < /etc/passwd"))
+        try MiniTest.expect(script.contains("git config --global --replace-all user.name"))
+        try MiniTest.expect(script.contains("git config --global --replace-all user.email"))
+        try MiniTest.expect(!script.contains("--local"))
+    }),
+    ("globalAuthorSyncScriptUsesResolvedHome", {
+        let root = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20"}"#)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let home = root.appendingPathComponent("resolved-home", isDirectory: true)
+        let inheritedHome = root.appendingPathComponent("inherited-home", isDirectory: true)
+        let bin = root.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: inheritedHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let id = bin.appendingPathComponent("id")
+        try "#!/bin/sh\nprintf '4242\\n'\n".write(to: id, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: id.path)
+        let getent = bin.appendingPathComponent("getent")
+        try "#!/bin/sh\nprintf 'syncuser:x:4242:4242::\(home.path):/bin/sh\\n'\n"
+            .write(to: getent, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: getent.path)
+        let git = bin.appendingPathComponent("git")
+        try "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/git-calls\"\n"
+            .write(to: git, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: git.path)
+        let inheritedPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
+        let result = try FoundationProcessRunner().run(
+            executable: "/bin/sh",
+            arguments: ["-c", GitAuthorIdentitySync.script()],
+            environment: ["HOME": inheritedHome.path, "PATH": "\(bin.path):\(inheritedPath)"],
+            currentDirectory: nil,
+            stdinData: Data("Ada $(not-a-command)\nada@example.com\n".utf8)
+        )
+        try MiniTest.expect(result.succeeded, result.stderrString)
+        let calls = try String(contentsOf: home.appendingPathComponent("git-calls"), encoding: .utf8)
+        try MiniTest.expect(calls.contains("config --global --replace-all user.name Ada $(not-a-command)"))
+        try MiniTest.expect(calls.contains("config --global --replace-all user.email ada@example.com"))
+        try MiniTest.expect(!FileManager.default.fileExists(atPath: inheritedHome.appendingPathComponent("git-calls").path))
+    }),
+    ("globalAuthorSyncReplacesAllGlobalAuthorValues", {
+        let root = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20"}"#)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let home = root.appendingPathComponent("resolved-home", isDirectory: true)
+        let inheritedHome = root.appendingPathComponent("inherited-home", isDirectory: true)
+        let bin = root.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: inheritedHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let id = bin.appendingPathComponent("id")
+        try "#!/bin/sh\nprintf '4242\\n'\n".write(to: id, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: id.path)
+        let getent = bin.appendingPathComponent("getent")
+        try "#!/bin/sh\nprintf 'syncuser:x:4242:4242::\(home.path):/bin/sh\\n'\n"
+            .write(to: getent, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: getent.path)
+        guard let gitPath = HostGitClient.whichGit() else {
+            try MiniTest.skip("git is required for the global config replacement test")
+        }
+        let config = home.appendingPathComponent(".gitconfig")
+        for (key, value) in [
+            ("user.name", "Old Name 1"),
+            ("user.name", "Old Name 2"),
+            ("user.email", "old1@example.com"),
+            ("user.email", "old2@example.com")
+        ] {
+            let result = try FoundationProcessRunner().run(
+                executable: gitPath,
+                arguments: ["config", "--file", config.path, "--add", key, value],
+                environment: nil,
+                currentDirectory: nil
+            )
+            try MiniTest.expect(result.succeeded, result.stderrString)
+        }
+        let gitDirectory = URL(fileURLWithPath: gitPath).deletingLastPathComponent().path
+        let inheritedPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
+        let result = try FoundationProcessRunner().run(
+            executable: "/bin/sh",
+            arguments: ["-c", GitAuthorIdentitySync.script()],
+            environment: [
+                "HOME": inheritedHome.path,
+                "PATH": "\(bin.path):\(gitDirectory):\(inheritedPath)"
+            ],
+            currentDirectory: nil,
+            stdinData: Data("Ada Lovelace\nada@example.com\n".utf8)
+        )
+        try MiniTest.expect(result.succeeded, result.stderrString)
+        for (key, expected) in [
+            ("user.name", ["Ada Lovelace"]),
+            ("user.email", ["ada@example.com"])
+        ] {
+            let values = try FoundationProcessRunner().run(
+                executable: gitPath,
+                arguments: ["config", "--file", config.path, "--get-all", key],
+                environment: nil,
+                currentDirectory: nil
+            )
+            try MiniTest.expectEqual(
+                values.stdoutString.split(whereSeparator: \.isNewline).map(String.init),
+                expected
+            )
+        }
+        try MiniTest.expect(!FileManager.default.fileExists(atPath: inheritedHome.appendingPathComponent(".gitconfig").path))
+    }),
+    ("globalAuthorSyncReportsGlobalWriteFailure", {
+        let runner = MockProcessRunner()
+        runner.defaultResult = ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("failed".utf8))
+        let runtime = AppleContainerRuntime(executablePath: "container", runner: runner)
+        try MiniTest.expectThrows({
+            try GitAuthorIdentitySync().write(
+                identity: GitAuthorIdentity(name: "Ada", email: "ada@example.com"),
+                containerId: "new",
+                connectionUser: "alice",
+                runtime: runtime
+            )
+        }) { error in
+            try MiniTest.expectEqual((error as? CLIError)?.code, CLIErrorCode.lifecycleFailed)
+        }
     }),
     ("effectiveAuthorIdentityEnvOverrides", {
         let base = GitAuthorIdentity(name: "Host", email: "host@example.com")
@@ -1701,6 +1880,53 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
             $0.arguments.contains(where: { $0.lowercased().contains("adevcontainer-e2e") })
         })
     }),
+    ("cloneAppliesGlobalGitAuthorAfterLocal", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20", "postCreateCommand": "echo sibling-hook" }"#
+        git.resolveAuthorIdentityResult = GitAuthorIdentity(name: "Ada Lovelace", email: "ada@example.com")
+        let mock = MockProcessRunner()
+        var globalWritten = false
+        let baseHandlers = CloneRuntimeMock.handlers()
+        mock.handlers = [
+            { args in
+                if args.first == "exec", args.last?.contains("git config --global --replace-all user.name") == true {
+                    globalWritten = true
+                }
+                if args.first == "exec", args.last?.contains("sibling-hook") == true, !globalWritten {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("identity missing".utf8))
+                }
+                for handler in baseHandlers {
+                    if let result = handler(args) { return result }
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try CloneCommand.run(
+            options: CloneOptions(gitURL: "https://github.com/org/author-global.git", skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:]
+        )
+        let configCalls = mock.calls.filter {
+            $0.arguments.first == "exec"
+                && ($0.arguments.contains("--local") || $0.arguments.last?.contains("git config --global") == true)
+        }
+        try MiniTest.expectEqual(configCalls.count, 3, "complete identity writes local and global pairs")
+        let firstGlobal = configCalls.firstIndex { $0.arguments.last?.contains("--global") == true }
+        try MiniTest.expectEqual(firstGlobal, 2, "global writes follow both local writes")
+        try MiniTest.expectEqual(
+            String(data: configCalls[2].stdinData ?? Data(), encoding: .utf8),
+            "Ada Lovelace\nada@example.com\n"
+        )
+        try MiniTest.expect(configCalls[2].arguments.last?.contains("user.name") == true)
+        try MiniTest.expect(configCalls[2].arguments.last?.contains("user.email") == true)
+        try MiniTest.expect(globalWritten)
+        try MiniTest.expect(mock.calls.contains { $0.arguments.last?.contains("sibling-hook") == true })
+    }),
     ("cloneMissingAuthorEmailSkipsLocalConfig", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
@@ -1723,6 +1949,80 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
             $0.arguments.first == "exec" && $0.arguments.contains("config") && $0.arguments.contains("--local")
         }
         try MiniTest.expect(configCalls.isEmpty)
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.last?.contains("git config --global") == true })
+    }),
+    ("cloneGlobalAuthorFailureWarnsAndRunsHook", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20", "postCreateCommand": "echo author-hook" }"#
+        let mock = MockProcessRunner()
+        let baseHandlers = CloneRuntimeMock.handlers()
+        mock.handlers = [
+            { args in
+                if args.first == "exec", args.last?.contains("git config --global --replace-all user.name") == true {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("global failed".utf8))
+                }
+                for handler in baseHandlers {
+                    if let result = handler(args) { return result }
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "container", runner: mock)
+        var warnings: [String] = []
+        let previousWarning = StatusPrinter.onWarning
+        StatusPrinter.onWarning = { warnings.append($0) }
+        defer { StatusPrinter.onWarning = previousWarning }
+        let result = try CloneCommand.run(
+            options: CloneOptions(gitURL: "https://github.com/org/author-global-fail.git", skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(warnings.count, 1)
+        try MiniTest.expect(warnings[0].contains("global git user.name/email"))
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.starts(with: ["volume", "delete"]) })
+        try MiniTest.expect(mock.calls.contains { $0.arguments.last?.contains("author-hook") == true })
+    }),
+    ("cloneLocalAuthorFailureSkipsGlobalAndRunsHook", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20", "postCreateCommand": "echo local-author-hook" }"#
+        let mock = MockProcessRunner()
+        let baseHandlers = CloneRuntimeMock.handlers()
+        mock.handlers = [
+            { args in
+                if args.contains("--local"), args.contains("user.name") {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("local failed".utf8))
+                }
+                for handler in baseHandlers {
+                    if let result = handler(args) { return result }
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "container", runner: mock)
+        var warnings: [String] = []
+        let previousWarning = StatusPrinter.onWarning
+        StatusPrinter.onWarning = { warnings.append($0) }
+        defer { StatusPrinter.onWarning = previousWarning }
+        let result = try CloneCommand.run(
+            options: CloneOptions(gitURL: "https://github.com/org/author-local-fail.git", skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(warnings.count, 1)
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.last?.contains("git config --global") == true })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+        try MiniTest.expect(mock.calls.contains { $0.arguments.last?.contains("local-author-hook") == true })
     }),
     ("cloneAuthorEnvOverridesResolved", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
@@ -2178,6 +2478,35 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         }
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+    }),
+    ("cloneNeverRunsCredentialSeeding", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{"name":"CloneApp","image":"alpine:3.20"}"#
+        let mock = MockProcessRunner()
+        mock.handlers = CloneRuntimeMock.handlers()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try CloneCommand.run(
+            options: CloneOptions(gitURL: "https://github.com/org/clone-app.git", skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("git-credential-adev") == true },
+            "clone must not run a seeding exec"
+        )
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.contains("credential.helper") },
+            "clone must not run the store+approve seeding script"
+        )
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.contains("--global") },
+            "clone must not touch the guest global git config"
+        )
     }),
 ]
 

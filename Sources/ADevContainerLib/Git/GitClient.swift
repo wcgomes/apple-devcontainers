@@ -47,6 +47,10 @@ public protocol GitClient: Sendable {
     /// Resolve `user.name` / `user.email` from a git work tree (includeIf by remote applies).
     /// Missing or empty values → nil for that field. Never invents defaults.
     func resolveAuthorIdentity(in directory: String) -> GitAuthorIdentity
+
+    /// Read only the repository-local `user.name` / `user.email` pair.
+    /// Missing or empty values → nil for that field. Never consults global config.
+    func readLocalAuthorIdentity(in directory: String) -> GitAuthorIdentity
 }
 
 /// Production git client via `ProcessRunning` (default: host environment).
@@ -129,15 +133,34 @@ public struct HostGitClient: GitClient {
         return GitAuthorIdentity(name: name, email: email)
     }
 
+    public func readLocalAuthorIdentity(in directory: String) -> GitAuthorIdentity {
+        guard let git = try? requireGit() else {
+            return GitAuthorIdentity()
+        }
+        let name = configGet(git: git, directory: directory, key: "user.name", scope: "--local")
+        let email = configGet(git: git, directory: directory, key: "user.email", scope: "--local")
+        return GitAuthorIdentity(name: name, email: email)
+    }
+
     // MARK: - Internals
 
     /// `git -C dir config --get key` → trimmed value, or nil on failure/empty.
-    private func configGet(git: String, directory: String, key: String) -> String? {
+    private func configGet(
+        git: String,
+        directory: String,
+        key: String,
+        scope: String? = nil
+    ) -> String? {
         let result: ProcessResult
         do {
+            var arguments = ["-C", directory, "config"]
+            if let scope {
+                arguments.append(scope)
+            }
+            arguments += ["--get", key]
             result = try runner.run(
                 executable: git,
-                arguments: ["-C", directory, "config", "--get", key],
+                arguments: arguments,
                 environment: nil,
                 currentDirectory: nil
             )

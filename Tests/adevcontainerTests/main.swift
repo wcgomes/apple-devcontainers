@@ -37,6 +37,7 @@ let allTests: [(String, () throws -> Void)] = []
     + featuresCommandTests
     + cloneIdentityTests
     + gitClientTests
+    + guestGitCredentialSeedTests
     + featureGitEnsureTests
     + cloneCommandTests
     + managedLifecycleTests
