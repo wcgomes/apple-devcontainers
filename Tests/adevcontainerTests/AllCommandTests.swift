@@ -113,6 +113,10 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expectEqual(result.containerId, resolved.containerName)
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("chown") == true },
+            "reuse must not run the parent fix-up"
+        )
     }),
     ("upStartsStopped", {
         let workspace = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
@@ -144,6 +148,10 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expectEqual(result.outcome, "success")
         try MiniTest.expect(mock.calls.contains { $0.arguments.first == "start" })
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("chown") == true },
+            "start-stopped must not run the parent fix-up"
+        )
     }),
     ("hashMismatchErrorsHintsRebuild", {
         let workspace = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
@@ -244,6 +252,17 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(script.contains("/home/vscode/.config/opencode"))
         try MiniTest.expect(!script.contains("/bound-host"), "must not chown bind targets")
         try MiniTest.expect(chownExecs[0].arguments.contains("root"))
+        // Parents-only fix-up: second chown exec, no -R, ancestors only.
+        let parentsExecs = mock.calls.filter { call in
+            call.arguments.first == "exec"
+                && (call.arguments.last?.contains("chown") == true)
+                && (call.arguments.last?.contains("chown -R") == false)
+        }
+        try MiniTest.expectEqual(parentsExecs.count, 1, "exactly one parents-only exec")
+        let parentsScript = parentsExecs[0].arguments.last ?? ""
+        try MiniTest.expect(parentsScript.contains("/workspaces"), "parents exec targets workspace ancestors")
+        try MiniTest.expect(!parentsScript.contains("chown -R"), "parents exec must not chown -R")
+        try MiniTest.expect(!parentsScript.contains("/bound-host"), "parents exec must not touch the bind target")
     }),
     ("upSkipsNamedVolumeChownForRoot", {
         let workspace = try TestRepo.makeTempWorkspace(configJSON: """
@@ -298,6 +317,115 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
                 && (call.arguments.last?.contains("chown") == true)
         }
         try MiniTest.expect(chownExecs.isEmpty, "root connection user skips named-volume chown")
+    }),
+    ("upBindFreshCreateFixesParentsBeforeHooks", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "vscode",
+          "postCreateCommand": "echo postCreateCustom"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
+            { args in
+                if args.first == "create" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("\(resolved.containerName)\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "start" || args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        let parentsExecs = mock.calls.filter { call in
+            call.arguments.first == "exec"
+                && (call.arguments.last?.contains("chown") == true)
+                && (call.arguments.last?.contains("chown -R") == false)
+        }
+        try MiniTest.expectEqual(parentsExecs.count, 1, "exactly one parents-only exec on fresh bind create")
+        let script = parentsExecs[0].arguments.last ?? ""
+        try MiniTest.expect(script.contains("T='/workspaces/\(workspace.lastPathComponent)'"), "workspace folder path")
+        try MiniTest.expect(script.contains("mkdir -p \"$T\""), "mkdir -p of the workspace folder path")
+        try MiniTest.expect(!script.contains("chown -R"), "no recursive chown of the bind target")
+        try MiniTest.expect(!script.contains("chown \"$OWN\" \"$T\""), "workspace folder (bind target) never chowned")
+        try MiniTest.expect(script.contains("chown \"$OWN\" \"$P\""), "non-recursive ancestor chown")
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("chown -R") == true },
+            "no recursive chown exec at all on the create path"
+        )
+        let parentsIdx = mock.calls.firstIndex { call in
+            call.arguments.first == "exec" && call.arguments.last?.contains("chown") == true
+        }!
+        let hookIdx = mock.calls.firstIndex { call in
+            call.arguments.first == "exec" && call.arguments.last?.contains("postCreateCustom") == true
+        }!
+        try MiniTest.expect(parentsIdx < hookIdx, "parent fix-up runs before create-path hooks")
+    }),
+    ("upBindCreateRootUserRunsNoParentFixup", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "root",
+          "postCreateCommand": "echo postCreateCustom"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
+            { args in
+                if args.first == "create" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("\(resolved.containerName)\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "start" || args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("chown") == true },
+            "root connection user runs no parent fix-up"
+        )
     })
 ]
 

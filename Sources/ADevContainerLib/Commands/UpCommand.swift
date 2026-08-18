@@ -439,6 +439,20 @@ public enum UpCommand {
             throw BringUpRecovery.eligible(error)
         }
 
+        // Fresh rootfs workspace parents are root-owned; chown them before hooks
+        // (bind mode: the workspace folder is the host bind target, never chowned).
+        do {
+            try WorkspaceOwnership.ensureWorkspaceParentsWritableByRemoteUser(
+                containerId: id,
+                workspaceFolder: effectiveConfig.workspaceFolder,
+                remoteUser: connectionUser,
+                runtime: runtime
+            )
+        } catch {
+            try? runtime.delete(nameOrId: id, force: true)
+            throw BringUpRecovery.eligible(error)
+        }
+
         do {
             try LifecycleRunner.runCreatePathThroughWaitFor(
                 containerId: id,

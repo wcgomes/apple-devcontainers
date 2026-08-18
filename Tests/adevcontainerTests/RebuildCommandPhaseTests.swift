@@ -1428,7 +1428,8 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
     }),
 
     ("rebuildVolumeWritableStepGatedByUserChange", {
-        // (a) stamped user == effective → no chown.
+        // (a) stamped user == effective → no recursive workspace chown; the parents-only
+        // fix-up still runs against the fresh container rootfs.
         let same = RebuildScenario()
         let infoSame = RebuildScenario.container(id: "vol-a", labels: same.volumeLabels(remoteUser: "vscode"))
         same.containers = [infoSame]
@@ -1438,7 +1439,8 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
             _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: same.runtime)
         }
         let execsSame = same.mock.calls.compactMap { $0.arguments.last }
-        try MiniTest.expect(!execsSame.contains { $0.contains("chown") }, "no chown when user unchanged")
+        try MiniTest.expect(!execsSame.contains { $0.contains("chown -R") }, "no recursive workspace chown when user unchanged")
+        try MiniTest.expect(execsSame.contains { $0.contains("chown") && !$0.contains("chown -R") }, "parents-only fix-up runs when user unchanged")
 
         // (b) stamped user empty → chown runs.
         let changed = RebuildScenario()
@@ -1505,6 +1507,83 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!chownScripts.isEmpty, "bind rebuild chowns config named volumes")
         try MiniTest.expect(chownScripts.contains { $0.contains("/home/vscode/.config/opencode") })
         try MiniTest.expect(!chownScripts.contains { $0.contains(ws.path) }, "must not chown host bind path")
+    }),
+
+    ("rebuildBindRunsParentsOnlyFixupBeforeHooks", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "vscode",
+          "postCreateCommand": "echo postCreateCustom"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "bind-old",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.install()
+        _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+        let parentsExecs = s.mock.calls.filter { call in
+            call.arguments.first == "exec"
+                && (call.arguments.last?.contains("chown") == true)
+                && (call.arguments.last?.contains("chown -R") == false)
+        }
+        try MiniTest.expectEqual(parentsExecs.count, 1, "exactly one parents-only exec on bind rebuild")
+        let script = parentsExecs[0].arguments.last ?? ""
+        try MiniTest.expect(script.contains("T='/workspaces/\(ws.lastPathComponent)'"), "workspace folder path")
+        try MiniTest.expect(!script.contains("chown -R"), "bind target never chowned recursively")
+        try MiniTest.expect(!script.contains("chown \"$OWN\" \"$T\""), "workspace folder (bind target) never chowned")
+        try MiniTest.expect(script.contains("chown \"$OWN\" \"$P\""), "non-recursive ancestor chown")
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.last?.contains(ws.path) == true }, "no script references the host bind path")
+        let parentsIdx = s.mock.calls.firstIndex { call in
+            call.arguments.first == "exec" && call.arguments.last?.contains("chown") == true
+        }!
+        let hookIdx = s.mock.calls.firstIndex { call in
+            call.arguments.first == "exec" && call.arguments.last?.contains("postCreateCustom") == true
+        }!
+        try MiniTest.expect(parentsIdx < hookIdx, "parent fix-up runs before create-path hooks")
+    }),
+
+    ("rebuildParentsFixupFailureWarnsAndContinues", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "vscode",
+          "postCreateCommand": "echo postCreateCustom"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "bind-old",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.failingExecSubstrings = ["chown \"$OWN\" \"$P\""]
+        s.install()
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+        _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+        try MiniTest.expect(warnings.contains { $0.contains("workspace parents") }, "parent fix-up failure warns on stderr")
+        try MiniTest.expect(
+            s.mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("postCreateCustom") == true },
+            "create-path hooks still run after parent fix-up failure"
+        )
+        try MiniTest.expect(
+            !s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.contains(s.newContainerId) },
+            "new container not deleted on parent fix-up failure"
+        )
     }),
 
     ("rebuildHookOrderOnNewContainer", {

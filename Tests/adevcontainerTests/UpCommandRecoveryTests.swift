@@ -552,6 +552,36 @@ nonisolated(unsafe) let upCommandRecoveryTests: [(String, () throws -> Void)] = 
         try MiniTest.expectEqual(editorRunner.launches, 1)
     }),
 
+    ("upParentFixupFailureDeletesAndStaysRecoveryEligible", {
+        // No named volumes: the first chown-containing exec on the create path is the
+        // parents-only fix-up. Its failure must delete the created container and stay
+        // eligible for bring-up recovery (editor prompt → retry from scratch).
+        let initial = #"{ "image": "alpine:3.20", "remoteUser": "vscode" }"#
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: initial)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        installUpCreatePathHandlers(mock, resolved: resolved, ownershipFailuresBeforeSuccess: 1)
+        let editorRunner = UpRecoveryEditorRunner(payloads: [Data(initial.utf8)])
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            isTTY: true,
+            recoveryEditor: upRecoveryEditor(runner: editorRunner),
+            openEditorPrompt: upRecoveryPrompt(answers: ["y"])
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(mock.calls.filter { $0.arguments.first == "create" }.count, 2, "retry after parent fix-up failure")
+        try MiniTest.expectEqual(editorRunner.launches, 1, "parent fix-up failure stays eligible for bring-up recovery")
+        try MiniTest.expect(
+            mock.calls.contains { $0.arguments.first == "delete" },
+            "created container deleted on parent fix-up failure"
+        )
+    }),
+
     ("upCreatePathHookFailureUsesRecoveryAndRetriesFromScratch", {
         let initial = #"{ "image": "alpine:3.20", "postCreateCommand": "exit 42" }"#
         let workspace = try TestRepo.makeTempWorkspace(configJSON: initial)
