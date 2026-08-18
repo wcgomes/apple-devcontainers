@@ -2942,6 +2942,104 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
     ("workspaceOwnershipShellSingleQuoted", {
         try MiniTest.expectEqual(WorkspaceOwnership.shellSingleQuoted("vscode"), "'vscode'")
         try MiniTest.expectEqual(WorkspaceOwnership.shellSingleQuoted("a'b"), "'a'\\''b'")
+    }),
+    ("workspaceOwnershipParentsOnlyNestedWalk", {
+        // /workspaces/a/b/c: mkdir -p creates intermediates; the walk non-recursively
+        // chowns /workspaces/a/b, /workspaces/a, /workspaces ($P) and stops at /.
+        let mock = MockProcessRunner()
+        mock.defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try WorkspaceOwnership.ensureWorkspaceParentsWritableByRemoteUser(
+            containerId: "ctr",
+            workspaceFolder: "/workspaces/a/b/c",
+            remoteUser: "vscode",
+            runtime: runtime
+        )
+        let execs = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execs.count, 1, "one root exec per call")
+        try MiniTest.expect(execs[0].arguments.contains("root"), "parents exec runs as root")
+        let script = execs[0].arguments.last ?? ""
+        try MiniTest.expect(script.contains("T='/workspaces/a/b/c'"), "workspace folder path")
+        try MiniTest.expect(script.contains("mkdir -p \"$T\""), "mkdir -p creates the chain")
+        try MiniTest.expect(script.contains("P=$(dirname \"$T\")"), "walk starts above the workspace folder")
+        try MiniTest.expect(script.contains("chown \"$OWN\" \"$P\""), "non-recursive ancestor chown")
+        try MiniTest.expect(!script.contains("chown -R"), "parents-only must not chown -R")
+        try MiniTest.expect(!script.contains("chown \"$OWN\" \"$T\""), "workspace folder itself never chowned")
+        try MiniTest.expect(
+            script.contains("|/home|"),
+            "break list must include /home"
+        )
+        try MiniTest.expect(!script.contains("chown \"$OWN\" \"/\""), "break-list entry / never chowned")
+    }),
+    ("workspaceOwnershipParentsOnlyBreakListStop", {
+        // /home/alice/ws: the walk chowns /home/alice ($P) then breaks at /home.
+        let mock = MockProcessRunner()
+        mock.defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try WorkspaceOwnership.ensureWorkspaceParentsWritableByRemoteUser(
+            containerId: "ctr",
+            workspaceFolder: "/home/alice/ws",
+            remoteUser: "alice",
+            runtime: runtime
+        )
+        let script = mock.calls.first(where: { $0.arguments.first == "exec" })?.arguments.last ?? ""
+        try MiniTest.expect(script.contains("T='/home/alice/ws'"))
+        try MiniTest.expect(script.contains("chown \"$OWN\" \"$P\""), "parent walk from target")
+        try MiniTest.expect(
+            !script.contains("chown \"$OWN\" \"/home\""),
+            "must not chown break-list entry /home"
+        )
+    }),
+    ("workspaceOwnershipParentsOnlyDirectlyUnderBreakEntry", {
+        // /opt/tool: the first walk step P=/opt is a break-list entry; no ancestor
+        // chown runs and the fix-up does not fail.
+        let mock = MockProcessRunner()
+        mock.defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try WorkspaceOwnership.ensureWorkspaceParentsWritableByRemoteUser(
+            containerId: "ctr",
+            workspaceFolder: "/opt/tool",
+            remoteUser: "vscode",
+            runtime: runtime
+        )
+        let execs = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execs.count, 1, "exec still runs (mkdir -p) without failing")
+        let script = execs[0].arguments.last ?? ""
+        try MiniTest.expect(script.contains("T='/opt/tool'"))
+        try MiniTest.expect(script.contains("|/opt|"), "break list includes /opt")
+        try MiniTest.expect(!script.contains("chown \"$OWN\" \"/opt\""), "break-list entry /opt never chowned")
+    }),
+    ("workspaceOwnershipParentsOnlySkipsRootAndEmptyUser", {
+        let mock = MockProcessRunner()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try WorkspaceOwnership.ensureWorkspaceParentsWritableByRemoteUser(
+            containerId: "ctr",
+            workspaceFolder: "/workspaces/app",
+            remoteUser: "root",
+            runtime: runtime
+        )
+        try WorkspaceOwnership.ensureWorkspaceParentsWritableByRemoteUser(
+            containerId: "ctr",
+            workspaceFolder: "/workspaces/app",
+            remoteUser: nil,
+            runtime: runtime
+        )
+        try MiniTest.expect(mock.calls.isEmpty, "root/unset remoteUser must not exec parents fix-up")
+    }),
+    ("workspaceOwnershipParentsOnlyFailureThrows", {
+        let mock = MockProcessRunner()
+        mock.defaultResult = ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("chown failed".utf8))
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            try WorkspaceOwnership.ensureWorkspaceParentsWritableByRemoteUser(
+                containerId: "ctr",
+                workspaceFolder: "/workspaces/app",
+                remoteUser: "vscode",
+                runtime: runtime
+            )
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.populateFailed)
+        }
     })
 ]
 

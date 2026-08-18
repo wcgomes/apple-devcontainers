@@ -1,5 +1,14 @@
 import Foundation
 
+/// Chown scope for `ensurePathsWritableByRemoteUser`.
+public enum WorkspaceOwnershipScope {
+    /// Recursive chown of each path plus non-recursive ancestors (current behavior).
+    case targetAndParents
+    /// `mkdir -p` each path but chown only ancestors (bind-mode workspace parents;
+    /// the workspace folder itself is never chowned).
+    case parentsOnly
+}
+
 /// Shared container-side ownership fixup for Apple named volumes (root:root on mount).
 ///
 /// CloneCommand applies workspace chown after first start (throwing — chown failure aborts
@@ -26,6 +35,26 @@ public enum WorkspaceOwnership {
             remoteUser: remoteUser,
             runtime: runtime,
             failureNoun: "workspace volume"
+        )
+    }
+
+    /// Make only the container-rootfs parents of the workspace folder writable by the
+    /// remote user (bind mode: the workspace folder is the host bind target and must
+    /// never be chowned). No-op when user is root/unset. Throws `populateFailed` when
+    /// the chown script fails (up create-path semantics).
+    public static func ensureWorkspaceParentsWritableByRemoteUser(
+        containerId: String,
+        workspaceFolder: String,
+        remoteUser: String?,
+        runtime: AppleContainerRuntime
+    ) throws {
+        try ensurePathsWritableByRemoteUser(
+            containerId: containerId,
+            paths: [workspaceFolder],
+            remoteUser: remoteUser,
+            runtime: runtime,
+            failureNoun: "workspace parents",
+            scope: .parentsOnly
         )
     }
 
@@ -59,7 +88,8 @@ public enum WorkspaceOwnership {
         paths: [String],
         remoteUser: String?,
         runtime: AppleContainerRuntime,
-        failureNoun: String
+        failureNoun: String,
+        scope: WorkspaceOwnershipScope = .targetAndParents
     ) throws {
         let user = remoteUser?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !user.isEmpty, user != "root" else { return }
@@ -69,8 +99,9 @@ public enum WorkspaceOwnership {
             .filter { !$0.isEmpty }
         guard !cleaned.isEmpty else { return }
 
-        // One exec: mkdir + chown -R target; non-recursive chown of intermediate parents
-        // (mkdir -p creates them as root; do not chown -R parents — sibling mounts).
+        // One exec: mkdir -p target; chown -R target in the default scope only;
+        // non-recursive chown of intermediate parents (mkdir -p creates them as
+        // root; do not chown -R parents — sibling mounts).
         var script = "set -e\nU=\(shellSingleQuoted(user))\n"
         for path in cleaned {
             script += """
@@ -81,7 +112,12 @@ public enum WorkspaceOwnership {
             else
               OWN="$U"
             fi
-            chown -R "$OWN" "$T"
+
+            """
+            if scope == .targetAndParents {
+                script += "chown -R \"$OWN\" \"$T\"\n"
+            }
+            script += """
             P=$(dirname "$T")
             while [ -n "$P" ] && [ "$P" != "." ]; do
               case "$P" in

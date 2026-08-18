@@ -1086,6 +1086,68 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
             try MiniTest.expectEqual(createCall.arguments[i + 1], "alice")
         }
     }),
+    ("cloneWorkspaceChownIncludesNonRecursiveParentChown", {
+        // Regression: clone achieves writable parents via the existing workspace-folder
+        // chown's parent walk — no second parent fix-up exec on clone.
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20", "remoteUser": "alice", "postCreateCommand": "echo clone-hook" }"#
+        let mock = MockProcessRunner()
+        mock.handlers = CloneRuntimeMock.handlers()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try CloneCommand.run(
+            options: CloneOptions(gitURL: "https://github.com/org/clone-regression.git", skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        let chownExecs = mock.calls.filter {
+            $0.arguments.first == "exec" && ($0.arguments.last?.contains("chown") == true)
+        }
+        try MiniTest.expectEqual(chownExecs.count, 1, "exactly one chown exec on clone (no second parent fix-up)")
+        let script = chownExecs[0].arguments.last ?? ""
+        try MiniTest.expect(script.contains("T='/workspaces/clone-regression'"), "workspace folder target")
+        try MiniTest.expect(script.contains("chown -R \"$OWN\" \"$T\""), "recursive workspace folder chown")
+        try MiniTest.expect(script.contains("P=$(dirname \"$T\")"), "parent walk after target chown")
+        try MiniTest.expect(script.contains("chown \"$OWN\" \"$P\""), "non-recursive parent chown (parents writable before hooks)")
+    }),
+    ("cloneWorkspaceChownFailureDeletesContainerAndVolume", {
+        // Regression: workspace-folder chown failure keeps clone throwing semantics —
+        // structured error, container + *-ws volume deleted, recovery eligible.
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20", "remoteUser": "alice" }"#
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.first == "exec", let script = args.last, script.contains("chown") {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("chown failed".utf8))
+                }
+                return nil
+            }
+        ] + CloneRuntimeMock.handlers()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(gitURL: "https://github.com/org/chown-fail.git", skipPull: true),
+                runtime: runtime,
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:]
+            )
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.populateFailed)
+        }
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" }, "container deleted on workspace chown failure")
+        try MiniTest.expect(
+            mock.calls.contains { $0.arguments.starts(with: ["volume", "delete"]) },
+            "*-ws workspace volume deleted on workspace chown failure"
+        )
+    }),
     ("cloneSSHInjectsCreateSSHFlag", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }

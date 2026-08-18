@@ -654,6 +654,21 @@ public enum RebuildCommand {
             )
         }
 
+        // Fresh rootfs workspace parents are root-owned again (bind and volume mode);
+        // chown them before hooks. Soft-fail like the workspace chown above.
+        do {
+            try WorkspaceOwnership.ensureWorkspaceParentsWritableByRemoteUser(
+                containerId: id,
+                workspaceFolder: effectiveConfig.workspaceFolder,
+                remoteUser: effectiveConfig.connectionUser,
+                runtime: runtime
+            )
+        } catch {
+            StatusPrinter.warning(
+                "Failed to chown workspace parents to \(effectiveConfig.connectionUser ?? "remoteUser"): \(error.localizedDescription)"
+            )
+        }
+
         // Create-path hooks split at waitFor (delete-on-fail of the new container).
         // Delete-on-fail must run exactly once. runCreatePath already deletes the
         // new container when a create-path hook exits non-zero; only an exec-level
