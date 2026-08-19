@@ -4798,3 +4798,969 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!pull.contains("--rosetta"))
     })
 ]
+
+// MARK: - GuestGitCredentialSeed unit tests
+
+/// Runs the generated credential helper via `sh` (Linux test env) with HOME pinned
+/// to a scratch dir, feeding `input` on stdin like git's credential protocol.
+func runCredentialHelper(helperPath: String, action: String, home: String, input: String) throws -> ProcessResult {
+    try FoundationProcessRunner().run(
+        executable: "/bin/sh",
+        arguments: [helperPath, action],
+        environment: ["HOME": home],
+        currentDirectory: nil,
+        stdinData: Data(input.utf8)
+    )
+}
+
+func makeSeedScriptFixture() throws -> (root: URL, home: URL, inheritedHome: URL, environment: [String: String]) {
+    let root = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+    let home = root.appendingPathComponent("passwd-home", isDirectory: true)
+    let inheritedHome = root.appendingPathComponent("inherited-home", isDirectory: true)
+    let bin = root.appendingPathComponent("bin", isDirectory: true)
+    try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: inheritedHome, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+
+    let id = bin.appendingPathComponent("id")
+    try """
+    #!/bin/sh
+    [ "$1" = "-u" ] && printf '4242\\n'
+    """.write(to: id, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: id.path)
+
+    let getent = bin.appendingPathComponent("getent")
+    try """
+    #!/bin/sh
+    if [ "$1" = "passwd" ] && [ "$2" = "4242" ]; then
+      printf 'seeduser:x:4242:4242::%s:/bin/sh\\n' '__SEED_HOME__'
+      exit 0
+    fi
+    exit 1
+    """.replacingOccurrences(of: "__SEED_HOME__", with: home.path)
+        .write(to: getent, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: getent.path)
+
+    let git = bin.appendingPathComponent("git")
+    try """
+    #!/bin/sh
+    CONFIG="$HOME/git-config"
+    if [ "$1" = "config" ] && [ "$2" = "--global" ] && [ "$3" = "--add" ]; then
+      printf '%s=%s\\n' "$4" "$5" >> "$CONFIG"
+    elif [ "$1" = "config" ] && [ "$2" = "--global" ] && [ "$3" = "--get-all" ]; then
+      [ -f "$CONFIG" ] && awk -F= '$1 == "credential.helper" { print $2 }' "$CONFIG"
+    elif [ "$1" = "config" ] && [ "$2" = "--global" ] && [ "$3" = "--list" ]; then
+      [ -f "$CONFIG" ] && cat "$CONFIG"
+    elif [ "$1" = "credential" ] && [ "$2" = "approve" ]; then
+      printf 'approve\\n' >> "$HOME/approve-calls"
+      "$HOME/.adevcontainer/git-credential-adev" store
+    fi
+    exit 0
+    """.write(to: git, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: git.path)
+
+    let path = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
+    return (
+        root,
+        home,
+        inheritedHome,
+        ["HOME": inheritedHome.path, "PATH": "\(bin.path):\(path)"]
+    )
+}
+
+/// Credential provider with per-URL results for seeding tests.
+final class SeedMockCredential: GitCredentialProviding, @unchecked Sendable {
+    var results: [String: Result<GitHTTPSCredentials?, Error>] = [:]
+    var defaultResult: Result<GitHTTPSCredentials?, Error> = .success(nil)
+    var fillCalls: [String] = []
+
+    func fillHTTPS(url: String) throws -> GitHTTPSCredentials? {
+        fillCalls.append(url)
+        switch results[url] ?? defaultResult {
+        case .success(let c): return c
+        case .failure(let e): throw e
+        }
+    }
+}
+
+nonisolated(unsafe) let guestGitCredentialSeedTests: [(String, () throws -> Void)] = [
+    ("guestSeedParsesUniqueFetchURLs", {
+        let output = """
+        origin\thttps://dev.azure.com/plantsuite/PlantSuite/_git/GitOps (fetch)
+        origin\thttps://dev.azure.com/plantsuite/PlantSuite/_git/GitOps (push)
+        upstream\thttps://dev.azure.com/plantsuite/PlantSuite/_git/Other (fetch)
+        """
+        let urls = GuestGitCredentialSeed.uniqueFetchURLs(from: output)
+        try MiniTest.expectEqual(urls, [
+            "https://dev.azure.com/plantsuite/PlantSuite/_git/GitOps",
+            "https://dev.azure.com/plantsuite/PlantSuite/_git/Other"
+        ])
+        // Duplicate fetch lines dedupe; push-only lines ignored; space-separated form works.
+        let dup = """
+        origin\thttps://example.com/a.git (fetch)
+        origin\thttps://example.com/a.git (fetch)
+        origin https://example.com/b.git (fetch)
+        mirror\thttps://example.com/a.git (push)
+        """
+        try MiniTest.expectEqual(GuestGitCredentialSeed.uniqueFetchURLs(from: dup), [
+            "https://example.com/a.git",
+            "https://example.com/b.git"
+        ])
+        // No fetch lines at all → empty.
+        try MiniTest.expectEqual(
+            GuestGitCredentialSeed.uniqueFetchURLs(from: "origin\thttps://example.com/a.git (push)\n"),
+            []
+        )
+        try MiniTest.expectEqual(GuestGitCredentialSeed.uniqueFetchURLs(from: ""), [])
+    }),
+    ("guestSeedBindFillsUniqueHTTPSRemotesOnly", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let remoteOutput = """
+        origin\thttps://dev.azure.com/plantsuite/PlantSuite/_git/GitOps (fetch)
+        origin\thttps://dev.azure.com/plantsuite/PlantSuite/_git/GitOps (push)
+        origin\thttps://dev.azure.com/plantsuite/PlantSuite/_git/GitOps (fetch)
+        other\thttps://dev.azure.com/plantsuite/PlantSuite/_git/Other (fetch)
+        ssh-origin\tgit@github.com:org/repo.git (fetch)
+        """
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["-C", ws.path, "remote", "-v"] {
+                    return ProcessResult(exitCode: 0, stdout: Data(remoteOutput.utf8), stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let creds = SeedMockCredential()
+        creds.results["https://dev.azure.com/plantsuite/PlantSuite/_git/GitOps"] = .success(
+            GitHTTPSCredentials(username: "plantsuite", password: "s3cret-pass")
+        )
+        creds.results["https://dev.azure.com/plantsuite/PlantSuite/_git/Other"] = .success(
+            GitHTTPSCredentials(username: "plantsuite", password: "s3cret-pass")
+        )
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let seed = GuestGitCredentialSeed(
+            credentials: creds,
+            runner: mock,
+            gitPathOverride: .some("/usr/bin/mock-git")
+        )
+        try seed.seed(
+            containerId: "ctr",
+            hostWorkspace: ws.path,
+            gitURL: nil,
+            connectionUser: nil,
+            runtime: runtime
+        )
+        // One fill per unique HTTPS remote; SSH skipped; duplicate fetch URL filled once.
+        try MiniTest.expectEqual(creds.fillCalls, [
+            "https://dev.azure.com/plantsuite/PlantSuite/_git/GitOps",
+            "https://dev.azure.com/plantsuite/PlantSuite/_git/Other"
+        ])
+        let execs = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execs.count, 1, "exactly one seeding exec")
+        try MiniTest.expectEqual(
+            String(data: execs[0].stdinData ?? Data(), encoding: .utf8) ?? "",
+            "protocol=https\nhost=dev.azure.com\nusername=plantsuite\npassword=s3cret-pass\n\n"
+        )
+    }),
+    ("guestSeedBindDedupesByProtocolHostUsername", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let remoteOutput = """
+        origin\thttps://dev.azure.com/plantsuite/PlantSuite/_git/GitOps (fetch)
+        other\thttps://dev.azure.com/plantsuite/PlantSuite/_git/Other (fetch)
+        third\thttps://example.com/team/repo.git (fetch)
+        """
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["-C", ws.path, "remote", "-v"] {
+                    return ProcessResult(exitCode: 0, stdout: Data(remoteOutput.utf8), stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let creds = SeedMockCredential()
+        creds.results["https://dev.azure.com/plantsuite/PlantSuite/_git/GitOps"] = .success(
+            GitHTTPSCredentials(username: "plantsuite", password: "a")
+        )
+        creds.results["https://dev.azure.com/plantsuite/PlantSuite/_git/Other"] = .success(
+            GitHTTPSCredentials(username: "plantsuite", password: "b")
+        )
+        creds.results["https://example.com/team/repo.git"] = .success(
+            GitHTTPSCredentials(username: "alice", password: "c")
+        )
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let seed = GuestGitCredentialSeed(
+            credentials: creds,
+            runner: mock,
+            gitPathOverride: .some("/usr/bin/mock-git")
+        )
+        try seed.seed(
+            containerId: "ctr",
+            hostWorkspace: ws.path,
+            gitURL: nil,
+            connectionUser: nil,
+            runtime: runtime
+        )
+        try MiniTest.expectEqual(creds.fillCalls.count, 3, "fill still per unique HTTPS remote")
+        let execs = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execs.count, 1)
+        let call = execs[0]
+        let args = call.arguments
+        // Two entries: (https, dev.azure.com, plantsuite) and (https, example.com, alice).
+        try MiniTest.expectEqual(
+            String(data: call.stdinData ?? Data(), encoding: .utf8) ?? "",
+            "protocol=https\nhost=dev.azure.com\nusername=plantsuite\npassword=a\n\n"
+                + "protocol=https\nhost=example.com\nusername=alice\npassword=c\n\n"
+        )
+        try MiniTest.expect(!args.contains(where: { $0.contains("ADEV_SEED") }))
+    }),
+    ("guestSeedBindSSHOnlySkipsSilently", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let remoteOutput = """
+        origin\tgit@github.com:org/repo.git (fetch)
+        origin\tssh://git@example.com/team/repo.git (fetch)
+        """
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["-C", ws.path, "remote", "-v"] {
+                    return ProcessResult(exitCode: 0, stdout: Data(remoteOutput.utf8), stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let creds = SeedMockCredential()
+        creds.defaultResult = .success(GitHTTPSCredentials(username: "u", password: "p"))
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let seed = GuestGitCredentialSeed(
+            credentials: creds,
+            runner: mock,
+            gitPathOverride: .some("/usr/bin/mock-git")
+        )
+        try seed.seed(
+            containerId: "ctr",
+            hostWorkspace: ws.path,
+            gitURL: nil,
+            connectionUser: nil,
+            runtime: runtime
+        )
+        try MiniTest.expect(creds.fillCalls.isEmpty, "SSH remotes never fill")
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.first == "exec" },
+            "SSH-only workspace must not run a seeding exec"
+        )
+    }),
+    ("guestSeedBindSecretsNeverInExecCommand", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let remoteOutput = """
+        origin\thttps://dev.azure.com/plantsuite/PlantSuite/_git/GitOps (fetch)
+        """
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["-C", ws.path, "remote", "-v"] {
+                    return ProcessResult(exitCode: 0, stdout: Data(remoteOutput.utf8), stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let creds = SeedMockCredential()
+        let password = "p@ss:wo%rd/sla|sh;$(printf nope)"
+        creds.results["https://dev.azure.com/plantsuite/PlantSuite/_git/GitOps"] = .success(
+            GitHTTPSCredentials(username: "plantsuite", password: password)
+        )
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let seed = GuestGitCredentialSeed(
+            credentials: creds,
+            runner: mock,
+            gitPathOverride: .some("/usr/bin/mock-git")
+        )
+        try seed.seed(
+            containerId: "ctr",
+            hostWorkspace: ws.path,
+            gitURL: nil,
+            connectionUser: "vscode",
+            runtime: runtime
+        )
+        let execs = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execs.count, 1)
+        let call = execs[0]
+        let args = call.arguments
+        try MiniTest.expect(args.contains("-u") && args.contains("vscode"), "seeding exec runs as connection user")
+        // Credentials travel via stdin, never in argv or the command environment.
+        try MiniTest.expectEqual(
+            String(data: call.stdinData ?? Data(), encoding: .utf8) ?? "",
+            "protocol=https\nhost=dev.azure.com\nusername=plantsuite\npassword=\(password)\n\n"
+        )
+        try MiniTest.expect(!args.contains(where: { $0.contains(password) }))
+        try MiniTest.expect(call.environment?.values.contains(password) != true)
+        try MiniTest.expect(!args.contains("-e"))
+        let script = args.last ?? ""
+        try MiniTest.expect(script.contains("git config --global --add credential.helper"))
+        try MiniTest.expect(script.contains("git credential approve"))
+        try MiniTest.expect(script.contains("printf 'protocol=%s\\nhost=%s\\nusername=%s\\npassword=%s\\n\\n'"))
+        try MiniTest.expect(!script.contains(password))
+        try MiniTest.expect(!script.contains("plantsuite"))
+        try MiniTest.expect(!script.contains("_git"), "approve entries carry no path component")
+        try MiniTest.expect(!script.contains("GitOps"), "approve entries carry no path component")
+    }),
+    ("guestSeedBindSilentSkipNoRemotes", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["-C", ws.path, "remote", "-v"] {
+                    return ProcessResult(exitCode: 0, stdout: Data("origin\thttps://x/y.git (push)\n".utf8), stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let creds = SeedMockCredential()
+        creds.defaultResult = .success(GitHTTPSCredentials(username: "u", password: "p"))
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let seed = GuestGitCredentialSeed(
+            credentials: creds,
+            runner: mock,
+            gitPathOverride: .some("/usr/bin/mock-git")
+        )
+        try seed.seed(
+            containerId: "ctr",
+            hostWorkspace: ws.path,
+            gitURL: nil,
+            connectionUser: nil,
+            runtime: runtime
+        )
+        try MiniTest.expect(creds.fillCalls.isEmpty)
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "exec" })
+    }),
+    ("guestSeedBindSilentSkipNilFill", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["-C", ws.path, "remote", "-v"] {
+                    return ProcessResult(exitCode: 0, stdout: Data("origin\thttps://example.com/pub.git (fetch)\n".utf8), stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let creds = SeedMockCredential() // default nil fill
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let seed = GuestGitCredentialSeed(
+            credentials: creds,
+            runner: mock,
+            gitPathOverride: .some("/usr/bin/mock-git")
+        )
+        try seed.seed(
+            containerId: "ctr",
+            hostWorkspace: ws.path,
+            gitURL: nil,
+            connectionUser: nil,
+            runtime: runtime
+        )
+        try MiniTest.expectEqual(creds.fillCalls, ["https://example.com/pub.git"])
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "exec" }, "nil fill skips silently")
+    }),
+    ("guestSeedBindSilentSkipMissingGit", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let creds = SeedMockCredential()
+        creds.defaultResult = .success(GitHTTPSCredentials(username: "u", password: "p"))
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let seed = GuestGitCredentialSeed(
+            credentials: creds,
+            runner: mock,
+            gitPathOverride: .some(nil)
+        )
+        try seed.seed(
+            containerId: "ctr",
+            hostWorkspace: ws.path,
+            gitURL: nil,
+            connectionUser: nil,
+            runtime: runtime
+        )
+        try MiniTest.expect(creds.fillCalls.isEmpty, "missing host git must not fill")
+        try MiniTest.expect(mock.calls.isEmpty, "missing host git must not run anything")
+    }),
+    ("guestSeedVolumeSeedsFromGitURL", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let creds = SeedMockCredential()
+        creds.results["https://github.com/org/repo.git"] = .success(
+            GitHTTPSCredentials(username: "x-access-token", password: "ghp_seed")
+        )
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let seed = GuestGitCredentialSeed(
+            credentials: creds,
+            runner: mock,
+            gitPathOverride: .some("/usr/bin/mock-git")
+        )
+        try seed.seed(
+            containerId: "ctr",
+            hostWorkspace: nil,
+            gitURL: "https://github.com/org/repo.git",
+            connectionUser: "root",
+            runtime: runtime
+        )
+        try MiniTest.expectEqual(creds.fillCalls, ["https://github.com/org/repo.git"])
+        // No host remote enumeration in volume mode.
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.contains("-C") || $0.arguments.contains("remote") })
+        let execs = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execs.count, 1)
+        let call = execs[0]
+        let args = call.arguments
+        try MiniTest.expectEqual(
+            String(data: call.stdinData ?? Data(), encoding: .utf8) ?? "",
+            "protocol=https\nhost=github.com\nusername=x-access-token\npassword=ghp_seed\n\n"
+        )
+        try MiniTest.expect(!args.contains(where: { $0.contains("ghp_seed") }))
+        try MiniTest.expect(call.environment?.values.contains("ghp_seed") != true)
+        try MiniTest.expect(args.contains("-u") && args.contains("root"))
+    }),
+    ("guestSeedVolumeMissingOrEmptyGitURLSkips", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let creds = SeedMockCredential()
+        creds.defaultResult = .success(GitHTTPSCredentials(username: "u", password: "p"))
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let seed = GuestGitCredentialSeed(
+            credentials: creds,
+            runner: mock,
+            gitPathOverride: .some("/usr/bin/mock-git")
+        )
+        for url in [nil, "", "   "] {
+            try seed.seed(
+                containerId: "ctr",
+                hostWorkspace: nil,
+                gitURL: url,
+                connectionUser: nil,
+                runtime: runtime
+            )
+        }
+        try MiniTest.expect(creds.fillCalls.isEmpty, "missing/empty git_url must not fill")
+        try MiniTest.expect(mock.calls.isEmpty, "missing/empty git_url must not exec")
+    }),
+    ("guestSeedExecFailureRedactsUserinfoAndCredentialMaterial", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let secretURL = "https://plantsuite:s3cret@dev.azure.com/plantsuite/PlantSuite/_git/GitOps"
+        let remoteOutput = "origin\t\(secretURL) (fetch)\n"
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["-C", ws.path, "remote", "-v"] {
+                    return ProcessResult(exitCode: 0, stdout: Data(remoteOutput.utf8), stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(
+                        exitCode: 1,
+                        stdout: Data(),
+                        stderr: Data("fatal: unable to reach '\(secretURL)': remote error; arbitrary-helper-output password=unexpected-secret https://user:unexpected-url-secret@example.com/repo\n".utf8)
+                    )
+                }
+                return nil
+            }
+        ]
+        let creds = SeedMockCredential()
+        creds.results[secretURL] = .success(
+            GitHTTPSCredentials(username: "plantsuite", password: "tok-pass")
+        )
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let seed = GuestGitCredentialSeed(
+            credentials: creds,
+            runner: mock,
+            gitPathOverride: .some("/usr/bin/mock-git")
+        )
+        try MiniTest.expectThrows({
+            try seed.seed(
+                containerId: "ctr",
+                hostWorkspace: ws.path,
+                gitURL: nil,
+                connectionUser: nil,
+                runtime: runtime
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(!err.message.contains("s3cret"), "URL userinfo redacted")
+            try MiniTest.expect(!err.message.contains("plantsuite:s3cret"))
+            try MiniTest.expect(!err.message.contains("tok-pass"), "credential material redacted")
+            try MiniTest.expect(!err.message.contains("unexpected-secret"), "unexpected helper output is not re-emitted")
+            try MiniTest.expect(!err.message.contains("arbitrary-helper-output"), "arbitrary helper output is not re-emitted")
+            try MiniTest.expect(!err.message.contains("unexpected-url-secret"), "unexpected URL is not re-emitted")
+            try MiniTest.expect(err.message.contains("dev.azure.com"), "safe host remains readable")
+        }
+        // The seeding exec command itself never carried the userinfo URL.
+        let execs = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execs.count, 1)
+        let script = execs[0].arguments.last ?? ""
+        try MiniTest.expect(!script.contains("s3cret"))
+        try MiniTest.expect(!script.contains("plantsuite:s3cret"))
+        try MiniTest.expect(!script.contains("git config --global --list"))
+        try MiniTest.expect(!script.contains("ls -la"))
+        try MiniTest.expect(!script.contains("sed -E"))
+    }),
+    ("guestSeedScriptShape", {
+        let script = GuestGitCredentialSeed.seedScript()
+        try MiniTest.expect(script.contains("set -e"))
+        try MiniTest.expect(script.contains("git config --global --add credential.helper"))
+        try MiniTest.expect(script.contains("git credential approve"))
+        try MiniTest.expect(script.contains("while IFS= read -r line"))
+        try MiniTest.expect(!script.contains("ADEV_SEED"), "seed script must not read credential env")
+        try MiniTest.expect(!script.contains("https://"), "script must not embed any URL")
+        try MiniTest.expect(!script.contains("ADEV_SEED_0_"), "script must not embed any env value")
+    }),
+    ("guestSeedScriptResolvesPasswdHomeBeforeCredentialSetup", {
+        let script = GuestGitCredentialSeed.seedScript()
+        guard let resolve = script.range(of: "if command -v getent")?.lowerBound,
+              let fallback = script.range(of: "done < /etc/passwd")?.lowerBound,
+              let nonEmpty = script.range(of: "[ -n \"$resolved_home\" ] || exit 1")?.lowerBound,
+              let exportHome = script.range(of: "export HOME")?.lowerBound,
+              let helper = script.range(of: "HELPER=\"$HOME/.adevcontainer/git-credential-adev\"")?.lowerBound,
+              let config = script.range(of: "git config --global --add credential.helper")?.lowerBound,
+              let approve = script.range(of: "git credential approve")?.lowerBound
+        else {
+            throw MiniTest.Failure(message: "seed script is missing home/setup operations")
+        }
+        try MiniTest.expect(resolve < fallback, "getent lookup precedes passwd fallback")
+        try MiniTest.expect(fallback < nonEmpty, "passwd fallback precedes home validation")
+        try MiniTest.expect(nonEmpty < exportHome, "home validates before export")
+        try MiniTest.expect(exportHome < helper, "resolved HOME exports before helper setup")
+        try MiniTest.expect(resolve < helper, "passwd home resolves before helper setup")
+        try MiniTest.expect(helper < config, "helper path is ready before global config")
+        try MiniTest.expect(config < approve, "global config precedes approve")
+        try MiniTest.expect(script.contains("getent passwd \"$uid\""))
+        try MiniTest.expect(script.contains("done < /etc/passwd"), "portable passwd fallback is present")
+        try MiniTest.expect(script.contains("[ -n \"$resolved_home\" ] || exit 1"))
+        try MiniTest.expect(script.contains("mkdir -p \"$resolved_home\" 2>/dev/null || exit 1"))
+        try MiniTest.expect(script.contains("[ -d \"$resolved_home\" ] || exit 1"))
+        try MiniTest.expect(script.contains("HOME=\"$resolved_home\"\nexport HOME"))
+    }),
+    ("guestSeedScriptUsesResolvedPasswdHomeForConfigAndApprove", {
+        let fixture = try makeSeedScriptFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let input = "protocol=https\nhost=home.example\nusername=user\npassword=secret\n\n"
+        let result = try FoundationProcessRunner().run(
+            executable: "/bin/sh",
+            arguments: ["-c", GuestGitCredentialSeed.seedScript()],
+            environment: fixture.environment,
+            currentDirectory: nil,
+            stdinData: Data(input.utf8)
+        )
+        try MiniTest.expect(result.succeeded, "seed script runs with a controlled passwd home")
+        let config = try String(contentsOf: fixture.home.appendingPathComponent("git-config"), encoding: .utf8)
+        try MiniTest.expect(config.contains("credential.helper=\(fixture.home.path)/.adevcontainer/git-credential-adev"))
+        try MiniTest.expectEqual(
+            try String(contentsOf: fixture.home.appendingPathComponent(".adevcontainer/git-credentials"), encoding: .utf8),
+            input
+        )
+        try MiniTest.expect(
+            !FileManager.default.fileExists(atPath: fixture.inheritedHome.appendingPathComponent(".adevcontainer").path),
+            "inherited HOME is not used"
+        )
+    }),
+    ("guestSeedScriptApprovesAndPersistsMultipleStdinBlocks", {
+        let fixture = try makeSeedScriptFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let input = "protocol=https\nhost=one.example\nusername=u@ser:one\npassword=p@ss:one%raw\n\n"
+            + "protocol=https\nhost=two.example\nusername=two|user\npassword=two@pass:raw\n\n"
+        let result = try FoundationProcessRunner().run(
+            executable: "/bin/sh",
+            arguments: ["-c", GuestGitCredentialSeed.seedScript()],
+            environment: fixture.environment,
+            currentDirectory: nil,
+            stdinData: Data(input.utf8)
+        )
+        try MiniTest.expect(result.succeeded, "multi-block seed succeeds")
+        let approvals = try String(contentsOf: fixture.home.appendingPathComponent("approve-calls"), encoding: .utf8)
+        try MiniTest.expectEqual(approvals.split(whereSeparator: \.isNewline).count, 2, "both blocks are approved")
+        try MiniTest.expectEqual(
+            try String(contentsOf: fixture.home.appendingPathComponent(".adevcontainer/git-credentials"), encoding: .utf8),
+            input,
+            "both blocks persist in input order with raw values"
+        )
+        try MiniTest.expect(!result.stdoutString.contains("p@ss:one%raw"))
+        try MiniTest.expect(!result.stderrString.contains("two@pass:raw"))
+    }),
+    ("guestSeedScriptApprovesRawStdin", {
+        let dir = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let home = dir.appendingPathComponent("home", isDirectory: true)
+        let inheritedHome = dir.appendingPathComponent("inherited-home", isDirectory: true)
+        let bin = dir.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: inheritedHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let fakeID = bin.appendingPathComponent("id")
+        try """
+        #!/bin/sh
+        [ "$1" = "-u" ] && printf '4242\\n'
+        """.write(to: fakeID, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeID.path)
+        let fakeGetent = bin.appendingPathComponent("getent")
+        try """
+        #!/bin/sh
+        printf 'seeduser:x:4242:4242::%s:/bin/sh\\n' '__SEED_HOME__'
+        """.replacingOccurrences(of: "__SEED_HOME__", with: home.path)
+            .write(to: fakeGetent, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeGetent.path)
+        let fakeGit = bin.appendingPathComponent("git")
+        try """
+        #!/bin/sh
+        if [ "$1" = "credential" ] && [ "$2" = "approve" ]; then
+          cat > "$HOME/approved"
+        fi
+        exit 0
+        """.write(to: fakeGit, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeGit.path)
+
+        let password = "p@ss:wo%rd/sla|sh;$(printf nope)"
+        let input = "protocol=https\nhost=h.example\nusername=u\npassword=\(password)\n\n"
+        let path = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
+        let result = try FoundationProcessRunner().run(
+            executable: "/bin/sh",
+            arguments: ["-c", GuestGitCredentialSeed.seedScript()],
+            environment: ["HOME": inheritedHome.path, "PATH": "\(bin.path):\(path)"],
+            currentDirectory: nil,
+            stdinData: Data(input.utf8)
+        )
+        try MiniTest.expect(result.succeeded, "seed script approves stdin")
+        try MiniTest.expect(!result.stdoutString.contains(password))
+        try MiniTest.expect(!result.stderrString.contains(password))
+        try MiniTest.expectEqual(
+            try String(contentsOf: home.appendingPathComponent("approved"), encoding: .utf8),
+            input
+        )
+        try MiniTest.expect(
+            !FileManager.default.fileExists(atPath: inheritedHome.appendingPathComponent(".adevcontainer").path),
+            "seed ignores inherited HOME"
+        )
+    }),
+    // ══════════ Phase 8: credential helper executed via sh (Linux test env) ══════════
+
+    ("guestSeedHelperGetUsernameMismatchReturnsQueriedUsername", {
+        let helper = GuestGitCredentialSeed.helperScript()
+        let dir = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let helperPath = dir.appendingPathComponent("git-credential-adev")
+        try Data(helper.utf8).write(to: helperPath)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helperPath.path)
+        let home = dir.path
+        // Store (https, dev.azure.com, X), then query with username=Y (X != Y).
+        let store = try runCredentialHelper(
+            helperPath: helperPath.path, action: "store", home: home,
+            input: "protocol=https\nhost=dev.azure.com\nusername=X\npassword=sec:ret@1\n\n"
+        )
+        try MiniTest.expect(store.succeeded, "store exits 0")
+        try MiniTest.expect(store.stdoutString.isEmpty, "store writes nothing to stdout")
+        try MiniTest.expect(store.stderrString.isEmpty, "store writes nothing to stderr")
+        let fill = try runCredentialHelper(
+            helperPath: helperPath.path, action: "get", home: home,
+            input: "protocol=https\nhost=dev.azure.com\nusername=Y\n\n"
+        )
+        try MiniTest.expect(fill.succeeded, "get exits 0")
+        try MiniTest.expect(fill.stderrString.isEmpty, "get writes nothing to stderr")
+        let out = fill.stdoutString
+        try MiniTest.expect(out.contains("protocol=https"))
+        try MiniTest.expect(out.contains("host=dev.azure.com"))
+        try MiniTest.expect(out.contains("username=Y"), "queried username wins over stored")
+        try MiniTest.expect(!out.contains("username=X"), "stored username not emitted when the query carries one")
+        try MiniTest.expect(out.contains("password=sec:ret@1"), "stored password returned on username-agnostic match")
+    }),
+    ("guestSeedHelperGetExactMatchAndStoredUsernameFallback", {
+        let helper = GuestGitCredentialSeed.helperScript()
+        let dir = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let helperPath = dir.appendingPathComponent("git-credential-adev")
+        try Data(helper.utf8).write(to: helperPath)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helperPath.path)
+        let home = dir.path
+        let store = try runCredentialHelper(
+            helperPath: helperPath.path, action: "store", home: home,
+            input: "protocol=https\nhost=github.com\nusername=alice\npassword=tok/enc%ded\n\n"
+        )
+        try MiniTest.expect(store.succeeded)
+        let exact = try runCredentialHelper(
+            helperPath: helperPath.path, action: "get", home: home,
+            input: "protocol=https\nhost=github.com\nusername=alice\n\n"
+        )
+        try MiniTest.expect(exact.succeeded)
+        try MiniTest.expect(exact.stdoutString.contains("username=alice"))
+        try MiniTest.expect(exact.stdoutString.contains("password=tok/enc%ded"))
+        // Query with no username → the stored username is returned.
+        let bare = try runCredentialHelper(
+            helperPath: helperPath.path, action: "get", home: home,
+            input: "protocol=https\nhost=github.com\n\n"
+        )
+        try MiniTest.expect(bare.succeeded)
+        try MiniTest.expect(bare.stdoutString.contains("username=alice"), "stored username returned when the query carries none")
+        try MiniTest.expect(bare.stdoutString.contains("password=tok/enc%ded"))
+    }),
+    ("guestSeedHelperGetNoMatchExitsZeroWithoutOutput", {
+        let helper = GuestGitCredentialSeed.helperScript()
+        let dir = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let helperPath = dir.appendingPathComponent("git-credential-adev")
+        try Data(helper.utf8).write(to: helperPath)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helperPath.path)
+        let home = dir.path
+        let store = try runCredentialHelper(
+            helperPath: helperPath.path, action: "store", home: home,
+            input: "protocol=https\nhost=dev.azure.com\nusername=X\npassword=p\n\n"
+        )
+        try MiniTest.expect(store.succeeded)
+        // Unseeded host → silent; protocol mismatch on the seeded host → silent.
+        for query in [
+            "protocol=https\nhost=example.com\nusername=Y\n\n",
+            "protocol=http\nhost=dev.azure.com\nusername=X\n\n"
+        ] {
+            let fill = try runCredentialHelper(
+                helperPath: helperPath.path, action: "get", home: home, input: query
+            )
+            try MiniTest.expect(fill.succeeded, "no-match get exits 0")
+            try MiniTest.expect(fill.stdoutString.isEmpty, "no-match get emits nothing")
+            try MiniTest.expect(fill.stderrString.isEmpty)
+        }
+        // Scoping: the seeded host still answers after the no-match probes.
+        let seeded = try runCredentialHelper(
+            helperPath: helperPath.path, action: "get", home: home,
+            input: "protocol=https\nhost=dev.azure.com\nusername=X\n\n"
+        )
+        try MiniTest.expect(seeded.stdoutString.contains("password=p"), "seeded host unaffected by no-match probes")
+    }),
+    ("guestSeedHelperStoreDedupesByProtocolHostUsername", {
+        let helper = GuestGitCredentialSeed.helperScript()
+        let dir = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let helperPath = dir.appendingPathComponent("git-credential-adev")
+        try Data(helper.utf8).write(to: helperPath)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helperPath.path)
+        let home = dir.path
+        let storePath = dir.appendingPathComponent(".adevcontainer/git-credentials")
+        for input in [
+            "protocol=https\nhost=h.example\nusername=u\npassword=p1\n\n",
+            "protocol=https\nhost=h.example\nusername=u\npassword=p2\n\n",
+            "protocol=https\nhost=h.example\nusername=other\npassword=p3\n\n"
+        ] {
+            let r = try runCredentialHelper(
+                helperPath: helperPath.path, action: "store", home: home, input: input
+            )
+            try MiniTest.expect(r.succeeded)
+        }
+        let entries = try String(contentsOf: storePath, encoding: .utf8)
+            .split(whereSeparator: \.isNewline)
+            .filter { $0.hasPrefix("protocol=") }
+        try MiniTest.expectEqual(entries.count, 2, "same (protocol, host, username) triple dedupes to one entry")
+        let getU = try runCredentialHelper(
+            helperPath: helperPath.path, action: "get", home: home,
+            input: "protocol=https\nhost=h.example\nusername=u\n\n"
+        )
+        try MiniTest.expect(getU.stdoutString.contains("password=p2"), "re-store of the same triple keeps the latest password")
+        // A second entry for the same (protocol, host) is still matched ignoring the
+        // queried username; the first stored entry wins.
+        let getOther = try runCredentialHelper(
+            helperPath: helperPath.path, action: "get", home: home,
+            input: "protocol=https\nhost=h.example\nusername=other\n\n"
+        )
+        try MiniTest.expect(getOther.stdoutString.contains("username=other"), "queried username echoed on a (protocol, host) match")
+        try MiniTest.expect(getOther.stdoutString.contains("password=p2"), "first (protocol, host) match wins")
+    }),
+    ("guestSeedHelperStoreRoundTripsSpecialCharacters", {
+        let helper = GuestGitCredentialSeed.helperScript()
+        let dir = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let helperPath = dir.appendingPathComponent("git-credential-adev")
+        try Data(helper.utf8).write(to: helperPath)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helperPath.path)
+        let home = dir.path
+        let storePath = dir.appendingPathComponent(".adevcontainer/git-credentials")
+        let username = "us@er:na%me/slash|pipe"
+        let password = "p@ss:wo%rd/sla|sh%25"
+        let r = try runCredentialHelper(
+            helperPath: helperPath.path, action: "store", home: home,
+            input: "protocol=https\nhost=h.example\nusername=\(username)\npassword=\(password)\n\n"
+        )
+        try MiniTest.expect(r.succeeded)
+        // Store file uses git's own key-block shape: raw values, no escaping.
+        let stored = try String(contentsOf: storePath, encoding: .utf8)
+        try MiniTest.expect(stored.contains("protocol=https\nhost=h.example\nusername=\(username)\npassword=\(password)\n"), "store block round-trips raw values verbatim")
+        let fill = try runCredentialHelper(
+            helperPath: helperPath.path, action: "get", home: home,
+            input: "protocol=https\nhost=h.example\nusername=\(username)\n\n"
+        )
+        try MiniTest.expect(fill.succeeded)
+        try MiniTest.expect(fill.stdoutString.contains("username=\(username)"), "raw username round-trips")
+        try MiniTest.expect(fill.stdoutString.contains("password=\(password)"), "raw password round-trips")
+    }),
+    ("guestSeedHelperAndStoreFileModesPrivate", {
+        let helper = GuestGitCredentialSeed.helperScript()
+        let dir = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let helperPath = dir.appendingPathComponent("git-credential-adev")
+        try Data(helper.utf8).write(to: helperPath)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helperPath.path)
+        let home = dir.path
+        let storePath = dir.appendingPathComponent(".adevcontainer/git-credentials")
+        let store = try runCredentialHelper(
+            helperPath: helperPath.path, action: "store", home: home,
+            input: "protocol=https\nhost=h.example\nusername=u\npassword=p\n\n"
+        )
+        try MiniTest.expect(store.succeeded)
+        let helperAttrs = try FileManager.default.attributesOfItem(atPath: helperPath.path)
+        try MiniTest.expectEqual((helperAttrs[.posixPermissions] as? NSNumber)?.intValue, 0o700, "helper script is 0700")
+        let storeAttrs = try FileManager.default.attributesOfItem(atPath: storePath.path)
+        try MiniTest.expectEqual((storeAttrs[.posixPermissions] as? NSNumber)?.intValue, 0o600, "store file is 0600")
+    }),
+    ("guestSeedHelperKeepsSecretsOutOfArgvAndLogs", {
+        let helper = GuestGitCredentialSeed.helperScript()
+        try MiniTest.expect(!helper.contains("ADEV_SEED"), "helper is standalone; entries never couple to seed env")
+        let dir = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let helperPath = dir.appendingPathComponent("git-credential-adev")
+        try Data(helper.utf8).write(to: helperPath)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helperPath.path)
+        let home = dir.path
+        // Store: secrets travel via stdin only; stdout and stderr stay empty.
+        let store = try runCredentialHelper(
+            helperPath: helperPath.path, action: "store", home: home,
+            input: "protocol=https\nhost=h.example\nusername=u\npassword=hunter2@secret\n\n"
+        )
+        try MiniTest.expect(store.succeeded)
+        try MiniTest.expect(store.stdoutString.isEmpty, "store never echoes secrets to stdout")
+        try MiniTest.expect(store.stderrString.isEmpty, "store never writes to stderr")
+        // Get: stdout carries only credential-protocol lines.
+        let fill = try runCredentialHelper(
+            helperPath: helperPath.path, action: "get", home: home,
+            input: "protocol=https\nhost=h.example\nusername=u\n\n"
+        )
+        try MiniTest.expect(fill.succeeded)
+        try MiniTest.expect(fill.stderrString.isEmpty, "get never writes to stderr")
+        for line in fill.stdoutString.split(whereSeparator: \.isNewline) {
+            try MiniTest.expect(
+                line.isEmpty || line.hasPrefix("protocol=") || line.hasPrefix("host=")
+                    || line.hasPrefix("username=") || line.hasPrefix("password="),
+                "stdout carries only credential-protocol lines: \(line)"
+            )
+        }
+        // Erase is a silent no-op.
+        let erase = try runCredentialHelper(
+            helperPath: helperPath.path, action: "erase", home: home,
+            input: "protocol=https\nhost=h.example\n\n"
+        )
+        try MiniTest.expect(erase.succeeded)
+        try MiniTest.expect(erase.stdoutString.isEmpty)
+        try MiniTest.expect(erase.stderrString.isEmpty)
+    }),
+    ("guestSeedScriptConfigAppendsHelperAndDropsStore", {
+        let script = GuestGitCredentialSeed.seedScript()
+        try MiniTest.expect(script.contains("git config --global --add credential.helper"), "helper appended via --add")
+        try MiniTest.expect(script.contains("$HOME/.adevcontainer/git-credential-adev"), "absolute helper path")
+        try MiniTest.expect(script.contains("chmod 700 \"$HELPER\""), "helper written 0700")
+        try MiniTest.expect(script.contains("#!/bin/sh"), "helper has a shebang")
+        try MiniTest.expect(script.contains("<<'ADEV_HELPER_EOF'") && script.contains("ADEV_HELPER_EOF"), "helper embedded in a quoted heredoc")
+        try MiniTest.expect(!script.contains("credential.helper store"), "store-helper config removed")
+        try MiniTest.expect(script.contains("git credential approve"), "approve loop kept")
+        try MiniTest.expect(script.contains("while IFS= read -r line"))
+    }),
+    ("guestSeedScriptPreservesPreExistingGlobalCredentialHelper", {
+        let fixture = try makeSeedScriptFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let configPath = fixture.home.appendingPathComponent("git-config")
+        try "credential.helper=pre-existing\ncore.askpass=keep\n".write(
+            to: configPath, atomically: true, encoding: .utf8
+        )
+        let result = try FoundationProcessRunner().run(
+            executable: "/bin/sh",
+            arguments: ["-c", GuestGitCredentialSeed.seedScript()],
+            environment: fixture.environment,
+            currentDirectory: nil,
+            stdinData: Data("protocol=https\nhost=preserve.example\nusername=u\npassword=p\n\n".utf8)
+        )
+        try MiniTest.expect(result.succeeded, "seed script configures the helper")
+        let config = try String(contentsOf: configPath, encoding: .utf8)
+        guard let existing = config.range(of: "credential.helper=pre-existing")?.lowerBound,
+              let seeded = config.range(of: "credential.helper=\(fixture.home.path)/.adevcontainer/git-credential-adev")?.lowerBound
+        else {
+            throw MiniTest.Failure(message: "global git config lost or omitted a credential helper")
+        }
+        try MiniTest.expect(existing < seeded, "--add preserves the pre-existing helper order")
+        try MiniTest.expect(config.contains("core.askpass=keep"), "unrelated global config remains")
+    }),
+    ("guestSeedHelperReadsTrailingBlockAndEraseKeepsIt", {
+        let helper = GuestGitCredentialSeed.helperScript()
+        let dir = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let helperPath = dir.appendingPathComponent("git-credential-adev")
+        let storePath = dir.appendingPathComponent(".adevcontainer/git-credentials")
+        try Data(helper.utf8).write(to: helperPath)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helperPath.path)
+        try FileManager.default.createDirectory(
+            at: storePath.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        let stored = "protocol=https\nhost=trailing.example\nusername=u\npassword=p@ss:raw"
+        try stored.write(to: storePath, atomically: true, encoding: .utf8)
+        let get = try runCredentialHelper(
+            helperPath: helperPath.path, action: "get", home: dir.path,
+            input: "protocol=https\nhost=trailing.example\nusername=other\n\n"
+        )
+        try MiniTest.expect(get.succeeded, "trailing block get exits 0")
+        try MiniTest.expect(get.stdoutString.contains("username=other"))
+        try MiniTest.expect(get.stdoutString.contains("password=p@ss:raw"))
+        let erase = try runCredentialHelper(
+            helperPath: helperPath.path, action: "erase", home: dir.path,
+            input: "protocol=https\nhost=trailing.example\n\n"
+        )
+        try MiniTest.expect(erase.succeeded, "erase exits 0")
+        try MiniTest.expectEqual(
+            try String(contentsOf: storePath, encoding: .utf8), stored,
+            "erase leaves stored credentials intact"
+        )
+    })
+]

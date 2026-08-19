@@ -227,8 +227,12 @@ After the container is created and started (and Features have ensured in-contain
 | Scheme | Behavior |
 |--------|----------|
 | **SSH** (`git@host:path`, `ssh://…`) | On volume-mode create, inject `AllowlistedRunArg.ssh` (`container create --ssh`) when host `SSH_AUTH_SOCK` is set and non-empty (if not already in runArgs). If SSH URL and `SSH_AUTH_SOCK` unset/empty → fail structured with hint to start ssh-agent / `ssh-add` / use HTTPS. Later push works while the container retains `--ssh` forward from create. |
-| **HTTPS** (`http://`, `https://`) | On the **host**, attempt credentials via `git credential fill` (protocol/host/path from URL) using host env (works with GCM/osxkeychain without product GCM integration). Optional fallbacks: `ADEVCONTAINER_GIT_TOKEN`; if `gh` available and host is github.com, `gh auth token`. When credentials are available, pass them into **one** in-container `git clone` via GIT_ASKPASS / env one-shot (prefer approach that avoids logging secrets; redact errors), then configure in-container `credential.helper store` and `git credential approve` once so later push/pull work without re-prompt. Store MAY persist on volume/home layer. When fill returns nothing, still attempt an anonymous in-container clone (public repos). If that clone fails → structured error hinting to configure git credential on Mac or use SSH URL. |
+| **HTTPS** (`http://`, `https://`) | On the **host**, attempt credentials via `git credential fill` (protocol/host/path from URL) using host env (works with GCM/osxkeychain without product GCM integration). Optional fallbacks: `ADEVCONTAINER_GIT_TOKEN`; if `gh` available and host is github.com, `gh auth token`. When credentials are available, pass them into **one** in-container `git clone` via GIT_ASKPASS / env one-shot (prefer approach that avoids logging secrets; redact errors), then configure in-container `credential.helper store` and `git credential approve` once so later push/pull work without re-prompt. Store MAY persist on volume/home layer. When fill returns nothing, still attempt an anonymous in-container clone (public repos). If that clone fails → structured error hinting to configure git credential on Mac or use SSH URL. The host-side acquisition (fill with `GIT_TERMINAL_PROMPT=0`, `ADEVCONTAINER_GIT_TOKEN`, `gh auth token` fallback) is the **shared acquisition contract**; clone's in-container store+approve pattern is one use site (create-path seeding uses its own username-agnostic helper — see below). |
 | **Other** | Fail clear or best-effort passthrough with structured errors on failure. |
+
+**Shared acquisition contract — MUST**
+
+The host-side HTTPS acquisition (`git credential fill` with `GIT_TERMINAL_PROMPT=0`, optional `ADEVCONTAINER_GIT_TOKEN`, `gh auth token` fallback) constitutes the shared acquisition contract. Clone's populate MUST keep the in-container `credential.helper store` + `git credential approve` pattern; create-path seeding MUST reuse the same host-side acquisition and persist credentials in-container via the username-agnostic credential helper defined in [core.md](core.md) **Git credential store seeded on create paths** — the seeding mechanism does not use `credential.helper store`. Both use sites MUST redact secrets identically (URL userinfo and credential material must never appear in success JSON, labels, progress lines, or logged errors).
 
 **Clone cleanup on failure (after workspace volume / container create) — MUST**
 
@@ -283,6 +287,18 @@ before returning the structured failure. (Create-path hook runners that already 
 - Given any clone URL
 - When clone runs
 - Then the product does not install/detect GCM inside the container and does not mount host `~/.git-credentials`
+
+#### Scenario: create-path seeding reuses the shared acquisition contract
+
+- Given a bind-mode `up` fresh create (or a `rebuild` replacement create) whose host workspace has an HTTPS remote, and clone's populate already exercised the same host fill and store+approve semantics
+- When create-path seeding acquires credentials for that remote
+- Then seeding uses the same acquisition contract as the clone HTTPS row (fill with `GIT_TERMINAL_PROMPT=0`, `ADEVCONTAINER_GIT_TOKEN` escape hatch, `gh auth token` fallback) and redacts secrets identically
+
+#### Scenario: clone keeps a single populate mechanism (regression)
+
+- Given a volume-mode `clone` create with an HTTPS git URL and host credentials available
+- When clone runs populate
+- Then the existing in-clone store+approve delivers the store outcome before hooks and NO seeding call runs on `clone`
 
 ---
 
@@ -407,9 +423,9 @@ Rationale: volume-mode workspaces need git inside the container for **full clone
 
 ---
 
-### Requirement: Clone applies host-resolved git author identity locally
+### Requirement: Clone applies host-resolved git author identity locally and globally
 
-On `adevcontainer clone`, after the host sparse/shallow **config** fetch succeeds, the CLI MUST resolve git author identity from that config work tree via host git:
+On an initial `adevcontainer clone`, the existing host identity resolution, environment overrides, and TTY confirmation/collection behavior MUST remain unchanged. After the host sparse/shallow **config** fetch succeeds, the CLI MUST resolve git author identity from that config work tree via host git:
 
 - `git -C <configTemp> config --get user.name`
 - `git -C <configTemp> config --get user.email`
@@ -421,7 +437,7 @@ Optional env overrides (when set and non-empty after trim) MUST win per field ov
 - `ADEVCONTAINER_GIT_AUTHOR_NAME`
 - `ADEVCONTAINER_GIT_AUTHOR_EMAIL`
 
-**Before** Features build / image pull / container create, after env overrides are applied, the CLI MUST decide the author identity used later for local config:
+**Before** Features build / image pull / container create, after env overrides are applied, the CLI MUST decide the author identity used later for local and global config:
 
 - When **both** env overrides are set non-empty → use that identity with **no** interactive prompt (even if stdin is a TTY).
 - When stdin is a **TTY** and env did not fully supply both fields:
@@ -436,19 +452,35 @@ After **successful** in-container full clone and `.git` verify:
 - If **both** name and email are non-empty after trim (chosen identity) → the CLI MUST set **local** repo config inside the container (same user as clone when possible):
   - `git -C <workspaceFolder> config --local user.name '…'`
   - `git -C <workspaceFolder> config --local user.email '…'`
+- After both local writes succeed, the CLI MUST write the same values to the resolved connection user's global Git config at `$HOME/.gitconfig` in the created container. The local and global pairs MUST match the chosen identity.
+- The local repository configuration MUST remain present and authoritative for the primary repository; global-only configuration MUST NOT replace it.
+- A failure of the global write MUST be warning-only: clone MUST retain the local behavior, continue the existing create path, run its hooks, and MUST NOT delete the created container or workspace, invoke bring-up recovery or a recovery helper, or prompt solely because the global write failed.
 - If either is missing (non-interactive incomplete only) → the CLI MUST NOT set a partial identity, and MUST emit a single StatusPrinter warning, e.g. that `git user.name/email` was not resolved and should be configured before first commit (host `includeIf`/global or `git config` in container).
 
 This requirement does **not** change `up` bind-path identity behavior.
 
-#### Scenario: Host-resolved author applied as local config
-- Given host git resolves both `user.name` and `user.email` from the config-fetch work tree (e.g. via global or `includeIf` matching the remote)
-- When `adevcontainer clone` completes in-container populate successfully
-- Then the workspace clone has local `user.name` and `user.email` set to those values
+#### Scenario: New clone writes local and global identity before sibling hook
 
-#### Scenario: Missing author field warns and skips local config
+- Given an initial clone creates a fresh workspace volume, resolves the complete identity `Ada Lovelace` / `ada@example.com`, and resolves connection user `alice`
+- When the in-container repository is cloned and verified
+- Then the workspace clone has local `user.name` and `user.email` set to the chosen values, `$HOME/.gitconfig` for `alice` contains the same global values, and a create-path hook that clones a sibling repository as `alice` can inherit that identity when the first hook runs
+
+#### Scenario: Fresh clone does not rely on an existing global config
+
+- Given a new clone container has no prior global author identity and its workspace volume is freshly created
+- When clone completes with a complete chosen identity
+- Then clone writes both local repository keys and both connection-user global keys from the chosen pair without requiring a persisted HOME or a prior global configuration
+
+#### Scenario: The main repository keeps local precedence
+
+- Given the main clone has local `user.name` and `user.email` and the same connection user's global config also contains author values
+- When Git resolves the author identity for the main repository
+- Then the repository-local values are selected by Git, and a repository-local override remains effective even when global values exist
+
+#### Scenario: Incomplete initial clone identity keeps current behavior
 - Given host git resolves `user.name` but not `user.email` (or neither) and stdin is not a TTY
 - When `adevcontainer clone` completes populate successfully
-- Then no partial local author config is written and a single warning is emitted on stderr
+- Then no partial local author config or global author pair is written, a single existing-style warning is emitted on stderr, and TTY prompting and collection remain governed by the current clone behavior
 
 #### Scenario: No invented identity
 - Given no resolvable host author identity and no author env overrides
@@ -458,22 +490,28 @@ This requirement does **not** change `up` bind-path identity behavior.
 #### Scenario: Env author overrides win
 - Given resolved host identity and both `ADEVCONTAINER_GIT_AUTHOR_NAME` and `ADEVCONTAINER_GIT_AUTHOR_EMAIL` set
 - When clone applies local author config
-- Then the local values match the env overrides and no identity prompt is shown even on a TTY
+- Then the local and global values match the env overrides and no identity prompt is shown even on a TTY
 
 #### Scenario: Interactive TTY confirms resolved identity
 - Given both name and email resolved, stdin is a TTY, and author env overrides are not both set
 - When the user accepts the confirm prompt (empty or Y)
-- Then Features/create proceed and local config uses the resolved identity
+- Then Features/create proceed and local and global config use the resolved identity
 
 #### Scenario: Interactive TTY declines and enters custom identity
 - Given both name and email resolved, stdin is a TTY
 - When the user declines and enters a non-empty name and email
-- Then local config uses the entered values (not the originally resolved ones)
+- Then local and global config use the entered values (not the originally resolved ones)
 
 #### Scenario: Interactive incomplete identity collects before Features
 - Given missing name or email, stdin is a TTY
 - When the user supplies both fields
-- Then Features/create run only after collection and local config uses the entered values
+- Then Features/create run only after collection and local and global config use the entered values
+
+#### Scenario: Clone global synchronization failure is non-destructive
+
+- Given clone successfully applies the local identity but writing the connection user's global Git config fails
+- When clone continues toward create-path hooks
+- Then clone emits only the global-write warning, keeps the local identity, runs the configured hook, does not delete the created container or workspace volume, and does not invoke bring-up recovery, create or use a recovery helper, or prompt solely because global synchronization failed
 
 ---
 
@@ -532,4 +570,3 @@ After a successful `clone` recovery retry — an affirmed TTY edit-and-retry, or
 - Then the CLI fails with the normal structured error, does not offer recovery, and does not persist or overlay a config into the workspace
 
 See also: [managed-lifecycle.md](managed-lifecycle.md) **bind up recovery (host config editor)** and **start failure delegates to rebuild**.
-

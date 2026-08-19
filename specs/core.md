@@ -638,6 +638,249 @@ See also: [lifecycle-hooks.md](lifecycle-hooks.md) for hook surface details; [vs
 
 ---
 
+### Requirement: Git credential store seeded on create paths
+
+On the create paths — `up` fresh create (bind mode) and `rebuild` replacement create (bind and volume mode) — the CLI MUST seed the resolved remote connection user's git credential store in the container BEFORE any create-path lifecycle hook (onCreateCommand, updateContentCommand, postCreateCommand, postStartCommand) runs. Seeding MUST run after the create-path ownership steps.
+
+Seeding MUST write a POSIX-sh credential helper script to the connection user's home directory in the container (e.g. `$HOME/.adevcontainer/git-credential-adev`) with mode 0700, owned by the connection user. Seeding MUST configure the helper at `--global` scope via `git config --global --add credential.helper <absolute-path>`; the configuration MUST append and MUST NOT replace pre-existing credential helpers. Seeding MUST add one credential entry per unique (protocol, host, username) triple via `git credential approve`, which routes through the configured helper whose store mode persists the entry. Entries MUST NOT include a path component, so sibling repositories on the same host are covered without knowing their paths. Matching uses the URL scheme (protocol), host, and username; SSH remotes MUST NOT be seeded.
+
+The helper MUST implement `get`, `store`, and `erase`. On `get`, the helper MUST match the persisted store by (protocol, host) IGNORING the queried username, and MUST return the queried username (or the stored username when the query carries none) together with the stored password; when no entry matches, the helper MUST exit 0 with no output so git falls through to remaining helpers, askpass, or prompt. On `store`, the helper MUST persist the entry, deduping by (protocol, host, username), to its own store file (e.g. `$HOME/.adevcontainer/git-credentials`) with mode 0600, owned by the connection user; the helper MAY use git's store file format with percent-encoding or its own simple line format, and persisted values MUST round-trip raw username and password values (including `@` and `:` characters) without corruption. `erase` MUST be a no-op. Secrets MUST NOT be echoed to stdout or stderr outside the credential protocol and MUST NOT appear in argv.
+
+Credentials MUST be acquired on the HOST through the shared acquisition contract declared by **In-container full clone populate (auth by URL scheme)** ([clone.md](clone.md)): `git credential fill` (protocol/host/path from URL) with `GIT_TERMINAL_PROMPT=0`, optional `ADEVCONTAINER_GIT_TOKEN`, and the `gh auth token` fallback — the existing `HostGitCredential.fillHTTPS` path. When fill returns nil for a URL, the CLI MUST skip that URL silently.
+
+Remote discovery MUST be:
+
+- Bind mode (`up` fresh create, `rebuild` bind): the unique fetch remote URLs of the host workspace via `git -C <hostWorkspace> remote -v`.
+- Rebuild volume mode: the stamped `devcontainer.git_url` label of the rebuilt container; a missing or empty label MUST skip seeding silently.
+
+Silent skip — no warning and no failure — MUST apply when host git is missing, when the host workspace is not a git repository or has no remotes, or when fill returns nil. `up` MUST NOT gain a host-git prerequisite.
+
+Seeding failures (for example missing in-container git or an exec failure) MUST soft-fail: a warning on stderr and the create path continues. Seeding MUST NOT delete the container and MUST NOT enter bring-up recovery. Hook failure remains the hook's own failure under existing create-path policy.
+
+Secrets MUST NEVER appear in success JSON, labels, StatusPrinter progress lines, or logged errors; errors MUST redact URL userinfo and credential material (same redaction as the clone flow).
+
+Non-create paths MUST NOT seed: `up` reuse of a running matching container, `up` start-stopped, and bare `start` MUST NOT run seeding.
+
+`clone` is covered-by-design: the product MUST NOT add a second seeding mechanism on `clone`; clone's populate already configures `credential.helper store` + approve before hooks, and regression coverage MUST prove the store outcome is delivered without a seeding call.
+
+#### Scenario: up bind fresh create seeds the store before hooks
+
+- Given a bind-mode `up` fresh create whose host workspace has an HTTPS fetch remote `https://dev.azure.com/plantsuite/PlantSuite/_git/GitOps` and host `git credential fill` returns credentials
+- When the create path runs after start and before create-path hooks
+- Then the CLI acquires credentials on the host and runs an in-container exec as the connection user that writes the credential helper script, configures `credential.helper --add` with its absolute path at `--global` scope, and approves an entry for (https, dev.azure.com, plantsuite) BEFORE the first create-path hook exec
+
+#### Scenario: sibling repositories on the same host are covered
+
+- Given the same bind-mode `up` and a workspace whose remotes include `https://dev.azure.com/plantsuite/PlantSuite/_git/GitOps` and `https://dev.azure.com/plantsuite/PlantSuite/_git/Other`
+- When seeding runs
+- Then one approve entry per unique (protocol, host, username) is applied and the entries contain no path component
+
+#### Scenario: duplicate remote lines dedupe to one entry
+
+- Given `git -C <hostWorkspace> remote -v` lists the same fetch URL more than once
+- When seeding runs
+- Then only one approve entry per (protocol, host, username) is applied
+
+#### Scenario: no host credentials skip silently
+
+- Given a public HTTPS remote and host credential fill returns nothing
+- When seeding runs
+- Then the CLI skips silently (no warning, no failure) and the create path continues
+
+#### Scenario: workspace without a git repo or remotes skips silently
+
+- Given a bind workspace that is not a git repository, or a git repository with no remotes
+- When `up` fresh create runs
+- Then no seeding exec runs and `up` succeeds
+
+#### Scenario: missing host git skips silently
+
+- Given host git is not installed
+- When bind-mode `up` fresh create runs
+- Then no seeding runs, no warning is required, and `up` succeeds without a host-git prerequisite
+
+#### Scenario: rebuild bind seeds from host remotes
+
+- Given a bind-mode `rebuild` replacement create whose host workspace has an HTTPS remote and host fill returns credentials
+- When the rebuild create path runs after start and before create-path hooks
+- Then seeding runs before the first create-path hook exec and the rebuild succeeds
+
+#### Scenario: rebuild volume seeds from the stamped git URL
+
+- Given a volume-mode `rebuild` of a managed container whose `devcontainer.git_url` label is `https://github.com/org/repo`
+- When the rebuild create path runs (no host workspace remote enumeration)
+- Then seeding acquires credentials for that URL and approves an entry before the first create-path hook exec
+
+#### Scenario: rebuild volume without a stamped git URL skips silently
+
+- Given a volume-mode rebuild whose stamped `devcontainer.git_url` label is missing or empty
+- When the rebuild create path runs
+- Then no seeding runs and the rebuild succeeds
+
+#### Scenario: seeding failure soft-fails
+
+- Given a create path whose seeding exec fails (for example in-container git is missing or the exec errors)
+- When seeding runs
+- Then stderr carries a warning, the create path continues through hooks and succeeds absent other failures, the container is NOT deleted, and bring-up recovery is NOT entered
+
+#### Scenario: non-create paths never seed
+
+- Given a matching running bind-mode container, a stopped bind-mode container, or a bare `start` target
+- When `up` reuses the running container, `up` starts the stopped one, or `start` runs
+- Then no seeding exec runs
+
+#### Scenario: secrets are redacted on the seeding error path
+
+- Given host fill returned username/password for a remote and the seeding exec fails
+- When the warning or error is emitted
+- Then the warning or error contains no credential material and no URL userinfo
+
+#### Scenario: SSH remotes are not seeded
+
+- Given a bind workspace whose remotes are SSH URLs (`git@host:path`)
+- When `up` fresh create runs
+- Then no seeding exec runs
+
+#### Scenario: seeding runs as the resolved connection user
+
+- Given a create path whose resolved connection user is `alice` (non-root) or `root`
+- When the seeding exec runs
+- Then the exec runs as that user and the store lands in that user's home directory
+
+#### Scenario: S15: username-agnostic get serves URL-forced usernames
+
+- Given a seeded store entry for (https, dev.azure.com, X) and a create-path hook whose URL forces username Y (X ≠ Y) on the same protocol and host
+- When the hook's git performs credential lookup in the non-interactive hook environment
+- Then the helper's get returns the stored password with the QUERIED username Y and the hook's git authenticates
+
+#### Scenario: S16: unseeded hosts receive no credentials
+
+- Given a seeded store containing entries only for one (protocol, host, username) triple
+- When git queries the helper for a host absent from the store
+- Then the helper exits 0 with no output, no credentials are returned, and git falls through to remaining helpers, askpass, or prompt
+
+#### Scenario: S17: helper and store files are private and secrets stay out of argv and logs
+
+- Given a create path that seeded the helper
+- When seeding completes and the hook environment runs
+- Then the helper script (0700) and the store file (0600) are owned by the connection user, are not world-readable, and no password material appears in argv, success JSON, labels, progress lines, or logged errors
+
+#### Scenario: S18: pre-existing global credential helpers are preserved
+
+- Given a container whose global git config already configures one or more credential helpers
+- When seeding appends its helper via `git config --global --add credential.helper <absolute-path>`
+- Then the pre-existing helpers remain configured and are consulted before the seeded helper
+
+---
+
+### Requirement: Rebuild rehydrates global author identity from the existing workspace repository
+
+On an ordinary `adevcontainer rebuild` of an existing managed workspace, in both bind and volume modes, the CLI MUST capture `user.name` and `user.email` from the existing workspace repository's local configuration before replacement begins and before the old container is deleted. Bind mode MAY read the host workspace, but volume mode MUST read the existing workspace inside the old container, or another source that remains valid before old-container deletion, and MUST NOT use a host GitClient path. The captured local pair is the sole source of truth for rebuild synchronization. The CLI MUST use only a complete local pair for synchronization and MUST NOT use global configuration, labels, credential files, or invented values as the source. After the replacement container starts, the CLI MUST complete the existing ownership preparation, credential-forwarding work, and `[DIAG]` work before writing the captured pair to the new container's resolved connection user's global Git config at that user's current `$HOME/.gitconfig`; this write MUST occur before any create-path lifecycle hook runs. Existing global values in the replacement container MUST be updated to match the workspace-local pair. Rebuild MUST NOT rewrite or remove the workspace repository's local identity as part of this synchronization.
+
+#### Scenario: Bind rebuild rehydrates local identity before hooks
+
+- Given an existing bind-mode workspace repository has complete local identity `Ada Lovelace` / `ada@example.com`, and the replacement resolves connection user `alice`
+- When ordinary rebuild captures the identity, deletes the old container, creates and starts the replacement, and reaches the create path
+- Then capture completed before old-container deletion, the replacement user's `$HOME/.gitconfig` contains the workspace-local pair before the first create-path hook runs, and a hook cloning a sibling repository as `alice` inherits that pair
+
+#### Scenario: Volume rebuild rehydrates local identity before hooks
+
+- Given an existing volume-mode workspace repository has complete local identity `Ada Lovelace` / `ada@example.com` in its retained workspace volume
+- When ordinary rebuild reads that repository from the old container before deleting it and starts the replacement
+- Then the replacement connection user's global Git config contains the same pair before the first create-path hook runs, without using a host GitClient path, re-cloning, or changing the retained workspace volume
+
+#### Scenario: Rebuild global synchronization follows existing pre-hook work
+
+- Given a replacement container has started and the existing ownership, credential-forwarding, and `[DIAG]` work has run
+- When rebuild synchronizes a complete captured local identity
+- Then the global write occurs after those existing steps and before the first create-path lifecycle hook
+
+#### Scenario: Rebuild writes to the replacement HOME
+
+- Given the old container's global Git config is absent or has different values and the replacement container has a different, non-persisted HOME
+- When rebuild synchronizes a complete local identity
+- Then the replacement connection user's current `$HOME/.gitconfig` is written with the local pair, and synchronization does not depend on copying or retaining the old container HOME
+
+#### Scenario: Manual local changes are reflected on the next rebuild
+
+- Given a user manually changes both local author keys in an existing bind or volume workspace repository after its previous container was created
+- When the user runs the next ordinary rebuild
+- Then the new container's connection-user global author keys match the manually changed local pair rather than the previous global values
+
+#### Scenario: Missing or incomplete local identity skips rebuild synchronization
+
+- Given an existing workspace repository has a missing or incomplete local `user.name`/`user.email` pair and the replacement container has existing global author values
+- When ordinary rebuild runs
+- Then rebuild does not prompt, invent, partially synchronize, or alter the existing global values, and it emits at most the existing-style warning while continuing with the normal rebuild path
+
+#### Scenario: Rebuild global synchronization failure is warning-and-continue
+
+- Given rebuild reads a complete local pair but writing the replacement connection user's global Git config fails
+- When rebuild reaches the pre-hook identity step
+- Then rebuild emits only the global-write warning and continues through the existing replacement flow and create-path hooks, does not delete the new container or workspace volume, and does not invoke bring-up recovery, create or use a recovery helper, or prompt solely because global synchronization failed; the ordinary old-container deletion remains the only expected rebuild deletion
+
+---
+
+### Requirement: Author identity scope and credential non-regression
+
+Author synchronization MUST affect only the resolved connection user in the created or replacement container. It MUST NOT modify global Git configuration for other container users, any host Git configuration, labels, or credential files. This change MUST NOT alter credential-helper behavior, current credential seeding, current `[DIAG]` work, or existing clone/rebuild hook failure cleanup and recovery semantics. Explicit populate, author-write, hook-failure, recovery, and successful-hook regressions MUST preserve those existing outcomes. `up` fresh-create is outside this change and MUST NOT gain this author synchronization behavior.
+
+#### Scenario: Connection-user isolation and host config remain untouched
+
+- Given a complete local identity, a replacement connection user `alice`, another container user `bob`, and host Git configuration containing different author values
+- When clone or rebuild synchronizes the identity
+- Then only `alice`'s container global Git config changes, `bob`'s global config and the host Git config remain unchanged, and no label or credential file contains the author identity
+
+#### Scenario: Credential forwarding remains separate
+
+- Given a clone or rebuild also exercises the existing HTTPS credential acquisition/seeding path and its current `[DIAG]` instrumentation
+- When author identity synchronization runs
+- Then credential-helper configuration, credential seeding, `[DIAG]` output/work, and their existing ordering remain unchanged, and on rebuild the author global write follows those existing steps and precedes the first create-path hook
+
+#### Scenario: Clone populate failure retains cleanup and recovery
+
+- Given clone has created its container and workspace volume but in-container populate or `.git` verification fails
+- When clone returns the structured failure
+- Then clone deletes the created container and workspace volume, does not report success, and retains the existing eligibility and behavior of clone recovery
+
+#### Scenario: Clone author-write failure does not trigger unrelated cleanup
+
+- Given clone populate succeeds, a local or global author write reports failure, and a create-path hook is configured to succeed
+- When clone continues after the author-write warning
+- Then clone does not delete the container or workspace volume, does not enter recovery solely for the author failure, and the hook runs
+
+#### Scenario: Clone hook failure after identity work retains cleanup
+
+- Given clone has completed its identity work and a create-path hook fails
+- When clone handles the hook failure
+- Then clone applies the existing container and workspace-volume cleanup and existing recovery eligibility for hook failure, without a new author-specific cleanup path
+
+#### Scenario: Clone author failure does not bypass later cleanup
+
+- Given clone reports a local or global author-write warning and a later create-path hook fails
+- When clone handles the hook failure
+- Then clone still applies the existing container and workspace-volume cleanup and existing recovery eligibility, without treating the earlier author warning as a reason to skip cleanup
+
+#### Scenario: Clone successful hooks continue after identity work
+
+- Given clone has a complete identity and one or more create-path hooks that succeed
+- When clone completes local and global identity writes
+- Then the existing create-path hooks run in their existing order and clone succeeds without cleanup
+
+#### Scenario: Rebuild hook failure retains mode-specific cleanup and recovery
+
+- Given rebuild has synchronized identity in the replacement and a create-path hook fails
+- When rebuild handles the hook failure
+- Then the failed replacement container is handled by the existing rebuild hook-failure cleanup, bind-mode recovery/retention and volume-mode recovery/retained-workspace semantics remain unchanged, and identity synchronization does not invoke a separate recovery path or delete/repopulate the retained workspace volume
+
+#### Scenario: Rebuild successful hooks continue after identity work
+
+- Given rebuild has captured a complete local identity, synchronized it successfully, and its create-path hooks succeed
+- When the replacement create path completes
+- Then the existing hooks run in their existing order and rebuild succeeds without deleting the replacement container or retained workspace
+
+---
+
 ### Requirement: AppleContainerRuntime boundary
 
 All interaction with Apple `container` MUST go through a single **AppleContainerRuntime** module. No other module MAY shell out to `container`. The runtime MUST invoke the binary as a subprocess, prefer/require machine-readable JSON for parsed results, and MUST NOT scrape human TTY tables for control flow. Non-zero exits MUST map to structured CLI errors.
@@ -704,4 +947,3 @@ Fixtures MUST be valid for their capability (no hard-error props such as Compose
 - Then each fixture is admitted for its capability without unexpected unsupported-property errors
 
 See also: [runargs-host.md](runargs-host.md), [features.md](features.md), and [lifecycle-hooks.md](lifecycle-hooks.md) for domain-specific fixture requirements that reference this inventory.
-

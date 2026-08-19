@@ -30,6 +30,23 @@ nonisolated(unsafe) let doctorTests: [(String, () throws -> Void)] = [
 ]
 
 nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
+    ("upFreshCreateDoesNotSynchronizeAuthorIdentity", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        let mock = LifecycleUpSupport.mockFreshCreate(resolved: resolved)
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            credentials: SeedMockCredential()
+        )
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.last?.contains("git config --global --replace-all user.name") == true },
+            "up fresh-create does not synchronize author identity"
+        )
+    }),
     ("upCreateReturnsJSONShape", {
         let workspace = try TestRepo.makeTempWorkspace(configJSON: """
         { "name": "Up Test", "image": "alpine:3.20" }
@@ -425,6 +442,308 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(
             !mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("chown") == true },
             "root connection user runs no parent fix-up"
+        )
+    }),
+    ("upFreshCreateSeedsCredentialsAfterOwnershipBeforeHooks", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "vscode",
+          "postCreateCommand": "echo postCreateCustom"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
+            { args in
+                if args.first == "create" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("\(resolved.containerName)\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "start" || args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        // Deterministic host git enumeration (real git would miss the mock remotes).
+        let hostRunner = RecordingHostProcessRunner()
+        hostRunner.handler = { call in
+            if call.arguments == ["-C", workspace.path, "remote", "-v"] {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: Data("origin\thttps://github.com/wcgomes/repo.git (fetch)\n".utf8),
+                    stderr: Data()
+                )
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restore = RecordingHostProcessRunner.install(hostRunner)
+        defer { restore() }
+        let creds = SeedMockCredential()
+        creds.results["https://github.com/wcgomes/repo.git"] = .success(
+            GitHTTPSCredentials(username: "x-access-token", password: "ghp_secret")
+        )
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            credentials: creds
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        let calls = mock.calls.map(\.arguments)
+        let createIdx = calls.firstIndex { $0.first == "create" }!
+        let startIdx = calls.firstIndex { $0.first == "start" }!
+        let chownIdx = calls.firstIndex { $0.first == "exec" && $0.last?.contains("chown") == true }!
+        let seedIdx = calls.firstIndex { $0.first == "exec" && $0.last?.contains("credential.helper") == true }!
+        let hookIdx = calls.firstIndex { $0.first == "exec" && $0.last?.contains("postCreateCustom") == true }!
+        try MiniTest.expect(createIdx < startIdx, "create before start")
+        try MiniTest.expect(startIdx < chownIdx, "ownership after start")
+        try MiniTest.expect(chownIdx < seedIdx, "seeding after ownership block")
+        try MiniTest.expect(seedIdx < hookIdx, "seeding before first hook exec")
+        let seedCall = mock.calls[seedIdx]
+        let seedArgs = seedCall.arguments
+        try MiniTest.expect(seedArgs.contains("-u") && seedArgs.contains("vscode"), "seeds as connection user")
+        try MiniTest.expectEqual(
+            String(data: seedCall.stdinData ?? Data(), encoding: .utf8) ?? "",
+            "protocol=https\nhost=github.com\nusername=x-access-token\npassword=ghp_secret\n\n"
+        )
+        try MiniTest.expect(!seedArgs.contains(where: { $0.contains("ghp_secret") }))
+        try MiniTest.expect(seedCall.environment?.values.contains("ghp_secret") != true)
+        let script = seedArgs.last ?? ""
+        try MiniTest.expect(script.contains("git config --global --add credential.helper"))
+        try MiniTest.expect(!script.contains("ghp_secret"), "secrets never in the exec command")
+        try MiniTest.expect(!script.contains("github.com"), "no host/path in the script")
+    }),
+    ("upFreshCreateSeedingFailureWarnsAndContinues", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "vscode",
+          "postCreateCommand": "echo postCreateCustom"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
+            { args in
+                if args.first == "create" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("\(resolved.containerName)\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "exec" {
+                    let script = args.last ?? ""
+                    if script.contains("git-credential-adev") {
+                        return ProcessResult(
+                            exitCode: 1,
+                            stdout: Data(),
+                            stderr: Data("fatal: unable to reach 'https://github.com/wcgomes/repo.git': remote error\n".utf8)
+                        )
+                    }
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let hostRunner = RecordingHostProcessRunner()
+        hostRunner.handler = { call in
+            if call.arguments == ["-C", workspace.path, "remote", "-v"] {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: Data("origin\thttps://github.com/wcgomes/repo.git (fetch)\n".utf8),
+                    stderr: Data()
+                )
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restore = RecordingHostProcessRunner.install(hostRunner)
+        defer { restore() }
+        let creds = SeedMockCredential()
+        creds.results["https://github.com/wcgomes/repo.git"] = .success(
+            GitHTTPSCredentials(username: "x-access-token", password: "ghp_secret")
+        )
+        var warnings: [String] = []
+        let prevWarning = StatusPrinter.onWarning
+        StatusPrinter.onWarning = { warnings.append($0) }
+        defer { StatusPrinter.onWarning = prevWarning }
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            credentials: creds
+        )
+        try MiniTest.expectEqual(result.outcome, "success", "seeding failure is soft-fail")
+        try MiniTest.expectEqual(warnings.count, 1, "exactly one seeding warning")
+        try MiniTest.expect(!warnings[0].contains("ghp_secret"), "warning redacts credential material")
+        try MiniTest.expect(!warnings[0].contains("x-access-token"), "warning redacts username")
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("postCreateCustom") == true },
+            "hooks still run after seeding failure")
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" }, "seeding failure never deletes")
+    }),
+    ("upFreshCreateNonRepoWorkspaceSkipsSeedingSilently", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "remoteUser": "vscode",
+          "postCreateCommand": "echo postCreateCustom"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
+            { args in
+                if args.first == "create" {
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: Data("\(resolved.containerName)\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "start" || args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        // Host git answers: workspace is not a repository (non-zero, no remotes).
+        let hostRunner = RecordingHostProcessRunner()
+        hostRunner.handler = { call in
+            if call.arguments == ["-C", workspace.path, "remote", "-v"] {
+                return ProcessResult(exitCode: 128, stdout: Data(), stderr: Data("fatal: not a git repository".utf8))
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restore = RecordingHostProcessRunner.install(hostRunner)
+        defer { restore() }
+        let creds = SeedMockCredential()
+        creds.defaultResult = .success(GitHTTPSCredentials(username: "u", password: "p"))
+        var warnings: [String] = []
+        let prevWarning = StatusPrinter.onWarning
+        StatusPrinter.onWarning = { warnings.append($0) }
+        defer { StatusPrinter.onWarning = prevWarning }
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            credentials: creds
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(creds.fillCalls.isEmpty, "non-repo workspace never fills")
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("git config --global --add credential.helper") == true },
+            "no seeding exec for a non-repo workspace"
+        )
+        try MiniTest.expect(warnings.isEmpty, "silent skip emits no warning")
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("postCreateCustom") == true },
+            "hooks still run")
+    }),
+    ("upReuseRunningSeedsNothing", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName,
+            state: "running",
+            labels: resolved.labels
+        )
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let creds = SeedMockCredential()
+        creds.defaultResult = .success(GitHTTPSCredentials(username: "u", password: "p"))
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            credentials: creds
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(creds.fillCalls.isEmpty, "reuse must not fill")
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("credential.helper") == true },
+            "reuse must not run a seeding exec"
+        )
+    }),
+    ("upStartStoppedSeedsNothing", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName,
+            state: "stopped",
+            labels: resolved.labels
+        )
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "start" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let creds = SeedMockCredential()
+        creds.defaultResult = .success(GitHTTPSCredentials(username: "u", password: "p"))
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            credentials: creds
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(creds.fillCalls.isEmpty, "start-stopped must not fill")
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("credential.helper") == true },
+            "start-stopped must not run a seeding exec"
         )
     })
 ]
@@ -2473,7 +2792,11 @@ nonisolated(unsafe) let phase4CommandTests: [(String, () throws -> Void)] = [
         let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
         var events: [String] = []
         let host = RecordingHostProcessRunner()
-        host.handler = { _ in
+        host.handler = { call in
+            // Non-repo temp workspace: the credential-seeding remote probe reports no remotes.
+            if call.arguments.contains("remote") {
+                return ProcessResult(exitCode: 128, stdout: Data(), stderr: Data("fatal: not a git repository".utf8))
+            }
             events.append("initialize")
             return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
         }
@@ -2504,7 +2827,7 @@ nonisolated(unsafe) let phase4CommandTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expectEqual(result.outcome, "success")
         try MiniTest.expectEqual(events, ["initialize", "create"])
-        try MiniTest.expectEqual(host.calls.count, 1)
+        try MiniTest.expectEqual(host.calls.filter { $0.arguments.contains("echo init-host") }.count, 1)
         try MiniTest.expectEqual(
             (host.calls[0].currentDirectory as NSString?)?.standardizingPath,
             (ws.path as NSString).standardizingPath

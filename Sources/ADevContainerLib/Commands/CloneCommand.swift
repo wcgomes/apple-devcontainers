@@ -907,9 +907,22 @@ public enum CloneCommand {
             workdir: workspaceFolder,
             env: [:]
         )
-        if nameResult?.succeeded != true || emailResult?.succeeded != true {
+        guard nameResult?.succeeded == true, emailResult?.succeeded == true else {
             StatusPrinter.warning(
                 "failed to set local git user.name/email in container; configure before first commit"
+            )
+            return
+        }
+        do {
+            try GitAuthorIdentitySync().write(
+                identity: identity,
+                containerId: containerId,
+                connectionUser: remoteUser,
+                runtime: runtime
+            )
+        } catch {
+            StatusPrinter.warning(
+                "failed to set global git user.name/email in container; configure before first commit"
             )
         }
     }
