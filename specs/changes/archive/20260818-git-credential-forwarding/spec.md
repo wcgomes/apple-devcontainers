@@ -1,12 +1,12 @@
 # Change Spec: git-credential-forwarding
 
-Status: Active. Branch: `patch/git-credential-forwarding`. Applies to: all releases.
+Status: Archived. Branch: `patch/git-credential-forwarding`. Applies to: all releases.
 
 > **Amendment 1 (2026-08-18):** username-agnostic container-side credential helper — decision B. The container-side seeding mechanism changes from configuring `credential.helper store` to writing a POSIX-sh credential helper (get/store/erase) into the container and appending it via `git config --global --add credential.helper <absolute-path>`; the ADDED requirement text below is amended accordingly, scenarios S15–S18 are added, and clone's own store+approve mechanism is unchanged.
 
 ## ADDED Requirements
 
-Merge target: [specs/core.md](../../core.md).
+Merge target: [specs/core.md](../../../core.md).
 
 ### Requirement: Git credential store seeded on create paths
 
@@ -16,7 +16,7 @@ Seeding MUST write a POSIX-sh credential helper script to the connection user's 
 
 The helper MUST implement `get`, `store`, and `erase`. On `get`, the helper MUST match the persisted store by (protocol, host) IGNORING the queried username, and MUST return the queried username (or the stored username when the query carries none) together with the stored password; when no entry matches, the helper MUST exit 0 with no output so git falls through to remaining helpers, askpass, or prompt. On `store`, the helper MUST persist the entry, deduping by (protocol, host, username), to its own store file (e.g. `$HOME/.adevcontainer/git-credentials`) with mode 0600, owned by the connection user; the helper MAY use git's store file format with percent-encoding or its own simple line format, and persisted values MUST round-trip raw username and password values (including `@` and `:` characters) without corruption. `erase` MUST be a no-op. Secrets MUST NOT be echoed to stdout or stderr outside the credential protocol and MUST NOT appear in argv.
 
-Credentials MUST be acquired on the HOST through the shared acquisition contract declared by **In-container full clone populate (auth by URL scheme)** ([specs/clone.md](../../clone.md)): `git credential fill` (protocol/host/path from URL) with `GIT_TERMINAL_PROMPT=0`, optional `ADEVCONTAINER_GIT_TOKEN`, and the `gh auth token` fallback — the existing `HostGitCredential.fillHTTPS` path. When fill returns nil for a URL, the CLI MUST skip that URL silently.
+Credentials MUST be acquired on the HOST through the shared acquisition contract declared by **In-container full clone populate (auth by URL scheme)** ([specs/clone.md](../../../clone.md)): `git credential fill` (protocol/host/path from URL) with `GIT_TERMINAL_PROMPT=0`, optional `ADEVCONTAINER_GIT_TOKEN`, and the `gh auth token` fallback — the existing `HostGitCredential.fillHTTPS` path. When fill returns nil for a URL, the CLI MUST skip that URL silently.
 
 Remote discovery MUST be:
 
@@ -145,7 +145,7 @@ Non-create paths MUST NOT seed: `up` reuse of a running matching container, `up`
 
 ## MODIFIED Requirements
 
-Merge target: [specs/clone.md](../../clone.md).
+Merge target: [specs/clone.md](../../../clone.md).
 
 ### Requirement: In-container full clone populate (auth by URL scheme)
 
@@ -170,7 +170,7 @@ After the container is created and started (and Features have ensured in-contain
 
 **Shared acquisition contract — MUST**
 
-The host-side HTTPS acquisition (`git credential fill` with `GIT_TERMINAL_PROMPT=0`, optional `ADEVCONTAINER_GIT_TOKEN`, `gh auth token` fallback) constitutes the shared acquisition contract. Clone's populate MUST keep the in-container `credential.helper store` + `git credential approve` pattern; create-path seeding MUST reuse the same host-side acquisition and persist credentials in-container via the username-agnostic credential helper defined in [core.md](../../core.md) **Git credential store seeded on create paths** (Amendment 1) — the seeding mechanism no longer uses `credential.helper store`. Both use sites MUST redact secrets identically (URL userinfo and credential material must never appear in success JSON, labels, progress lines, or logged errors).
+The host-side HTTPS acquisition (`git credential fill` with `GIT_TERMINAL_PROMPT=0`, optional `ADEVCONTAINER_GIT_TOKEN`, `gh auth token` fallback) constitutes the shared acquisition contract. Clone's populate MUST keep the in-container `credential.helper store` + `git credential approve` pattern; create-path seeding MUST reuse the same host-side acquisition and persist credentials in-container via the username-agnostic credential helper defined in [core.md](../../../core.md) **Git credential store seeded on create paths** (Amendment 1) — the seeding mechanism no longer uses `credential.helper store`. Both use sites MUST redact secrets identically (URL userinfo and credential material must never appear in success JSON, labels, progress lines, or logged errors).
 
 **Clone cleanup on failure (after workspace volume / container create) — MUST**
 

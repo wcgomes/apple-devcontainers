@@ -1,6 +1,6 @@
 # Tasks: global-git-author-identity
 
-Spec ref: `specs/changes/global-git-author-identity/`. Test-first ordering: write each failing test, confirm it fails, then implement. The suite of record is `swift run adevcontainerTests`; integration suites retain their existing runtime skips. Current source anchors are `RebuildCommand.swift:423-438` for the Phase B/old-container deletion boundary, `:635-698` for ownership and credential work, `:700-777` for `[DIAG]`, `:843-851` for `runCreatePathThroughWaitFor`, and `CloneCommand.swift:487-559` plus `:880-915` for populate, author application, and hooks. Do not edit the active `git-credential-forwarding` bundle, wiki, or unrelated source/test artifacts during this planning task.
+Spec ref: `specs/changes/archive/20260818-global-git-author-identity/`. Test-first ordering: write each failing test, confirm it fails, then implement. The suite of record is `swift run adevcontainerTests`; integration suites retain their existing runtime skips. Current source anchors are `RebuildCommand.swift:423-438` for the Phase B/old-container deletion boundary, `:635-698` for ownership and credential work, `:700-777` for `[DIAG]`, `:843-851` for `runCreatePathThroughWaitFor`, and `CloneCommand.swift:487-559` plus `:880-915` for populate, author application, and hooks. Do not edit the `git-credential-forwarding` bundle, wiki, or unrelated source/test artifacts during this planning task.
 
 ## 1. Contract tests — fail first
 
@@ -55,7 +55,7 @@ Spec ref: `specs/changes/global-git-author-identity/`. Test-first ordering: writ
 - [ ] 5.2 Keep explicit rebuild tests for `rebuildHookFailureDeletesNewContainer`, `rebuildBindPostCreateNonTTYOffersHostPathRecovery`, `rebuildBindTTYRecoveryEditsHostAndRetries`, `rebuildVolumeHookFailureRetainsWorkspaceAndRecovery`, and `rebuildHookOrderOnNewContainer`, with identity sync enabled, so failed-hook cleanup/recovery and successful hook continuation are directly asserted rather than inferred from an ordering review (path: `Tests/adevcontainerTests/RebuildCommandPhaseTests.swift`)
 - [ ] 5.3 Confirm the active rebuild credential-seeding scenarios still pass, including bind host-remote discovery, volume stamped-URL discovery, silent missing-URL skip, seed-before-hook order, and soft-fail/no-recovery behavior; keep current `[DIAG]` assertions intact and assert identity sync follows those steps (path: `Tests/adevcontainerTests/RebuildCommandPhaseTests.swift`)
 - [x] 5.4 Audit `up` fresh-create and recovery tests for accidental author-sync expectations; retain the explicit out-of-scope boundary and existing ownership/credential/[DIAG] recovery behavior (path: `Tests/adevcontainerTests/UpCommandRecoveryTests.swift`)
-- [ ] 5.5 Verify only `proposal.md`, `spec.md`, and `tasks.md` in this bundle changed during this planning task, no active change bundle or wiki file was modified, and the bundle contains no unresolved clarification marker (path: `specs/changes/global-git-author-identity/`)
+- [ ] 5.5 Verify only `proposal.md`, `spec.md`, and `tasks.md` in this bundle changed during this planning task, no active change bundle or wiki file was modified, and the bundle contains no unresolved clarification marker (path: `specs/changes/archive/20260818-global-git-author-identity/`)
 
 ## Checkpoint
 
@@ -65,7 +65,7 @@ Spec ref: `specs/changes/global-git-author-identity/`. Test-first ordering: writ
 
 - [x] 6.1 Run `swift build` and resolve all compile or warning regressions caused by the implementation (path: `Package.swift`)
 - [x] 6.2 Run `swift run adevcontainerTests` as the suite of record; confirm every spec scenario maps to a passing test and existing integration/runtime skips remain expected (path: `Tests/adevcontainerTests/main.swift`)
-- [ ] 6.3 Review the final implementation diff for exact pre-hook ordering, local-first semantics, warning-only/no-recovery behavior, connection-user isolation, untouched credential/[DIAG] behavior, explicit clone/rebuild cleanup and recovery regressions, and no edits outside the new spec bundle during this planning task (path: `specs/changes/global-git-author-identity/`)
+- [ ] 6.3 Review the final implementation diff for exact pre-hook ordering, local-first semantics, warning-only/no-recovery behavior, connection-user isolation, untouched credential/[DIAG] behavior, explicit clone/rebuild cleanup and recovery regressions, and no edits outside the new spec bundle during this planning task (path: `specs/changes/archive/20260818-global-git-author-identity/`)
 
 ## Checkpoint
 
