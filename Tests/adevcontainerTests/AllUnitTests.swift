@@ -5653,16 +5653,10 @@ nonisolated(unsafe) let guestGitCredentialSeedTests: [(String, () throws -> Void
             input: "protocol=https\nhost=h.example\nusername=u\npassword=p\n\n"
         )
         try MiniTest.expect(store.succeeded)
-        let helperMode = try FoundationProcessRunner().run(
-            executable: "/usr/bin/stat", arguments: ["-c", "%a", helperPath.path],
-            environment: nil, currentDirectory: nil
-        )
-        try MiniTest.expectEqual(helperMode.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines), "700", "helper script is 0700")
-        let storeMode = try FoundationProcessRunner().run(
-            executable: "/usr/bin/stat", arguments: ["-c", "%a", storePath.path],
-            environment: nil, currentDirectory: nil
-        )
-        try MiniTest.expectEqual(storeMode.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines), "600", "store file is 0600")
+        let helperAttrs = try FileManager.default.attributesOfItem(atPath: helperPath.path)
+        try MiniTest.expectEqual((helperAttrs[.posixPermissions] as? NSNumber)?.intValue, 0o700, "helper script is 0700")
+        let storeAttrs = try FileManager.default.attributesOfItem(atPath: storePath.path)
+        try MiniTest.expectEqual((storeAttrs[.posixPermissions] as? NSNumber)?.intValue, 0o600, "store file is 0600")
     }),
     ("guestSeedHelperKeepsSecretsOutOfArgvAndLogs", {
         let helper = GuestGitCredentialSeed.helperScript()
