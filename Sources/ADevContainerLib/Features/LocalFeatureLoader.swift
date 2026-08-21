@@ -2,12 +2,17 @@ import Foundation
 
 /// Load a local-path Dev Container feature package into the feature cache destination.
 ///
-/// Resolves `./…`, `../…`, absolute `/…`, and `file://…` refs relative to the workspace root
-/// (absolute and file URLs use their own path). Requires a directory containing
-/// `devcontainer-feature.json` and `install.sh`.
+/// Resolves `./…` / `../…` against the config directory, then `workspace/.devcontainer/`
+/// if distinct, then the workspace root (absolute and `file://` use their own path).
+/// Requires a directory containing `devcontainer-feature.json` and `install.sh`.
 public enum LocalFeatureLoader {
-    /// Resolve `reference` to an absolute filesystem path under `workspacePath` rules.
-    public static func resolveSourcePath(reference: String, workspacePath: String) throws -> String {
+    /// Resolve `reference` to an absolute filesystem path under workspace / config-dir rules.
+    public static func resolveSourcePath(
+        reference: String,
+        workspacePath: String,
+        configDirectory: String? = nil,
+        fileManager: FileManager = .default
+    ) throws -> String {
         let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw CLIError(
@@ -34,9 +39,19 @@ public enum LocalFeatureLoader {
             return (trimmed as NSString).standardizingPath
         }
 
-        // Relative to workspace root (./…, ../…, or bare relative).
-        let joined = (workspacePath as NSString).appendingPathComponent(trimmed)
-        return (joined as NSString).standardizingPath
+        let candidates = relativeCandidatePaths(
+            reference: trimmed,
+            workspacePath: workspacePath,
+            configDirectory: configDirectory
+        )
+        if let match = candidates.first(where: { isValidPackage(at: $0, fileManager: fileManager) }) {
+            return match
+        }
+        throw unresolvedRelativeError(
+            reference: reference,
+            candidates: candidates,
+            fileManager: fileManager
+        )
     }
 
     /// Validate local package layout and copy into `destinationDirectory`.
@@ -44,9 +59,15 @@ public enum LocalFeatureLoader {
         reference: String,
         workspacePath: String,
         destinationDirectory: String,
+        configDirectory: String? = nil,
         fileManager: FileManager = .default
     ) throws -> FetchedFeaturePackage {
-        let source = try resolveSourcePath(reference: reference, workspacePath: workspacePath)
+        let source = try resolveSourcePath(
+            reference: reference,
+            workspacePath: workspacePath,
+            configDirectory: configDirectory,
+            fileManager: fileManager
+        )
 
         var isDir: ObjCBool = false
         guard fileManager.fileExists(atPath: source, isDirectory: &isDir), isDir.boolValue else {
@@ -54,7 +75,7 @@ public enum LocalFeatureLoader {
                 code: CLIErrorCode.featureFetch,
                 property: "features",
                 message: "Local feature '\(reference)' path does not exist or is not a directory: \(source)",
-                hint: "Ensure the path is relative to the workspace root and points at a feature package directory"
+                hint: unresolvedHint
             )
         }
 
@@ -93,5 +114,91 @@ public enum LocalFeatureLoader {
         try? fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destInstall)
 
         return FetchedFeaturePackage(reference: reference, directoryPath: destinationDirectory)
+    }
+
+    private static let unresolvedHint =
+        "Place the package (devcontainer-feature.json and install.sh) relative to the workspace root or the .devcontainer / config directory"
+
+    private static func relativeCandidatePaths(
+        reference: String,
+        workspacePath: String,
+        configDirectory: String?
+    ) -> [String] {
+        let workspace = (workspacePath as NSString).standardizingPath
+        let workspaceDevcontainer = (workspace as NSString).appendingPathComponent(".devcontainer")
+        let trimmedConfig = configDirectory?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let configDir = trimmedConfig.isEmpty
+            ? workspaceDevcontainer
+            : (trimmedConfig as NSString).standardizingPath
+
+        var bases: [String] = []
+        func appendUnique(_ path: String) {
+            let standardized = (path as NSString).standardizingPath
+            if !bases.contains(standardized) {
+                bases.append(standardized)
+            }
+        }
+        appendUnique(configDir)
+        appendUnique(workspaceDevcontainer)
+        appendUnique(workspace)
+
+        var paths: [String] = []
+        for base in bases {
+            let joined = (base as NSString).appendingPathComponent(reference)
+            let standardized = (joined as NSString).standardizingPath
+            if !paths.contains(standardized) {
+                paths.append(standardized)
+            }
+        }
+        return paths
+    }
+
+    private static func isValidPackage(at path: String, fileManager: FileManager) -> Bool {
+        var isDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
+            return false
+        }
+        let metaPath = (path as NSString).appendingPathComponent("devcontainer-feature.json")
+        let installPath = (path as NSString).appendingPathComponent("install.sh")
+        return fileManager.fileExists(atPath: metaPath) && fileManager.fileExists(atPath: installPath)
+    }
+
+    private static func unresolvedRelativeError(
+        reference: String,
+        candidates: [String],
+        fileManager: FileManager
+    ) -> CLIError {
+        for path in candidates {
+            var isDir: ObjCBool = false
+            guard fileManager.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
+                continue
+            }
+            let metaPath = (path as NSString).appendingPathComponent("devcontainer-feature.json")
+            if !fileManager.fileExists(atPath: metaPath) {
+                return CLIError(
+                    code: CLIErrorCode.featureMetadata,
+                    property: "features",
+                    message: "Local feature '\(reference)' is missing devcontainer-feature.json at \(path)",
+                    hint: unresolvedHint
+                )
+            }
+            let installPath = (path as NSString).appendingPathComponent("install.sh")
+            if !fileManager.fileExists(atPath: installPath) {
+                return CLIError(
+                    code: CLIErrorCode.featureFetch,
+                    property: "features",
+                    message: "Local feature '\(reference)' is missing install.sh at \(path)",
+                    hint: unresolvedHint
+                )
+            }
+        }
+        let listed = candidates.joined(separator: ", ")
+        return CLIError(
+            code: CLIErrorCode.featureFetch,
+            property: "features",
+            message: "Local feature '\(reference)' path does not exist or is not a directory"
+                + (listed.isEmpty ? "" : ": \(listed)"),
+            hint: unresolvedHint
+        )
     }
 }

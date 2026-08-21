@@ -99,10 +99,10 @@ public struct HostGitClient: GitClient {
                 ],
                 redactCredentialMaterial: url
             )
-            // Limit checkout to config candidates (nested + root).
+            // Cone-mode includes the whole `.devcontainer/` tree (features/<id>) plus root files.
             try runGit(
                 git,
-                ["-C", directory, "sparse-checkout", "set", ".devcontainer", ".devcontainer.json"]
+                ["-C", directory, "sparse-checkout", "set", "--cone", ".devcontainer"]
             )
         } catch {
             // Clean partial and fall back to shallow clone for correctness.
