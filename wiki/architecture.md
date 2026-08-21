@@ -149,7 +149,7 @@ Effective user for `exec`, lifecycle hooks, and VS Code attach defaults (not alw
 
 ## Features
 
-Shipped under `Sources/ADevContainerLib/Features/`. On `up`/`clone`/`rebuild` when `features` is non-empty (after clone git-ensure; volume-mode rebuild: OCI only):
+Shipped under `Sources/ADevContainerLib/Features/`. On `up`/`clone`/`rebuild` when `features` is non-empty (after clone git-ensure). Relative local refs resolve from config-dir / `.devcontainer` / workspace root. Volume `rebuild` stages guest `.devcontainer` when any admitted ref is local-path: [Features runner](conventions/cli-runtime-boundary.md#features-runner).
 
 1. Admit **OCI** and **local path** refs; **warn-skip** docker-* markers (omit from admitted list) and warn-strip metadata `privileged` / `securityOpt` (not applied).
 2. One-time consent for `build.rosetta=false` when needed (CI: `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`).

@@ -548,6 +548,12 @@ nonisolated(unsafe) let gitClientTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(urlIdx > dd)
         // No PAT / token flags
         try MiniTest.expect(!first.contains(where: { $0.lowercased().contains("token") || $0.lowercased().contains("pat") }))
+        try MiniTest.expect(runner.calls.count >= 2, "sparse-checkout follows clone")
+        let sparse = runner.calls[1].arguments
+        try MiniTest.expect(sparse.contains("sparse-checkout"))
+        try MiniTest.expect(sparse.contains("set"))
+        try MiniTest.expect(sparse.contains("--cone"))
+        try MiniTest.expect(sparse.contains(".devcontainer"))
     }),
     ("fullCloneInvokesWithoutCredentialFlags", {
         let runner = MockProcessRunner()
@@ -973,6 +979,34 @@ enum CloneGitFeatureTestSupport {
             try? FileManager.default.removeItem(atPath: cache)
         }
     }
+
+    /// Live DefaultFeatureFetcher (no mock). Local git package must be on disk so inject is skipped.
+    static func installLiveOverrides() -> () -> Void {
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clone-live-feat-\(UUID().uuidString)", isDirectory: true).path
+        let previousFetcher = CloneCommand.featuresFetcherOverride
+        let previousCache = CloneCommand.featuresCacheRootOverride
+        let previousEnsure = CloneCommand.ensureNativeArmBuildOverride
+        CloneCommand.featuresFetcherOverride = nil
+        CloneCommand.featuresCacheRootOverride = cache
+        CloneCommand.ensureNativeArmBuildOverride = { /* no-op in tests */ }
+        return {
+            CloneCommand.featuresFetcherOverride = previousFetcher
+            CloneCommand.featuresCacheRootOverride = previousCache
+            CloneCommand.ensureNativeArmBuildOverride = previousEnsure
+            try? FileManager.default.removeItem(atPath: cache)
+        }
+    }
+
+    static func copyFixtureFeature(_ name: String, to directory: String) throws {
+        let parent = (directory as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(atPath: parent, withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: directory) {
+            try FileManager.default.removeItem(atPath: directory)
+        }
+        let src = TestRepo.root().appendingPathComponent("Tests/Fixtures/features-sample/\(name)").path
+        try FileManager.default.copyItem(atPath: src, toPath: directory)
+    }
 }
 
 // MARK: - Clone command orchestration
@@ -1027,6 +1061,114 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(help.contains("[--json]"), "clone help lists --json")
         try MiniTest.expect(help.contains("machine-readable"), "clone help describes JSON mode")
         try MiniTest.expect(help.contains("--resume"), "clone help describes resume")
+    }),
+    ("cloneWithLocalFeaturesDefaultFetcher", {
+        let restore = CloneGitFeatureTestSupport.installLiveOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.fetchConfigHandler = { _, dir in
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let dc = (dir as NSString).appendingPathComponent(".devcontainer")
+            let features = (dc as NSString).appendingPathComponent("features")
+            try FileManager.default.createDirectory(atPath: features, withIntermediateDirectories: true)
+            try """
+            {
+              "name": "CloneLocalFeat",
+              "image": "alpine:3.20",
+              "features": {
+                "./features/kubesecret": {},
+                "./features/git": {}
+              }
+            }
+            """.write(
+                toFile: (dc as NSString).appendingPathComponent("devcontainer.json"),
+                atomically: true,
+                encoding: .utf8
+            )
+            try CloneGitFeatureTestSupport.copyFixtureFeature(
+                "sample-a",
+                to: (features as NSString).appendingPathComponent("kubesecret")
+            )
+            try CloneGitFeatureTestSupport.copyFixtureFeature(
+                "git",
+                to: (features as NSString).appendingPathComponent("git")
+            )
+        }
+        let mock = MockProcessRunner()
+        mock.handlers = CloneRuntimeMock.handlers()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try CloneCommand.run(
+            options: CloneOptions(gitURL: "https://github.com/org/clone-local-feat.git", skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "build" }, "live fetcher must build")
+        if let buildCall = mock.calls.first(where: { $0.arguments.first == "build" }),
+           let fIdx = buildCall.arguments.firstIndex(of: "-f"),
+           fIdx + 1 < buildCall.arguments.count {
+            let dockerfile = try String(contentsOfFile: buildCall.arguments[fIdx + 1], encoding: .utf8)
+            try MiniTest.expect(
+                dockerfile.contains("./features/kubesecret"),
+                "Dockerfile must install the local-path feature (not OCI)"
+            )
+            try MiniTest.expect(!dockerfile.contains("hostname"))
+        }
+        try MiniTest.expect(CloneCommand.featuresFetcherOverride == nil)
+    }),
+    ("cloneMissingLocalFeatureFailsStructuredNotOCI", {
+        let restore = CloneGitFeatureTestSupport.installLiveOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.fetchConfigHandler = { _, dir in
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let dc = (dir as NSString).appendingPathComponent(".devcontainer")
+            let features = (dc as NSString).appendingPathComponent("features")
+            try FileManager.default.createDirectory(atPath: features, withIntermediateDirectories: true)
+            try """
+            {
+              "image": "alpine:3.20",
+              "features": {
+                "./features/kubesecret": {},
+                "./features/git": {}
+              }
+            }
+            """.write(
+                toFile: (dc as NSString).appendingPathComponent("devcontainer.json"),
+                atomically: true,
+                encoding: .utf8
+            )
+            try CloneGitFeatureTestSupport.copyFixtureFeature(
+                "git",
+                to: (features as NSString).appendingPathComponent("git")
+            )
+        }
+        let mock = MockProcessRunner()
+        mock.handlers = CloneRuntimeMock.handlers()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(gitURL: "https://github.com/org/clone-missing-feat.git", skipPull: true),
+                runtime: runtime,
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:]
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(
+                err.code == CLIErrorCode.featureFetch || err.code == CLIErrorCode.featureMetadata
+            )
+            try MiniTest.expect(err.message.contains("./features/kubesecret"))
+            let lower = err.message.lowercased()
+            try MiniTest.expect(!lower.contains("hostname"), "must not treat local path as OCI host")
+            try MiniTest.expect(!lower.contains("network"), "must not fail as OCI/network")
+            try MiniTest.expect(!lower.contains("registry host"), "must not parse local path as OCI")
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "build" })
     }),
     ("cloneMissingGitNoContainer", {
         let git = MockGitClient()

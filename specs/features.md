@@ -13,7 +13,7 @@ The CLI MUST admit a top-level `features` property when it is an **object** (map
 **Supported reference forms (v1):**
 
 1. **OCI** feature references resolvable over HTTP(S) registry APIs, including optional tag/version suffix, e.g. `ghcr.io/devcontainers/features/node:1`.
-2. **Local path** feature keys: relative (`./…`, `../…`), absolute (`/…`), and `file://…` URIs. Relative paths resolve against the **workspace root**. The path MUST be a directory containing `devcontainer-feature.json` and `install.sh`; the package is copied into the feature cache. Missing directory / metadata / install script → structured error at fetch/load (not a silent skip).
+2. **Local path** feature keys: relative (`./…`, `../…`), absolute (`/…`), and `file://…` URIs. Relative paths resolve, in order, until a directory containing both `devcontainer-feature.json` and `install.sh` exists: (a) the directory containing the config file + the ref (official; typically `.devcontainer/`); (b) `workspace/.devcontainer/` + the ref when that path is distinct; (c) workspace root + the ref. Absolute and `file://` use their own path only. The package is copied into the feature cache. Missing directory / metadata / install script → structured `featureFetch`/`featureMetadata` error naming the ref (not OCI/network, not a silent skip). The error hint MUST mention the workspace root and the `.devcontainer` / config directory.
 
 Options object MAY supply feature options (e.g. `"version": "lts"`).
 
@@ -47,10 +47,25 @@ Omitted `features` MUST NOT fail validation solely for absence.
 - When config is validated
 - Then admission succeeds and the resolved model carries the local path ref and options
 
-#### Scenario: Local path missing package fails at load
-- Given an admitted local path whose directory (or `install.sh` / `devcontainer-feature.json`) is missing
+#### Scenario: Local path under .devcontainer subdirectory loads
+- Given `"features": { "./features/kubesecret": {} }` and a valid package at `<workspace>/.devcontainer/features/kubesecret`
 - When features are fetched/loaded
-- Then the CLI fails with a structured error naming the feature ref
+- Then the package loads from that directory (not OCI)
+
+#### Scenario: Local path beside the config file loads
+- Given `"features": { "./kubesecret": {} }` and a valid package at `<workspace>/.devcontainer/kubesecret` (beside `devcontainer.json`)
+- When features are fetched/loaded
+- Then the package loads from that directory (not OCI)
+
+#### Scenario: Local path workspace-root fixture still loads
+- Given `"features": { "./.devcontainer/features/sample-a": { "greeting": "local" } }` and a valid package at `<workspace>/.devcontainer/features/sample-a`
+- When features are fetched/loaded
+- Then the package loads via the workspace-root candidate
+
+#### Scenario: Local path missing package fails at load
+- Given an admitted local path whose directory (or `install.sh` / `devcontainer-feature.json`) is missing at every resolve candidate
+- When features are fetched/loaded
+- Then the CLI fails with a structured `featureFetch`/`featureMetadata` error naming the feature ref (never OCI/network); the hint mentions the workspace root and the `.devcontainer` / config directory
 
 #### Scenario: features must be an object
 - Given `"features": ["ghcr.io/devcontainers/features/node:1"]`
@@ -132,7 +147,7 @@ Options from the config options object MUST be applied with standard Features op
 
 The default fetcher MUST:
 
-1. **Local path** refs → resolve relative to workspace root (or absolute/`file://`), validate package layout, and **copy** into the feature cache destination.
+1. **Local path** refs → resolve relative candidates in order until a directory containing both `devcontainer-feature.json` and `install.sh` exists: config-file parent, then `workspace/.devcontainer` if distinct, then workspace root; absolute/`file://` use their own path only. Validate package layout and **copy** into the feature cache destination. A miss is a structured `featureFetch`/`featureMetadata` error naming the ref, not an OCI/network failure.
 2. **OCI** refs → fetch feature content as **OCI artifacts** (feature layers/files), not as a plain application container image assumed runnable, via **HTTPS and/or registry API** logic **embedded in the product** (library code under `Sources/ADevContainerLib/`).
 
 The product MUST NOT:
@@ -142,6 +157,8 @@ The product MUST NOT:
 - Invoke Node or `@devcontainers/cli` to fetch features
 
 Fetch/load failures (missing local dir, missing install.sh/metadata, network, 401/403/404, malformed manifest) MUST surface as structured errors naming the feature ref and failure class. Unit tests MUST mock the OCI fetch boundary so the default suite needs no network; local path tests use fixtures under `Tests/Fixtures/features-sample/`.
+
+`clone` MUST sparse-checkout the whole `.devcontainer/` tree (including `features/<id>`) and load local-path refs via `DefaultFeatureFetcher` (workspace = checkout, configDirectory = config parent) — never raw `OCIFeatureClient`. Bind `rebuild` MUST load local-path refs via `DefaultFeatureFetcher` from the stamped host workspace. Volume `rebuild` MUST NOT use raw `OCIFeatureClient` when any admitted feature is a local path: stage the guest `.devcontainer/` (and root `.devcontainer.json` when that is the config) onto a host temp via `exec tar cf -` (not `container cp`) before Features/delete, point `DefaultFeatureFetcher` at that staged root + config directory, and remove the temp. Staging or load failure is a structured pre-delete error (old container kept). Mixed OCI + local in one config: local via the loader, OCI via the embedded client.
 
 #### Scenario: Fetch invokes embedded registry client not container pull for artifacts
 - Given an admitted OCI feature ref
@@ -157,6 +174,31 @@ Fetch/load failures (missing local dir, missing install.sh/metadata, network, 40
 - Given unit tests for the Features runner
 - When the suite runs offline
 - Then fetch is satisfied by a mock/fake and tests do not require live registry access
+
+#### Scenario: Clone loads local-path Features from sparse checkout
+- Given a repo with `"features": { "./features/kubesecret": {} }` and a valid package at `.devcontainer/features/kubesecret`
+- When `clone` fetches config and runs Features
+- Then the sparse checkout materializes the `.devcontainer/` tree (including `features/kubesecret`) and the package loads via `DefaultFeatureFetcher` (not OCI)
+
+#### Scenario: Clone missing local-path package fails structured not OCI
+- Given a clone config with a local-path feature whose package is absent from the checkout
+- When Features load
+- Then the CLI fails with a structured `featureFetch`/`featureMetadata` error naming the ref (never OCI/network)
+
+#### Scenario: Bind rebuild loads local-path Features from stamped workspace
+- Given a bind-mode container whose stamped host workspace has `"features": { "./features/kubesecret": {} }` and a valid package at `.devcontainer/features/kubesecret`
+- When `rebuild` runs Features
+- Then the package loads via `DefaultFeatureFetcher` from the stamped workspace (not OCI)
+
+#### Scenario: Volume rebuild loads local-path Features from staged guest .devcontainer
+- Given a volume-mode container whose guest workspace has `"features": { "./features/kubesecret": {} }` and a valid package at `.devcontainer/features/kubesecret`
+- When `rebuild` runs Features
+- Then the guest `.devcontainer/` tree is staged to a host temp via `exec tar` (not `container cp`) before Features/delete, `DefaultFeatureFetcher` loads the package from that staged root (not raw `OCIFeatureClient`), and the temp is removed
+
+#### Scenario: Volume rebuild missing local-path package fails before delete
+- Given a volume-mode rebuild whose admitted features include a local-path ref whose package is missing after staging
+- When Features load
+- Then the CLI fails with a structured `featureFetch`/`featureMetadata` error naming the ref (never OCI/network) and the old container is not deleted
 
 ---
 

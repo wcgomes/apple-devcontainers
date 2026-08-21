@@ -358,7 +358,10 @@ public enum CloneCommand {
                 try? runtime.pullImage(resolved.config.image, platform: platform)
             }
             let fetcher: any FeatureFetching = featuresFetcherOverride
-                ?? DefaultFeatureFetcher(workspacePath: checkoutDir)
+                ?? DefaultFeatureFetcher(
+                    workspacePath: checkoutDir,
+                    configDirectory: (resolved.configPath as NSString).deletingLastPathComponent
+                )
             let cacheRoot = featuresCacheRootOverride ?? FeatureCache.defaultRoot()
             let deps = FeaturesRunner.Dependencies(
                 fetcher: fetcher,

@@ -357,6 +357,42 @@ func makeGuestDevcontainerArchive(files: [String: String]) throws -> Data {
     return result.stdout
 }
 
+/// Live DefaultFeatureFetcher (no mock) plus cache/ensure overrides.
+func withRebuildLiveFeatureFetcher(_ body: () throws -> Void) throws {
+    let cache = FileManager.default.temporaryDirectory
+        .appendingPathComponent("feat-rebuild-live-\(UUID().uuidString)", isDirectory: true).path
+    defer { try? FileManager.default.removeItem(atPath: cache) }
+    let prevFetcher = RebuildCommand.featuresFetcherOverride
+    let prevCache = RebuildCommand.featuresCacheRootOverride
+    let prevEnsure = RebuildCommand.ensureNativeArmBuildOverride
+    RebuildCommand.featuresFetcherOverride = nil
+    RebuildCommand.featuresCacheRootOverride = cache
+    RebuildCommand.ensureNativeArmBuildOverride = { /* no-op: already native in tests */ }
+    defer {
+        RebuildCommand.featuresFetcherOverride = prevFetcher
+        RebuildCommand.featuresCacheRootOverride = prevCache
+        RebuildCommand.ensureNativeArmBuildOverride = prevEnsure
+    }
+    try body()
+}
+
+func rebuildFixtureFeatureFiles(_ name: String, destName: String? = nil) throws -> [String: String] {
+    let src = TestRepo.root().appendingPathComponent("Tests/Fixtures/features-sample/\(name)")
+    let dest = destName ?? name
+    let meta = try String(
+        contentsOfFile: src.appendingPathComponent("devcontainer-feature.json").path,
+        encoding: .utf8
+    )
+    let install = try String(
+        contentsOfFile: src.appendingPathComponent("install.sh").path,
+        encoding: .utf8
+    )
+    return [
+        "features/\(dest)/devcontainer-feature.json": meta,
+        "features/\(dest)/install.sh": install
+    ]
+}
+
 /// Feature overrides for volume-mode scenarios: volume mode injects the git feature,
 /// so map the git ref to the sample fixture and no-op the native-arm rosetta probe.
 func withRebuildVolumeOverrides(_ body: () throws -> Void) throws {
@@ -777,6 +813,150 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(buildTag, derivedTag, "build tag == test-computed tag (id=\(orderedFeature.metadata.id), myTag=\(derivedTag))")
         let creates = s.mock.calls.filter { $0.arguments.first == "create" }
         try MiniTest.expect(creates[0].arguments.contains(derivedTag), "create uses derived image tag")
+    }),
+
+    ("rebuildBindLocalFeaturesDefaultFetcher", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "features": {
+            "./features/kubesecret": {}
+          }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let featuresRoot = ws.appendingPathComponent(".devcontainer/features", isDirectory: true)
+        try FileManager.default.createDirectory(at: featuresRoot, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            atPath: TestRepo.root()
+                .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path,
+            toPath: featuresRoot.appendingPathComponent("kubesecret").path
+        )
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "adev-mybase-abc123def456",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.install()
+        try withRebuildLiveFeatureFetcher {
+            let result = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+            try MiniTest.expectEqual(result.outcome, "success")
+            try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "build" }, "live fetcher must build")
+            if let buildCall = s.mock.calls.first(where: { $0.arguments.first == "build" }),
+               let fIdx = buildCall.arguments.firstIndex(of: "-f"),
+               fIdx + 1 < buildCall.arguments.count {
+                let dockerfile = try String(contentsOfFile: buildCall.arguments[fIdx + 1], encoding: .utf8)
+                try MiniTest.expect(
+                    dockerfile.contains("./features/kubesecret"),
+                    "bind rebuild must install the local-path feature via DefaultFeatureFetcher"
+                )
+            }
+        }
+        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "delete" })
+    }),
+
+    ("rebuildVolumeLocalFeaturesDefaultFetcher", {
+        let s = RebuildScenario()
+        var labels = s.volumeLabels()
+        labels[ContainerIdentity.labelLocalFolder] = "volume://adev-repo-ws"
+        let info = RebuildScenario.container(id: "vol-old", labels: labels)
+        s.containers = [info]
+        s.volumes = ["adev-repo-ws"]
+        s.volumeConfigText = """
+        {
+          "image": "alpine:3.20",
+          "features": {
+            "./features/kubesecret": {},
+            "./features/git": {}
+          }
+        }
+        """
+        var archiveFiles = [
+            "devcontainer.json": s.volumeConfigText
+        ]
+        for (key, value) in try rebuildFixtureFeatureFiles("sample-a", destName: "kubesecret") {
+            archiveFiles[key] = value
+        }
+        for (key, value) in try rebuildFixtureFeatureFiles("git") {
+            archiveFiles[key] = value
+        }
+        s.guestDevcontainerTar = try makeGuestDevcontainerArchive(files: archiveFiles)
+        s.install()
+        try withRebuildLiveFeatureFetcher {
+            let result = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+            try MiniTest.expectEqual(result.outcome, "success")
+            try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "build" }, "live fetcher must build")
+            if let buildCall = s.mock.calls.first(where: { $0.arguments.first == "build" }),
+               let fIdx = buildCall.arguments.firstIndex(of: "-f"),
+               fIdx + 1 < buildCall.arguments.count {
+                let dockerfile = try String(contentsOfFile: buildCall.arguments[fIdx + 1], encoding: .utf8)
+                try MiniTest.expect(
+                    dockerfile.contains("./features/kubesecret"),
+                    "volume rebuild must install the staged local-path feature (not OCI)"
+                )
+            }
+        }
+        try MiniTest.expect(
+            s.mock.calls.contains { $0.arguments.contains("tar") && $0.arguments.contains("cf") },
+            "volume rebuild must stage guest .devcontainer via exec tar"
+        )
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "cp" }, "must not container cp")
+        let tarIdx = s.mock.calls.firstIndex { $0.arguments.contains("tar") && $0.arguments.contains("cf") }
+        let deleteIdx = s.mock.calls.firstIndex { $0.arguments.first == "delete" && $0.arguments.last == "vol-old" }
+        if let tarIdx, let deleteIdx {
+            try MiniTest.expect(tarIdx < deleteIdx, "stage guest tree before old-container delete")
+        }
+        let buildIdx = s.mock.calls.firstIndex { $0.arguments.first == "build" }
+        if let buildIdx, let deleteIdx {
+            try MiniTest.expect(buildIdx < deleteIdx, "Features build before old-container delete")
+        }
+    }),
+
+    ("rebuildVolumeMissingLocalFeatureFailsBeforeDelete", {
+        let s = RebuildScenario()
+        var labels = s.volumeLabels()
+        labels[ContainerIdentity.labelLocalFolder] = "volume://adev-repo-ws"
+        let info = RebuildScenario.container(id: "vol-old", labels: labels)
+        s.containers = [info]
+        s.volumes = ["adev-repo-ws"]
+        s.volumeConfigText = """
+        {
+          "image": "alpine:3.20",
+          "features": {
+            "./features/kubesecret": {},
+            "./features/git": {}
+          }
+        }
+        """
+        var archiveFiles = [
+            "devcontainer.json": s.volumeConfigText
+        ]
+        for (key, value) in try rebuildFixtureFeatureFiles("git") {
+            archiveFiles[key] = value
+        }
+        s.guestDevcontainerTar = try makeGuestDevcontainerArchive(files: archiveFiles)
+        s.install()
+        try MiniTest.expectThrows({
+            try withRebuildLiveFeatureFetcher {
+                _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+            }
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(
+                err.code == CLIErrorCode.featureFetch || err.code == CLIErrorCode.featureMetadata
+            )
+            try MiniTest.expect(err.message.contains("./features/kubesecret"))
+            let lower = err.message.lowercased()
+            try MiniTest.expect(!lower.contains("hostname"), "must not treat local path as OCI host")
+            try MiniTest.expect(!lower.contains("network"), "must not fail as OCI/network")
+            try MiniTest.expect(!lower.contains("registry host"), "must not parse local path as OCI")
+        }
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "delete" }, "old container kept")
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "create" })
     }),
 
     ("rebuildSkipPullSuppressesPull", {

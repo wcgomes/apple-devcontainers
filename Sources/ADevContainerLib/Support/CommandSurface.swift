@@ -458,10 +458,10 @@ public enum CommandSurface {
             container after create-path hooks (not gated on the flag).
             --json: machine-readable success output (up-shape; volume mode may add
             gitUrl/workspaceVolume). Failures exit non-zero with a structured error.
-            v1 limitation: volume-mode rebuild fetches OCI features only — the host
-            fetcher (DefaultFeatureFetcher) and local-path feature refs inside the
-            workspace volume are unsupported and fail cleanly before the old container
-            is deleted.
+            Local-path Features (`./…`) load on bind rebuild from the stamped host
+            workspace, and on volume rebuild by staging the guest `.devcontainer/`
+            tree (`exec tar`, not `container cp`) before Features/delete. Missing
+            local packages fail structured before the old container is deleted.
             Not full extension parity.
             """
         default:

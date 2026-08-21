@@ -3349,6 +3349,61 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expectEqual(meta.id, "sample-a")
     }),
+    ("featureLocalLoadConfigDirSubdirectory", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let featuresRoot = ws.appendingPathComponent(".devcontainer/features", isDirectory: true)
+        try FileManager.default.createDirectory(at: featuresRoot, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            atPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"),
+            toPath: featuresRoot.appendingPathComponent("kubesecret").path
+        )
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-local-subdir-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: cache) }
+        let dest = cache.appendingPathComponent("k").path
+        let ref = "./features/kubesecret"
+        let fetcher = DefaultFeatureFetcher(workspacePath: ws.path)
+        let pkg = try fetcher.fetch(reference: ref, destinationDirectory: dest)
+        try MiniTest.expectEqual(pkg.reference, ref)
+        try MiniTest.expect(FileManager.default.fileExists(atPath: pkg.metadataPath))
+        try MiniTest.expect(FileManager.default.fileExists(atPath: pkg.installScriptPath))
+        let resolved = try LocalFeatureLoader.resolveSourcePath(
+            reference: ref,
+            workspacePath: ws.path
+        )
+        try MiniTest.expectEqual(
+            (resolved as NSString).standardizingPath,
+            (featuresRoot.appendingPathComponent("kubesecret").path as NSString).standardizingPath
+        )
+    }),
+    ("featureLocalLoadBesideConfig", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let beside = ws.appendingPathComponent(".devcontainer/kubesecret")
+        try FileManager.default.copyItem(
+            atPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"),
+            toPath: beside.path
+        )
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-local-beside-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: cache) }
+        let dest = cache.appendingPathComponent("k").path
+        let ref = "./kubesecret"
+        let fetcher = DefaultFeatureFetcher(workspacePath: ws.path)
+        let pkg = try fetcher.fetch(reference: ref, destinationDirectory: dest)
+        try MiniTest.expectEqual(pkg.reference, ref)
+        try MiniTest.expect(FileManager.default.fileExists(atPath: pkg.metadataPath))
+        try MiniTest.expect(FileManager.default.fileExists(atPath: pkg.installScriptPath))
+        let resolved = try LocalFeatureLoader.resolveSourcePath(
+            reference: ref,
+            workspacePath: ws.path
+        )
+        try MiniTest.expectEqual(
+            (resolved as NSString).standardizingPath,
+            (beside.path as NSString).standardizingPath
+        )
+    }),
     ("featureLocalLoadMissingPathErrors", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
         defer { try? FileManager.default.removeItem(at: ws) }
@@ -3364,9 +3419,38 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         }) { error in
             let err = error as! CLIError
             try MiniTest.expectEqual(err.code, CLIErrorCode.featureFetch)
+            try MiniTest.expect(err.message.contains("does-not-exist"))
             try MiniTest.expect(err.message.lowercased().contains("does not exist")
-                || err.message.lowercased().contains("not a directory")
-                || err.message.contains("does-not-exist"))
+                || err.message.lowercased().contains("not a directory"))
+            try MiniTest.expect(!(err.message.lowercased().contains("hostname")
+                || err.message.lowercased().contains("network")))
+            let hint = (err.hint ?? "").lowercased()
+            try MiniTest.expect(hint.contains("workspace root"))
+            try MiniTest.expect(hint.contains(".devcontainer") || hint.contains("config directory"))
+        }
+    }),
+    ("featureLocalLoadMissingConfigDirRefErrorsWithoutOCI", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-local-miss-cfg-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: cache) }
+        let fetcher = DefaultFeatureFetcher(workspacePath: ws.path)
+        try MiniTest.expectThrows({
+            _ = try fetcher.fetch(
+                reference: "./features/kubesecret",
+                destinationDirectory: cache.appendingPathComponent("m").path
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.featureFetch)
+            try MiniTest.expect(err.message.contains("./features/kubesecret"))
+            try MiniTest.expect(!(err.message.lowercased().contains("hostname")
+                || err.message.lowercased().contains("oci")
+                || err.message.lowercased().contains("network")))
+            let hint = (err.hint ?? "").lowercased()
+            try MiniTest.expect(hint.contains("workspace root"))
+            try MiniTest.expect(hint.contains(".devcontainer") || hint.contains("config directory"))
         }
     }),
     ("featureLocalLoadMissingInstallShErrors", {

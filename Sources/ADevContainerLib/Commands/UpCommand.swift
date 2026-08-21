@@ -344,7 +344,10 @@ public enum UpCommand {
                 try? runtime.pullImage(resolved.config.image, platform: platform)
             }
             let fetcher: any FeatureFetching = featuresFetcherOverride
-                ?? DefaultFeatureFetcher(workspacePath: resolved.workspacePath)
+                ?? DefaultFeatureFetcher(
+                    workspacePath: resolved.workspacePath,
+                    configDirectory: (resolved.configPath as NSString).deletingLastPathComponent
+                )
             let cacheRoot = featuresCacheRootOverride ?? FeatureCache.defaultRoot()
             let deps = FeaturesRunner.Dependencies(
                 fetcher: fetcher,

@@ -390,6 +390,14 @@ nonisolated(unsafe) let rebuildCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(help.contains("--vscode"), "help lists --vscode")
         try MiniTest.expect(help.contains("force"), "help describes forced rebuild")
         try MiniTest.expect(help.contains("volume"), "help describes volume preservation")
+        try MiniTest.expect(
+            !help.lowercased().contains("unsupported"),
+            "volume rebuild help must not claim local-path Features are unsupported"
+        )
+        try MiniTest.expect(
+            help.contains("Local-path") || help.contains("local-path"),
+            "rebuild help describes local-path Features on bind and volume"
+        )
     }),
 
     ("commandHelpUnknownSubcommandNil", {

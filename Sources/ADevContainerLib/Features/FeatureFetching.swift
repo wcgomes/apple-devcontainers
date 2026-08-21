@@ -29,13 +29,16 @@ public protocol FeatureFetching: Sendable {
 /// Default fetcher: local path packages from the workspace, OCI via embedded registry client.
 public struct DefaultFeatureFetcher: FeatureFetching, Sendable {
     public var workspacePath: String
+    public var configDirectory: String?
     public var ociClient: OCIFeatureClient
 
     public init(
         workspacePath: String,
+        configDirectory: String? = nil,
         ociClient: OCIFeatureClient = OCIFeatureClient()
     ) {
         self.workspacePath = workspacePath
+        self.configDirectory = configDirectory
         self.ociClient = ociClient
     }
 
@@ -44,7 +47,8 @@ public struct DefaultFeatureFetcher: FeatureFetching, Sendable {
             return try LocalFeatureLoader.load(
                 reference: reference,
                 workspacePath: workspacePath,
-                destinationDirectory: destinationDirectory
+                destinationDirectory: destinationDirectory,
+                configDirectory: configDirectory
             )
         }
         return try ociClient.fetch(reference: reference, destinationDirectory: destinationDirectory)

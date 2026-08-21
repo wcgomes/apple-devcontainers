@@ -4408,6 +4408,52 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
             }
         }
     }),
+    ("upWithLocalFeaturesConfigDirRef", {
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-up-cfgdir-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "features": {
+            "./features/sample-a": { "greeting": "local" }
+          }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+
+        let featuresRoot = ws.appendingPathComponent(".devcontainer/features", isDirectory: true)
+        try FileManager.default.createDirectory(at: featuresRoot, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            atPath: TestRepo.root()
+                .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path,
+            toPath: featuresRoot.appendingPathComponent("sample-a").path
+        )
+
+        let previousFetcher = UpCommand.featuresFetcherOverride
+        let previousCache = UpCommand.featuresCacheRootOverride
+        let previousEnsure = UpCommand.ensureNativeArmBuildOverride
+        defer {
+            UpCommand.featuresFetcherOverride = previousFetcher
+            UpCommand.featuresCacheRootOverride = previousCache
+            UpCommand.ensureNativeArmBuildOverride = previousEnsure
+        }
+        UpCommand.featuresFetcherOverride = nil
+        UpCommand.featuresCacheRootOverride = cache
+        UpCommand.ensureNativeArmBuildOverride = { /* no-op */ }
+
+        let mock = MockProcessRunner()
+        mock.handlers = [FeaturesUpTestSupport.mockHandler()]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "build" })
+    }),
     ("upReusesSameWorkspaceSameNameOccupant", {
         let workspace = try TestRepo.makeTempWorkspace(configJSON: """
         { "name": "My App", "image": "alpine:3.20" }

@@ -355,10 +355,54 @@ public enum RebuildCommand {
                 StatusPrinter.status("Pulling image", item: effectiveConfig.image)
                 try? runtime.pullImage(effectiveConfig.image, platform: platform)
             }
-            let fetcher: any FeatureFetching = RebuildCommand.featuresFetcherOverride
-                ?? (isVolumeMode
-                    ? OCIFeatureClient()
-                    : DefaultFeatureFetcher(workspacePath: stampedLocalFolder(labels)))
+            let bindConfigFile = labels[ContainerIdentity.labelConfigFile]?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let bindConfigDirectory = bindConfigFile.isEmpty
+                ? nil
+                : (bindConfigFile as NSString).deletingLastPathComponent
+            var stagedLocalRoot: URL?
+            defer {
+                if let stagedLocalRoot {
+                    removeStagedInitializeRoot(stagedLocalRoot, fileManager: fileManager)
+                }
+            }
+            let fetcher: any FeatureFetching
+            if let override = RebuildCommand.featuresFetcherOverride {
+                fetcher = override
+            } else if isVolumeMode,
+                      effectiveConfig.features.contains(where: { FeatureRef.isLocalPath($0.reference) })
+            {
+                guard let volumeRead else {
+                    throw CLIError(
+                        code: CLIErrorCode.featureFetch,
+                        property: "features",
+                        message: "Volume-mode rebuild cannot load local-path features without a readable guest config",
+                        hint: "The old container was not deleted"
+                    )
+                }
+                let staged = try stageGuestInitializeWorkspace(
+                    containerId: selected.id,
+                    raw: volumeRead.raw,
+                    runtime: runtime,
+                    fileManager: fileManager,
+                    errorCode: CLIErrorCode.featureFetch,
+                    property: "features",
+                    purpose: "local-path features",
+                    tempPrefix: "adev-feat"
+                )
+                stagedLocalRoot = staged
+                fetcher = DefaultFeatureFetcher(
+                    workspacePath: staged.path,
+                    configDirectory: stagedFeatureConfigDirectory(staged: staged, raw: volumeRead.raw)
+                )
+            } else if isVolumeMode {
+                fetcher = OCIFeatureClient()
+            } else {
+                fetcher = DefaultFeatureFetcher(
+                    workspacePath: stampedLocalFolder(labels),
+                    configDirectory: bindConfigDirectory
+                )
+            }
             let cacheRoot = RebuildCommand.featuresCacheRootOverride ?? FeatureCache.defaultRoot()
             let deps = FeaturesRunner.Dependencies(
                 fetcher: fetcher,
@@ -1137,17 +1181,21 @@ public enum RebuildCommand {
         containerId: String,
         raw: RawVolumeConfig,
         runtime: AppleContainerRuntime,
-        fileManager: FileManager
+        fileManager: FileManager,
+        errorCode: String = CLIErrorCode.lifecycleFailed,
+        property: String = "initializeCommand",
+        purpose: String = "initializeCommand",
+        tempPrefix: String = "adev-init"
     ) throws -> URL {
         let tempDir = fileManager.temporaryDirectory
-            .appendingPathComponent("adev-init-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("\(tempPrefix)-\(UUID().uuidString)", isDirectory: true)
         do {
             try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
         } catch {
             throw CLIError(
-                code: CLIErrorCode.lifecycleFailed,
-                property: "initializeCommand",
-                message: "Failed to stage guest config for initializeCommand",
+                code: errorCode,
+                property: property,
+                message: "Failed to stage guest config for \(purpose)",
                 hint: "Ensure the invoking user can write its temporary directory"
             )
         }
@@ -1162,9 +1210,9 @@ public enum RebuildCommand {
                 )
             } catch {
                 throw CLIError(
-                    code: CLIErrorCode.lifecycleFailed,
-                    property: "initializeCommand",
-                    message: "Failed to inspect guest .devcontainer for initializeCommand",
+                    code: errorCode,
+                    property: property,
+                    message: "Failed to inspect guest .devcontainer for \(purpose)",
                     hint: "The container must be running so rebuild can stage the guest config directory"
                 )
             }
@@ -1174,7 +1222,11 @@ public enum RebuildCommand {
                     workspaceFolder: raw.workspaceFolder,
                     dest: tempDir,
                     runtime: runtime,
-                    fileManager: fileManager
+                    fileManager: fileManager,
+                    errorCode: errorCode,
+                    property: property,
+                    purpose: purpose,
+                    archivePrefix: tempPrefix
                 )
             }
 
@@ -1195,13 +1247,29 @@ public enum RebuildCommand {
         }
     }
 
+    private static func stagedFeatureConfigDirectory(staged: URL, raw: RawVolumeConfig) -> String {
+        let configName = (raw.pathInContainer as NSString).lastPathComponent
+        let configParent = (raw.pathInContainer as NSString).deletingLastPathComponent
+        if configName == ConfigDiscovery.rootRelativePath,
+           (configParent as NSString).standardizingPath
+            == (raw.workspaceFolder as NSString).standardizingPath
+        {
+            return staged.path
+        }
+        return (staged.path as NSString).appendingPathComponent(".devcontainer")
+    }
+
     /// `exec tar cf -` of guest `.devcontainer/` then host `tar xf`. Not `container cp`.
     private static func extractGuestDevcontainerArchive(
         containerId: String,
         workspaceFolder: String,
         dest: URL,
         runtime: AppleContainerRuntime,
-        fileManager: FileManager
+        fileManager: FileManager,
+        errorCode: String = CLIErrorCode.lifecycleFailed,
+        property: String = "initializeCommand",
+        purpose: String = "initializeCommand",
+        archivePrefix: String = "adev-init"
     ) throws {
         let archive: ProcessResult
         do {
@@ -1211,30 +1279,30 @@ public enum RebuildCommand {
             )
         } catch {
             throw CLIError(
-                code: CLIErrorCode.lifecycleFailed,
-                property: "initializeCommand",
-                message: "Failed to archive guest .devcontainer for initializeCommand",
+                code: errorCode,
+                property: property,
+                message: "Failed to archive guest .devcontainer for \(purpose)",
                 hint: "The container must be running and tar must be available in the image"
             )
         }
         guard archive.succeeded, !archive.stdout.isEmpty else {
             throw CLIError(
-                code: CLIErrorCode.lifecycleFailed,
-                property: "initializeCommand",
-                message: "Failed to archive guest .devcontainer for initializeCommand",
+                code: errorCode,
+                property: property,
+                message: "Failed to archive guest .devcontainer for \(purpose)",
                 hint: "The container must be running and tar must be available in the image"
             )
         }
 
         let tarURL = fileManager.temporaryDirectory
-            .appendingPathComponent("adev-init-archive-\(UUID().uuidString).tar")
+            .appendingPathComponent("\(archivePrefix)-archive-\(UUID().uuidString).tar")
         do {
             try archive.stdout.write(to: tarURL)
         } catch {
             throw CLIError(
-                code: CLIErrorCode.lifecycleFailed,
-                property: "initializeCommand",
-                message: "Failed to stage guest .devcontainer archive for initializeCommand",
+                code: errorCode,
+                property: property,
+                message: "Failed to stage guest .devcontainer archive for \(purpose)",
                 hint: "Ensure the invoking user can write its temporary directory"
             )
         }
@@ -1248,9 +1316,9 @@ public enum RebuildCommand {
         )
         guard extract.succeeded else {
             throw CLIError(
-                code: CLIErrorCode.lifecycleFailed,
-                property: "initializeCommand",
-                message: "Failed to extract guest .devcontainer for initializeCommand",
+                code: errorCode,
+                property: property,
+                message: "Failed to extract guest .devcontainer for \(purpose)",
                 hint: "Ensure /usr/bin/tar is available"
             )
         }
