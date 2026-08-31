@@ -7,3 +7,6 @@ Features, and VS Code customizations — no privileged access or Docker-in-Docke
 `multiplatform` is the multi-feature sample: `mcr.microsoft.com/devcontainers/base:ubuntu`
 plus OCI Features `dotnet:2` and `node:1` (exercises install-time feature
 `containerEnv`, e.g. `DOTNET_ROOT`).
+
+`nodejs` demonstrates a non-root `remoteUser` with a writable
+named volume while the main container drops all capabilities.

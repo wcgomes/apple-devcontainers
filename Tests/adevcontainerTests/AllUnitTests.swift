@@ -2843,6 +2843,179 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!script.contains("/bound"), "must not chown bind mount targets")
         try MiniTest.expect(!script.contains("empty-target"))
     }),
+    ("workspaceOwnershipCapDropUsesScopedHelperAndCleansUp", {
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.first == "create" {
+                let name = args[args.firstIndex(of: "--name")! + 1]
+                return ProcessResult(exitCode: 0, stdout: Data("\(name)\n".utf8), stderr: Data())
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let request = CreateRequest(
+            name: "main",
+            image: "ghcr.io/bare-devcontainer/node:26-trixie",
+            labels: [:],
+            workspaceBindHost: "/host",
+            workspaceBindTarget: "/workspaces/app",
+            user: "dev",
+            mounts: [],
+            runArgs: [.capDrop("ALL")],
+            configHash: "hash"
+        )
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "main-id",
+            mounts: [MountSpec(
+                type: .volume,
+                source: "corepack-cache",
+                target: "/home/dev/.cache/node/corepack;touch /tmp/unsafe"
+            )],
+            remoteUser: "dev",
+            runtime: runtime,
+            createRequest: request
+        )
+        let create = mock.calls.first { $0.arguments.first == "create" }!.arguments
+        try MiniTest.expect(create.contains("ghcr.io/bare-devcontainer/node:26-trixie"))
+        try MiniTest.expect(create.contains("--cap-drop") && create.contains("ALL"))
+        try MiniTest.expect(create.filter { $0 == "--cap-add" }.count == 2)
+        try MiniTest.expect(create.contains("CHOWN") && create.contains("DAC_READ_SEARCH"))
+        try MiniTest.expect(!create.contains("DAC_OVERRIDE"), "helper does not receive write-bypass capability")
+        try MiniTest.expect(create.contains("type=volume,source=corepack-cache,target=/mnt/adevcontainer-volume-0"))
+        try MiniTest.expect(!create.joined(separator: " ").contains("touch /tmp/unsafe"), "original target must not enter helper argv")
+        let script = mock.calls.first { $0.arguments.first == "exec" }!.arguments.last ?? ""
+        try MiniTest.expect(script.contains("id -u") && script.contains("id -g"))
+        try MiniTest.expect(script.contains("/proc/self/mountinfo"), "validate helper mount before chown")
+        try MiniTest.expect(script.contains("chown -R \"$TARGET_UID:$TARGET_GID\""), "numeric uid/gid chown")
+        try MiniTest.expect(!script.contains("touch /tmp/unsafe"), "original target must not enter helper script")
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.contains(create[2]) })
+    }),
+    ("workspaceOwnershipHelperRequiredOnlyWhenChownIsUnavailable", {
+        try MiniTest.expect(!WorkspaceOwnership.requiresOwnershipHelper(runArgs: []))
+        try MiniTest.expect(WorkspaceOwnership.requiresOwnershipHelper(runArgs: [.capDrop("ALL")]))
+        try MiniTest.expect(WorkspaceOwnership.requiresOwnershipHelper(runArgs: [.capDrop("chown")]))
+        try MiniTest.expect(!WorkspaceOwnership.requiresOwnershipHelper(
+            runArgs: [.capDrop("ALL"), .capAdd("CHOWN")]
+        ))
+    }),
+    ("workspaceOwnershipHelperFailureStillCleansUp", {
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.first == "create" {
+                let name = args[args.firstIndex(of: "--name")! + 1]
+                return ProcessResult(exitCode: 0, stdout: Data("\(name)\n".utf8), stderr: Data())
+            }
+            if args.first == "exec" {
+                return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("mount validation failed".utf8))
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let request = CreateRequest(
+            name: "main", image: "image", labels: [:], workspaceBindHost: "/host",
+            workspaceBindTarget: "/workspace", runArgs: [.capDrop("CHOWN")], configHash: "hash"
+        )
+        try MiniTest.expectThrows({
+            try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+                containerId: "main", mounts: [MountSpec(type: .volume, source: "data", target: "/data")],
+                remoteUser: "dev", runtime: runtime, createRequest: request
+            )
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.populateFailed)
+        }
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" }, "helper deleted after exec failure")
+    }),
+    ("workspaceOwnershipHelperCreateFailureDoesNotDeleteNameCollision", {
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.first == "create" {
+                return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("create failed".utf8))
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let request = CreateRequest(
+            name: "main", image: "image", labels: [:], workspaceBindHost: "/host",
+            workspaceBindTarget: "/workspace", runArgs: [.capDrop("ALL")], configHash: "hash"
+        )
+        try MiniTest.expectThrows({
+            try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+                containerId: "main", mounts: [MountSpec(type: .volume, source: "data", target: "/data")],
+                remoteUser: "dev", runtime: runtime, createRequest: request
+            )
+        }) { _ in }
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.first == "delete" },
+            "a failed create may be a name collision; never delete a container the helper did not create"
+        )
+    }),
+    ("workspaceOwnershipHelperCleanupFailureIsNotReportedAsSuccess", {
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.first == "create" {
+                let name = args[args.firstIndex(of: "--name")! + 1]
+                return ProcessResult(exitCode: 0, stdout: Data("\(name)\n".utf8), stderr: Data())
+            }
+            if args.first == "delete" {
+                return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("delete failed".utf8))
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let request = CreateRequest(
+            name: "main", image: "image", labels: [:], workspaceBindHost: "/host",
+            workspaceBindTarget: "/workspace", runArgs: [.capDrop("ALL")], configHash: "hash"
+        )
+        try MiniTest.expectThrows({
+            try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+                containerId: "main", mounts: [MountSpec(type: .volume, source: "data", target: "/data")],
+                remoteUser: "dev", runtime: runtime, createRequest: request
+            )
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.runtimeFailed)
+        }
+    }),
+    ("workspaceOwnershipCapDropReadonlyBindAndRootRemainNoop", {
+        let mock = MockProcessRunner()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let request = CreateRequest(
+            name: "main", image: "image", labels: [:], workspaceBindHost: "/host",
+            workspaceBindTarget: "/workspace", runArgs: [.capDrop("ALL")], configHash: "hash"
+        )
+        let mounts = [
+            MountSpec(type: .bind, source: "/host/data", target: "/data"),
+            MountSpec(type: .volume, source: "readonly", target: "/readonly", readonly: true)
+        ]
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "main", mounts: mounts, remoteUser: "dev", runtime: runtime, createRequest: request
+        )
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "main", mounts: [MountSpec(type: .volume, source: "data", target: "/data")],
+            remoteUser: "root", runtime: runtime, createRequest: request
+        )
+        try MiniTest.expect(mock.calls.isEmpty)
+    }),
+    ("workspaceOwnershipCapDropRootfsFailureIsExplicit", {
+        let mock = MockProcessRunner()
+        mock.defaultResult = ProcessResult(exitCode: 1, stdout: Data(), stderr: Data())
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let request = CreateRequest(
+            name: "main", image: "image", labels: [:], workspaceBindHost: "/host",
+            workspaceBindTarget: "/workspace", runArgs: [.capDrop("ALL")], configHash: "hash"
+        )
+        try MiniTest.expectThrows({
+            try WorkspaceOwnership.ensureWorkspaceParentsWritableByRemoteUser(
+                containerId: "main", workspaceFolder: "/workspaces/app", remoteUser: "dev",
+                runtime: runtime, createRequest: request
+            )
+        }) { error in
+            let cli = error as! CLIError
+            try MiniTest.expect(cli.message.contains("CAP_CHOWN was removed"))
+            try MiniTest.expect(cli.hint?.contains("main container") == true)
+        }
+        let exec = mock.calls.first!.arguments
+        try MiniTest.expect(exec.contains("dev"), "probe runs as remoteUser, not privileged root")
+    }),
     ("workspaceOwnershipNamedVolumesChownParentPaths", {
         let mock = MockProcessRunner()
         mock.defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())

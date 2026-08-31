@@ -457,6 +457,32 @@ public enum CloneCommand {
             throw BringUpRecovery.eligible(error)
         }
 
+        let usesOwnershipHelper = WorkspaceOwnership.requiresOwnershipHelper(
+            runArgs: request.runArgs
+        )
+        if usesOwnershipHelper {
+            do {
+                try ensureWorkspaceWritableByRemoteUser(
+                    containerId: id,
+                    workspaceFolder: effectiveConfig.workspaceFolder,
+                    remoteUser: connectionUser,
+                    runtime: runtime,
+                    createRequest: request
+                )
+                try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+                    containerId: id,
+                    mounts: effectiveConfig.mounts,
+                    remoteUser: connectionUser,
+                    runtime: runtime,
+                    createRequest: request
+                )
+            } catch {
+                try? runtime.delete(nameOrId: id, force: true)
+                try? runtime.deleteVolume(name: identity.workspaceVolumeName)
+                throw BringUpRecovery.eligible(error)
+            }
+        }
+
         // 8. Start
         StatusPrinter.status("Starting container")
         do {
@@ -468,23 +494,27 @@ public enum CloneCommand {
         }
 
         // 9. Named volumes are root-owned (ext4); remoteUser cannot write until chown.
-        do {
-            try ensureWorkspaceWritableByRemoteUser(
-                containerId: id,
-                workspaceFolder: effectiveConfig.workspaceFolder,
-                remoteUser: connectionUser,
-                runtime: runtime
-            )
-            try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
-                containerId: id,
-                mounts: effectiveConfig.mounts,
-                remoteUser: connectionUser,
-                runtime: runtime
-            )
-        } catch {
-            try? runtime.delete(nameOrId: id, force: true)
-            try? runtime.deleteVolume(name: identity.workspaceVolumeName)
-            throw BringUpRecovery.eligible(error)
+        if !usesOwnershipHelper {
+            do {
+                try ensureWorkspaceWritableByRemoteUser(
+                    containerId: id,
+                    workspaceFolder: effectiveConfig.workspaceFolder,
+                    remoteUser: connectionUser,
+                    runtime: runtime,
+                    createRequest: request
+                )
+                try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+                    containerId: id,
+                    mounts: effectiveConfig.mounts,
+                    remoteUser: connectionUser,
+                    runtime: runtime,
+                    createRequest: request
+                )
+            } catch {
+                try? runtime.delete(nameOrId: id, force: true)
+                try? runtime.deleteVolume(name: identity.workspaceVolumeName)
+                throw BringUpRecovery.eligible(error)
+            }
         }
 
         // 10. Full clone INSIDE container (guest git + host-resolved auth for HTTPS)
@@ -981,13 +1011,15 @@ public enum CloneCommand {
         containerId: String,
         workspaceFolder: String,
         remoteUser: String?,
-        runtime: AppleContainerRuntime
+        runtime: AppleContainerRuntime,
+        createRequest: CreateRequest
     ) throws {
         try WorkspaceOwnership.ensureWorkspaceWritableByRemoteUser(
             containerId: containerId,
             workspaceFolder: workspaceFolder,
             remoteUser: remoteUser,
-            runtime: runtime
+            runtime: runtime,
+            createRequest: createRequest
         )
     }
 

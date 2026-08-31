@@ -11,12 +11,10 @@ public enum WorkspaceOwnershipScope {
 
 /// Shared container-side ownership fixup for Apple named volumes (root:root on mount).
 ///
-/// CloneCommand applies workspace chown after first start (throwing — chown failure aborts
-/// the clone); RebuildCommand applies workspace chown only when the effective remote user
-/// differs from the stamped `devcontainer.remote_user`, tolerating failure (warning +
-/// continue): the volume data already belongs to the previous user otherwise.
+/// CloneCommand applies workspace chown before populate; RebuildCommand applies it only
+/// when the effective remote user differs from the stamped `devcontainer.remote_user`.
 ///
-/// Config `type=volume` mount targets are chowned on create paths (`up`, `clone`, `rebuild`)
+/// Config `type=volume` mounts are chowned on create paths (`up`, `clone`, `rebuild`)
 /// so non-root connection users can write home-dir volume mounts before lifecycle hooks.
 /// Intermediate parents created by `mkdir -p` are non-recursively chowned (sibling mounts safe).
 /// Readonly volume mounts and bind mount targets are never chowned.
@@ -27,8 +25,26 @@ public enum WorkspaceOwnership {
         containerId: String,
         workspaceFolder: String,
         remoteUser: String?,
-        runtime: AppleContainerRuntime
+        runtime: AppleContainerRuntime,
+        createRequest: CreateRequest? = nil
     ) throws {
+        if let createRequest,
+           createRequest.workspaceMountMode == .volume,
+           requiresOwnershipHelper(runArgs: createRequest.runArgs)
+        {
+            try ensureNamedVolumesViaHelper(
+                mounts: [MountSpec(
+                    type: .volume,
+                    source: createRequest.workspaceBindHost,
+                    target: workspaceFolder
+                )],
+                remoteUser: remoteUser,
+                createRequest: createRequest,
+                runtime: runtime,
+                failureNoun: "workspace volume"
+            )
+            return
+        }
         try ensurePathsWritableByRemoteUser(
             containerId: containerId,
             paths: [workspaceFolder],
@@ -46,8 +62,18 @@ public enum WorkspaceOwnership {
         containerId: String,
         workspaceFolder: String,
         remoteUser: String?,
-        runtime: AppleContainerRuntime
+        runtime: AppleContainerRuntime,
+        createRequest: CreateRequest? = nil
     ) throws {
+        if let createRequest, requiresOwnershipHelper(runArgs: createRequest.runArgs) {
+            try ensureWorkspaceParentsAccessibleWithoutChown(
+                containerId: containerId,
+                workspaceFolder: workspaceFolder,
+                remoteUser: remoteUser,
+                runtime: runtime
+            )
+            return
+        }
         try ensurePathsWritableByRemoteUser(
             containerId: containerId,
             paths: [workspaceFolder],
@@ -65,20 +91,161 @@ public enum WorkspaceOwnership {
         containerId: String,
         mounts: [MountSpec],
         remoteUser: String?,
-        runtime: AppleContainerRuntime
+        runtime: AppleContainerRuntime,
+        createRequest: CreateRequest? = nil
     ) throws {
-        let paths = mounts.compactMap { mount -> String? in
+        let writableVolumes = mounts.compactMap { mount -> MountSpec? in
             guard mount.type == .volume, !mount.readonly else { return nil }
             let target = mount.target.trimmingCharacters(in: .whitespacesAndNewlines)
-            return target.isEmpty ? nil : target
+            guard !target.isEmpty else { return nil }
+            return MountSpec(type: .volume, source: mount.source, target: target)
+        }
+        if let createRequest, requiresOwnershipHelper(runArgs: createRequest.runArgs) {
+            try ensureNamedVolumesViaHelper(
+                mounts: writableVolumes,
+                remoteUser: remoteUser,
+                createRequest: createRequest,
+                runtime: runtime,
+                failureNoun: "named volume mount"
+            )
+            return
         }
         try ensurePathsWritableByRemoteUser(
             containerId: containerId,
-            paths: paths,
+            paths: writableVolumes.map(\.target),
             remoteUser: remoteUser,
             runtime: runtime,
             failureNoun: "named volume mount"
         )
+    }
+
+    static func requiresOwnershipHelper(runArgs: [AllowlistedRunArg]) -> Bool {
+        if runArgs.contains(where: {
+            if case .capAdd(let name) = $0 { return name.uppercased() == "CHOWN" }
+            return false
+        }) {
+            return false
+        }
+        return runArgs.contains {
+            if case .capDrop(let name) = $0 {
+                return name.uppercased() == "ALL" || name.uppercased() == "CHOWN"
+            }
+            return false
+        }
+    }
+
+    private static func ensureNamedVolumesViaHelper(
+        mounts: [MountSpec],
+        remoteUser: String?,
+        createRequest: CreateRequest,
+        runtime: AppleContainerRuntime,
+        failureNoun: String
+    ) throws {
+        let user = remoteUser?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !user.isEmpty, user != "root", !mounts.isEmpty else { return }
+
+        let helperMounts = mounts.enumerated().map { index, mount in
+            MountSpec(
+                type: .volume,
+                source: mount.source,
+                target: "/mnt/adevcontainer-volume-\(index)"
+            )
+        }
+        let helperName = "adev-ownership-\(UUID().uuidString.prefix(12).lowercased())"
+        var helperRunArgs: [AllowlistedRunArg] = [
+            .capDrop("ALL"), .capAdd("CHOWN"), .capAdd("DAC_READ_SEARCH")
+        ]
+        if createRequest.runArgs.contains(.rosetta) {
+            helperRunArgs.append(.rosetta)
+        }
+        let helperRequest = CreateRequest(
+            name: helperName,
+            image: createRequest.image,
+            labels: [:],
+            workspaceBindHost: helperMounts[0].source,
+            workspaceBindTarget: helperMounts[0].target,
+            workspaceMountMode: .volume,
+            user: "root",
+            workdir: "/",
+            mounts: Array(helperMounts.dropFirst()),
+            runArgs: helperRunArgs,
+            platform: createRequest.platform,
+            configHash: ""
+        )
+
+        var script = """
+        set -e
+        U=\(shellSingleQuoted(user))
+        TARGET_UID=$(id -u "$U")
+        TARGET_GID=$(id -g "$U")
+        case "$TARGET_UID:$TARGET_GID" in *[!0-9:]*|:|:*|*:) echo "invalid numeric uid/gid for $U" >&2; exit 1 ;; esac
+
+        """
+        for mount in helperMounts {
+            script += """
+            T=\(shellSingleQuoted(mount.target))
+            FOUND=0
+            while IFS=' ' read -r _ _ _ _ MOUNT_POINT _; do
+              [ "$MOUNT_POINT" = "$T" ] && FOUND=1
+            done < /proc/self/mountinfo
+            [ "$FOUND" = 1 ] || { echo "expected named volume is not mounted at $T" >&2; exit 1; }
+            chown -R "$TARGET_UID:$TARGET_GID" "$T"
+
+            """
+        }
+
+        var helperID: String?
+        var operationError: Error?
+        do {
+            let createdID = try runtime.create(request: helperRequest, ensureVolumes: false)
+            helperID = createdID
+            try runtime.start(nameOrId: createdID)
+            let result = try runtime.exec(
+                nameOrId: createdID,
+                command: ["sh", "-c", script],
+                user: "root",
+                workdir: "/"
+            )
+            if !result.succeeded {
+                throw ownershipError(result: result, failureNoun: failureNoun, user: user)
+            }
+        } catch {
+            operationError = error
+        }
+
+        if let helperID {
+            do {
+                try runtime.delete(nameOrId: helperID, force: true)
+            } catch {
+                if operationError == nil { throw error }
+            }
+        }
+        if let operationError { throw operationError }
+    }
+
+    private static func ensureWorkspaceParentsAccessibleWithoutChown(
+        containerId: String,
+        workspaceFolder: String,
+        remoteUser: String?,
+        runtime: AppleContainerRuntime
+    ) throws {
+        let user = remoteUser?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !user.isEmpty, user != "root" else { return }
+        let path = workspaceFolder.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else { return }
+        let result = try runtime.exec(
+            nameOrId: containerId,
+            command: ["sh", "-c", "test -x \(shellSingleQuoted(path))"],
+            user: user,
+            workdir: "/"
+        )
+        guard result.succeeded else {
+            throw CLIError(
+                code: CLIErrorCode.populateFailed,
+                message: "Workspace rootfs parents are not accessible by remoteUser \(user) and CAP_CHOWN was removed",
+                hint: "The rootfs parents cannot be repaired without adding CAP_CHOWN to the main container"
+            )
+        }
     }
 
     /// Chown each path to the remote user inside the container (as root).
@@ -139,17 +306,25 @@ public enum WorkspaceOwnership {
             env: [:]
         )
         guard result.succeeded else {
-            let detail = [
-                result.stderrString.trimmingCharacters(in: .whitespacesAndNewlines),
-                result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
-            ].filter { !$0.isEmpty }.joined(separator: " | ")
-            throw CLIError(
-                code: CLIErrorCode.populateFailed,
-                message: "Failed to chown \(failureNoun) for remoteUser \(user)"
-                    + (detail.isEmpty ? "" : ": \(detail)"),
-                hint: "Named volumes are root-owned; chown as root before running as remoteUser"
-            )
+            throw ownershipError(result: result, failureNoun: failureNoun, user: user)
         }
+    }
+
+    private static func ownershipError(
+        result: ProcessResult,
+        failureNoun: String,
+        user: String
+    ) -> CLIError {
+        let detail = [
+            result.stderrString.trimmingCharacters(in: .whitespacesAndNewlines),
+            result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
+        ].filter { !$0.isEmpty }.joined(separator: " | ")
+        return CLIError(
+            code: CLIErrorCode.populateFailed,
+            message: "Failed to chown \(failureNoun) for remoteUser \(user)"
+                + (detail.isEmpty ? "" : ": \(detail)"),
+            hint: "Named volumes are root-owned; chown as root before running as remoteUser"
+        )
     }
 
     /// Shell-safe single quoting for paths/users in the chown script.
