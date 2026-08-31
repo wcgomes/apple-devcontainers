@@ -281,6 +281,70 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!parentsScript.contains("chown -R"), "parents exec must not chown -R")
         try MiniTest.expect(!parentsScript.contains("/bound-host"), "parents exec must not touch the bind target")
     }),
+    ("upCapDropAllUsesOwnershipHelperWithoutWeakeningMain", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "ghcr.io/bare-devcontainer/node:26-trixie",
+          "remoteUser": "dev",
+          "runArgs": ["--cap-drop=ALL"],
+          "mounts": [
+            "type=volume,source=corepack-cache,target=/home/dev/.cache/node/corepack"
+          ]
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
+                }
+                if args.starts(with: ["volume", "create"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
+            { args in
+                if args.first == "create" {
+                    let name = args[args.firstIndex(of: "--name")! + 1]
+                    return ProcessResult(exitCode: 0, stdout: Data("\(name)\n".utf8), stderr: Data())
+                }
+                if args.first == "start" || args.first == "exec" || args.first == "delete" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.remoteUser, "dev")
+        let creates = mock.calls.filter { $0.arguments.first == "create" }.map(\.arguments)
+        try MiniTest.expectEqual(creates.count, 2, "main plus ephemeral ownership helper")
+        let main = creates.first { $0.contains(resolved.containerName) }!
+        let helper = creates.first { !$0.contains(resolved.containerName) }!
+        try MiniTest.expect(main.contains("--cap-drop") && main.contains("ALL"))
+        try MiniTest.expect(!main.contains("--cap-add"), "main container receives no internal capability")
+        try MiniTest.expect(helper.contains("CHOWN") && helper.contains("DAC_READ_SEARCH"))
+        try MiniTest.expect(helper.contains("ghcr.io/bare-devcontainer/node:26-trixie"))
+        let helperMounts = helper.enumerated().compactMap { index, value in
+            value == "--mount" && index + 1 < helper.count ? helper[index + 1] : nil
+        }
+        try MiniTest.expectEqual(helperMounts, ["type=volume,source=corepack-cache,target=/mnt/adevcontainer-volume-0"])
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.contains(where: { $0.hasPrefix("adev-ownership-") }) })
+        let helperDelete = mock.calls.firstIndex { $0.arguments.first == "delete" && $0.arguments.contains(where: { $0.hasPrefix("adev-ownership-") }) }!
+        let mainStart = mock.calls.firstIndex { $0.arguments == ["start", resolved.containerName] }!
+        try MiniTest.expect(helperDelete < mainStart, "helper releases the named volume before the main container starts")
+    }),
     ("upSkipsNamedVolumeChownForRoot", {
         let workspace = try TestRepo.makeTempWorkspace(configJSON: """
         {

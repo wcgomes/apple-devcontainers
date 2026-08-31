@@ -1766,7 +1766,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(parentsIdx < hookIdx, "parent fix-up runs before create-path hooks")
     }),
 
-    ("rebuildParentsFixupFailureWarnsAndContinues", {
+    ("rebuildParentsFixupFailureFailsAndDeletesReplacement", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
         {
           "image": "alpine:3.20",
@@ -1786,19 +1786,70 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         s.containers = [info]
         s.failingExecSubstrings = ["chown \"$OWN\" \"$P\""]
         s.install()
-        let previous = StatusPrinter.onWarning
-        defer { StatusPrinter.onWarning = previous }
-        var warnings: [String] = []
-        StatusPrinter.onWarning = { warnings.append($0) }
-        _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
-        try MiniTest.expect(warnings.contains { $0.contains("workspace parents") }, "parent fix-up failure warns on stderr")
+        try MiniTest.expectThrows({
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(skipPull: true),
+                runtime: s.runtime,
+                isTTY: false
+            )
+        }) { error in
+            let cli = error as! CLIError
+            try MiniTest.expectEqual(cli.code, CLIErrorCode.recoveryUnavailable)
+            try MiniTest.expectEqual(cli.recovery?.mode, "bind")
+            try MiniTest.expectEqual(cli.recovery?.failureKind, CLIErrorCode.populateFailed)
+        }
         try MiniTest.expect(
-            s.mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("postCreateCustom") == true },
-            "create-path hooks still run after parent fix-up failure"
+            !s.mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("postCreateCustom") == true },
+            "create-path hooks do not run after mandatory ownership failure"
         )
         try MiniTest.expect(
-            !s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.contains(s.newContainerId) },
-            "new container not deleted on parent fix-up failure"
+            s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.contains(s.newContainerId) },
+            "replacement deleted on parent fix-up failure"
+        )
+    }),
+
+    ("rebuildOwnershipHelperFailureEntersPostDeleteRecovery", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "ghcr.io/bare-devcontainer/node:26-trixie",
+          "remoteUser": "vscode",
+          "runArgs": ["--cap-drop=ALL"],
+          "mounts": [
+            "type=volume,source=corepack-cache,target=/home/vscode/.cache/node/corepack"
+          ]
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "bind-old",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.failingExecSubstrings = ["expected named volume is not mounted"]
+        s.install()
+        defer { try? BindRecoveryResume.cleanup(name: info.name) }
+
+        try MiniTest.expectThrows({
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(skipPull: true),
+                runtime: s.runtime,
+                isTTY: false
+            )
+        }) { error in
+            let cli = error as! CLIError
+            try MiniTest.expectEqual(cli.code, CLIErrorCode.recoveryUnavailable)
+            try MiniTest.expectEqual(cli.recovery?.mode, "bind")
+            try MiniTest.expectEqual(cli.recovery?.failureKind, CLIErrorCode.populateFailed)
+        }
+        let creates = s.mock.calls.filter { $0.arguments.first == "create" }
+        try MiniTest.expectEqual(creates.count, 2, "replacement plus ownership helper")
+        try MiniTest.expect(
+            !s.mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("postCreate") == true },
+            "lifecycle hooks do not run after ownership failure"
         )
     }),
 
@@ -2266,7 +2317,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         )
         s.mock.throwingHandler = { args in
             guard args.first == "exec" else { return nil }
-            if args.contains(LifecycleRunner.userEnvProbeScript) { return nil }
+            guard args.last?.contains("postCreateCustom") == true else { return nil }
             throw expectedError
         }
         var foundNewContainer = false
@@ -2306,7 +2357,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
                 capture: &stderr
             )
         }, validate: { error in
-            // Bind recovery wraps the hard failure; original failure kind is preserved.
+            // Bind recovery wraps the hard lifecycle failure; original kind is preserved.
             let cli = error as? CLIError
             try MiniTest.expectEqual(cli?.code, CLIErrorCode.recoveryUnavailable)
             try MiniTest.expectEqual(cli?.recovery?.mode, "bind")

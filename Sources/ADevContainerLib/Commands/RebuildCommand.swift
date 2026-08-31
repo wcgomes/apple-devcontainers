@@ -679,6 +679,91 @@ public enum RebuildCommand {
             throw error
         }
 
+        let usesOwnershipHelper = WorkspaceOwnership.requiresOwnershipHelper(
+            runArgs: request.runArgs
+        )
+
+        func handleOwnershipFailure(_ error: Error) throws -> RebuildResult {
+            if allowRecovery, let recovery = recoveryContext {
+                StatusPrinter.status("Ownership setup failed; entering recovery")
+                return try RecoveryOrchestrator.recover(
+                    prepared: recovery,
+                    failure: .init(error: error, containerID: id),
+                    selected: selected,
+                    runtime: runtime,
+                    options: options,
+                    localEnv: localEnv,
+                    fileManager: fileManager,
+                    isTTY: isTTY,
+                    editor: recoveryEditor,
+                    openEditorPrompt: openEditorPrompt,
+                    retry: { helperID, _ in
+                        try runInternal(
+                            options: options,
+                            runtime: runtime,
+                            credentials: credentials,
+                            picker: picker,
+                            localEnv: localEnv,
+                            hostResources: hostResources,
+                            fileManager: fileManager,
+                            recovery: recovery,
+                            recoveryHelperID: helperID,
+                            allowRecovery: false,
+                            isTTY: isTTY,
+                            recoveryEditor: recoveryEditor,
+                            openEditorPrompt: openEditorPrompt
+                        )
+                    }
+                )
+            }
+            if allowRecovery, bindRecoveryEligible {
+                StatusPrinter.status("Ownership setup failed; entering recovery")
+                return try offerBindRecovery(
+                    failure: .init(error: error, containerID: id),
+                    selected: selected,
+                    labels: labels,
+                    runtime: runtime,
+                    credentials: credentials,
+                    options: options,
+                    localEnv: localEnv,
+                    hostResources: hostResources,
+                    fileManager: fileManager,
+                    picker: picker,
+                    isTTY: isTTY,
+                    recoveryEditor: recoveryEditor,
+                    openEditorPrompt: openEditorPrompt
+                )
+            }
+            try? runtime.delete(nameOrId: id, force: true)
+            StatusPrinter.warning(
+                "Old container '\(selected.name)' was already removed; rebuilt container deleted after ownership failure"
+            )
+            throw error
+        }
+
+        if usesOwnershipHelper {
+            do {
+                if isVolumeMode, volumeUserChanged(labels: labels, config: effectiveConfig) {
+                    try WorkspaceOwnership.ensureWorkspaceWritableByRemoteUser(
+                        containerId: id,
+                        workspaceFolder: effectiveConfig.workspaceFolder,
+                        remoteUser: effectiveConfig.connectionUser,
+                        runtime: runtime,
+                        createRequest: request
+                    )
+                }
+                try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+                    containerId: id,
+                    mounts: effectiveConfig.mounts,
+                    remoteUser: effectiveConfig.connectionUser,
+                    runtime: runtime,
+                    createRequest: request
+                )
+            } catch {
+                return try handleOwnershipFailure(error)
+            }
+        }
+
         StatusPrinter.status("Starting container")
         do {
             try runtime.start(nameOrId: id)
@@ -739,52 +824,55 @@ public enum RebuildCommand {
 
         // Volume mode: root-owned named volumes. Chown only when the effective remote
         // user differs from the stamped one (volume data already belongs to that user).
-        // Soft-fail: chown errors warn and continue (rebuild semantics differ from clone).
-        if isVolumeMode, volumeUserChanged(labels: labels, config: effectiveConfig) {
+        if !usesOwnershipHelper,
+           isVolumeMode,
+           volumeUserChanged(labels: labels, config: effectiveConfig)
+        {
             do {
                 try WorkspaceOwnership.ensureWorkspaceWritableByRemoteUser(
                     containerId: id,
                     workspaceFolder: effectiveConfig.workspaceFolder,
                     remoteUser: effectiveConfig.connectionUser,
-                    runtime: runtime
+                    runtime: runtime,
+                    createRequest: request
                 )
             } catch {
-                StatusPrinter.warning("Failed to chown workspace folder to \(effectiveConfig.connectionUser ?? "remoteUser"): \(error.localizedDescription)")
+                return try handleOwnershipFailure(error)
             }
         }
 
-        // Config named volumes mount root:root (bind and volume mode). Soft-fail like workspace.
-        do {
-            try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
-                containerId: id,
-                mounts: effectiveConfig.mounts,
-                remoteUser: effectiveConfig.connectionUser,
-                runtime: runtime
-            )
-        } catch {
-            StatusPrinter.warning(
-                "Failed to chown named volume mounts for \(effectiveConfig.connectionUser ?? "remoteUser"): \(error.localizedDescription)"
-            )
+        // Config named volumes mount root:root (bind and volume mode).
+        if !usesOwnershipHelper {
+            do {
+                try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+                    containerId: id,
+                    mounts: effectiveConfig.mounts,
+                    remoteUser: effectiveConfig.connectionUser,
+                    runtime: runtime,
+                    createRequest: request
+                )
+            } catch {
+                return try handleOwnershipFailure(error)
+            }
         }
 
         // Fresh rootfs workspace parents are root-owned again (bind and volume mode);
-        // chown them before hooks. Soft-fail like the workspace chown above.
+        // chown or verify access before hooks.
         do {
             try WorkspaceOwnership.ensureWorkspaceParentsWritableByRemoteUser(
                 containerId: id,
                 workspaceFolder: effectiveConfig.workspaceFolder,
                 remoteUser: effectiveConfig.connectionUser,
-                runtime: runtime
+                runtime: runtime,
+                createRequest: request
             )
         } catch {
-            StatusPrinter.warning(
-                "Failed to chown workspace parents to \(effectiveConfig.connectionUser ?? "remoteUser"): \(error.localizedDescription)"
-            )
+            return try handleOwnershipFailure(error)
         }
 
         // Forward host git credentials into the new container's store before hooks.
         // Bind mode enumerates host remotes; volume mode seeds the stamped git_url.
-        // Soft-fail like the chown blocks above: warn and continue, never delete.
+        // Credential seeding remains soft-fail: warn and continue, never delete.
         do {
             try GuestGitCredentialSeed(
                 credentials: credentials,

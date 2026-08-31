@@ -427,6 +427,23 @@ public enum UpCommand {
         } catch {
             throw BringUpRecovery.eligible(error)
         }
+        let usesOwnershipHelper = WorkspaceOwnership.requiresOwnershipHelper(
+            runArgs: request.runArgs
+        )
+        if usesOwnershipHelper {
+            do {
+                try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+                    containerId: id,
+                    mounts: effectiveConfig.mounts,
+                    remoteUser: connectionUser,
+                    runtime: runtime,
+                    createRequest: request
+                )
+            } catch {
+                try? runtime.delete(nameOrId: id, force: true)
+                throw BringUpRecovery.eligible(error)
+            }
+        }
         StatusPrinter.status("Starting container")
         do {
             try runtime.start(nameOrId: id)
@@ -436,16 +453,19 @@ public enum UpCommand {
         }
 
         // Config named volumes mount root:root; chown targets before hooks as connectionUser.
-        do {
-            try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
-                containerId: id,
-                mounts: effectiveConfig.mounts,
-                remoteUser: connectionUser,
-                runtime: runtime
-            )
-        } catch {
-            try? runtime.delete(nameOrId: id, force: true)
-            throw BringUpRecovery.eligible(error)
+        if !usesOwnershipHelper {
+            do {
+                try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+                    containerId: id,
+                    mounts: effectiveConfig.mounts,
+                    remoteUser: connectionUser,
+                    runtime: runtime,
+                    createRequest: request
+                )
+            } catch {
+                try? runtime.delete(nameOrId: id, force: true)
+                throw BringUpRecovery.eligible(error)
+            }
         }
 
         // Fresh rootfs workspace parents are root-owned; chown them before hooks
@@ -455,7 +475,8 @@ public enum UpCommand {
                 containerId: id,
                 workspaceFolder: effectiveConfig.workspaceFolder,
                 remoteUser: connectionUser,
-                runtime: runtime
+                runtime: runtime,
+                createRequest: request
             )
         } catch {
             try? runtime.delete(nameOrId: id, force: true)
