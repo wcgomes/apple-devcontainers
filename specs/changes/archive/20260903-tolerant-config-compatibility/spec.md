@@ -4,7 +4,7 @@
 
 ### Requirement: Deterministic compatibility degradation reporting
 
-Merge target: [core.md](../../core.md).
+Merge target: [core.md](../../../core.md).
 
 The CLI MUST represent every recognized bounded-emulation or warn-and-ignore decision as a compatibility issue with a stable code, property path, disposition (`emulated` or `ignored`), and actionable message describing the effective behavior or omitted semantics. Compatibility issue messages MUST NOT expose secret metadata keys/values, credentials, or other values protected by existing redaction rules.
 
@@ -78,7 +78,7 @@ Compatibility issue data and presentation text MUST NOT participate in config ha
 
 ### Requirement: Strict compatibility automation
 
-Merge target: [core.md](../../core.md).
+Merge target: [core.md](../../../core.md).
 
 The environment value `ADEVCONTAINER_STRICT_COMPATIBILITY=1` MUST enable strict compatibility for `up`, `clone`, `rebuild`, `start`, and `exec` when those commands resolve or load Dev Container configuration. Other values and absence MUST select default tolerant mode. Other commands that do not resolve workspace configuration for a runtime action remain unchanged.
 
@@ -120,7 +120,7 @@ Strict mode MUST NOT fail solely for harmless metadata or exact translations and
 
 ### Requirement: Low-risk standard metadata and no-op compatibility
 
-Merge target: [core.md](../../core.md).
+Merge target: [core.md](../../../core.md).
 
 The supported top-level registry MUST admit these standard properties with exact shape validation:
 
@@ -180,7 +180,7 @@ Wrong top-level or required nested shapes MUST fail with a structured error nami
 
 ### Requirement: Top-level capAdd translation
 
-Merge target: [runargs-host.md](../../runargs-host.md).
+Merge target: [runargs-host.md](../../../runargs-host.md).
 
 The CLI MUST admit top-level `capAdd` only as an array of non-empty capability-name strings accepted by the existing `--cap-add` validation. Valid entries MUST normalize into the same typed effective capability representation and Apple create tokens used by allowlisted `runArgs --cap-add` and Feature/image `capAdd` contributions. The product MUST NOT pass raw array entries directly to Apple `container`.
 
@@ -222,7 +222,7 @@ An omitted or empty top-level array MUST be a silent no-op. A non-array value, n
 
 ### Requirement: Supported property surface (core + lifecycle/runArgs/host)
 
-Merge target: [core.md](../../core.md).
+Merge target: [core.md](../../../core.md).
 
 The CLI MUST accept and honor the property surface below. Properties outside this surface follow **Unsupported property policy** and **Deterministic compatibility degradation reporting**. Truly unknown non-metadata top-level properties and blocked recognized semantics MUST hard-error. Parseable `customizations.vscode.extensions` / `settings` are **honored by apply**, not ignored, while still never failing parse solely for presence. Other benign editor metadata MAY be ignored per Unsupported property policy.
 
@@ -248,8 +248,8 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - `otherPortsAttributes` — object; empty is silent, non-empty is warn-ignored because default port actions are not applied
 
 **Lifecycle**
-- `initializeCommand` — string, argv array, or object map; host command per [lifecycle-hooks.md](../../lifecycle-hooks.md) **initializeCommand host execution**
-- `onCreateCommand`, `updateContentCommand`, `postCreateCommand`, `postStartCommand`, `postAttachCommand` — string, argv array, or object map; object-map entries run concurrently; policy per **Lifecycle hook surface** and [vscode.md](../../vscode.md) **postAttachCommand policy (CLI-only)**
+- `initializeCommand` — string, argv array, or object map; host command per [lifecycle-hooks.md](../../../lifecycle-hooks.md) **initializeCommand host execution**
+- `onCreateCommand`, `updateContentCommand`, `postCreateCommand`, `postStartCommand`, `postAttachCommand` — string, argv array, or object map; object-map entries run concurrently; policy per **Lifecycle hook surface** and [vscode.md](../../../vscode.md) **postAttachCommand policy (CLI-only)**
 - `waitFor` — enum; default `updateContentCommand`; policy per **waitFor readiness**
 - `userEnvProbe` — enum; default `loginInteractiveShell`; policy per **userEnvProbe merge**
 - `shutdownAction` — enum; default `stopContainer` for this image/Dockerfile product; `stopCompose` fails closed; policy per **shutdownAction admission**
@@ -331,13 +331,13 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - When config is admitted and resolved
 - Then no key fails as unknown, each follows its exact/silent/degraded behavior, and only effective capability behavior reaches create/hash material
 
-See also: [lifecycle-hooks.md](../../lifecycle-hooks.md), [runargs-host.md](../../runargs-host.md), [features.md](../../features.md), [vscode.md](../../vscode.md) for detailed property behavior; **Remote connection user resolution** and **Create process user** for the user chain and create `-u`.
+See also: [lifecycle-hooks.md](../../../lifecycle-hooks.md), [runargs-host.md](../../../runargs-host.md), [features.md](../../../features.md), [vscode.md](../../../vscode.md) for detailed property behavior; **Remote connection user resolution** and **Create process user** for the user chain and create `-u`.
 
 ---
 
 ### Requirement: Unsupported property policy
 
-Merge target: [core.md](../../core.md).
+Merge target: [core.md](../../../core.md).
 
 Every top-level Dev Container input MUST be classified by known semantics:
 
@@ -473,7 +473,7 @@ The existing known optional families remain warn-and-ignore in default mode: doc
 
 ### Requirement: Top-level init and securityOpt behavior
 
-Merge target: [core.md](../../core.md).
+Merge target: [core.md](../../../core.md).
 
 The CLI MUST admit top-level `init` when its value is a Boolean. `init: true` MUST request an init process for effective create behavior; `init: false` MUST contribute no init request. Effective init MUST be the Boolean union of top-level `init`, allowlisted `runArgs` `--init`, and compatible Feature/image metadata init contributions. The resulting Apple create argv MUST contain at most one `--init`. A false or absent top-level value MUST NOT veto an init request from another source.
 

@@ -94,11 +94,13 @@ Unsupported substitution tokens MUST cause a structured error naming the token. 
 
 ### Requirement: Supported property surface (core + lifecycle/runArgs/host)
 
-The CLI MUST accept and honor the property surface below. Properties outside this surface that are hard-error (Compose, unknown-dangerous) or unknown-dangerous MUST hard-error (see Unsupported property policy). Known optional Apple-incompatibles are warn-skip, not hard-error. Parseable `customizations.vscode.extensions` / `settings` are **honored by apply**, not ignored, while still never failing parse solely for presence. Other benign editor metadata MAY be ignored per Unsupported property policy.
+The CLI MUST accept and honor the property surface below. Properties outside this surface follow **Unsupported property policy** and **Deterministic compatibility degradation reporting**. Truly unknown non-metadata top-level properties and blocked recognized semantics MUST hard-error. Parseable `customizations.vscode.extensions` / `settings` are **honored by apply**, not ignored, while still never failing parse solely for presence. Other benign editor metadata MAY be ignored per Unsupported property policy.
 
 **Image & workspace**
+- `$schema` — optional string parser/editor metadata; silent and hash-neutral
 - `name` (optional; when non-empty after trim, drives the DNS-friendly create name and does not drive the resource base, per the live Deterministic identity and labels contract)
 - `image` (required for image-based dev containers)
+- `overrideCommand` — Boolean; true is a silent restatement of the existing keep-alive override and false is blocked
 - Implicit workspace bind: host workspace root → container workspace folder
 
 **Env & user**
@@ -113,6 +115,7 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - `mounts` — bind and volume entries (string or object form consistent with devcontainers mount syntax subset)
 - `forwardPorts` — published to the Apple container as port publish/mappings
 - `portsAttributes` — retained and surfaced as metadata only (no IDE auto-forward semantics promised)
+- `otherPortsAttributes` — object; empty is silent, non-empty is warn-ignored because default port actions are not applied
 
 **Lifecycle**
 - `initializeCommand` — string, argv array, or object map; host command per [lifecycle-hooks.md](lifecycle-hooks.md) **initializeCommand host execution**
@@ -123,6 +126,8 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 
 **Runtime options, runArgs, and hostRequirements**
 - `init` — Boolean; true requests one effective `--init`, unioned and deduplicated with `runArgs` and Feature/image init contributions; false is an additive no-op
+- `privileged` — Boolean; false is silent and true is warn-stripped without Apple virtualization semantics
+- `capAdd` — array of validated capability names; translated through the typed capability path
 - `securityOpt` — array of strings; empty is a silent no-op, non-empty is explicitly warn-skipped and never represented as enforced
 - `runArgs` — allowlisted subset only; mapped on create
 - `hostRequirements` — evaluated preflight (fail on capacity shortfall; map memory/cpus to create limits; fail on parse/unknown keys)
@@ -130,10 +135,11 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 **Features**
 - `features` — object map of OCI or local path feature ref → options; processed by the Features runner (see Features requirements)
 
-**Editor customizations (config-file, v1)**
+**Editor customizations and recommendations (config-file, v1)**
 - `customizations.vscode.extensions` — array of string extension IDs; retained and applied when `--vscode` is set (before open; not gated on open success) per apply requirements
 - `customizations.vscode.settings` — JSON object; retained and merged into guest Machine settings on create-path (and repair on drift) per apply requirements
 - Other `customizations` content remains admitted metadata and is not applied in v1
+- `secrets` — object whose entries are recommendation objects; empty is silent and non-empty is warn-ignored without injection or disclosure
 
 #### Scenario: Minimal image config
 - Given fixture `Tests/Fixtures/smoke.json` as the workspace config
@@ -189,6 +195,11 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - Given a minimal image config with Boolean `init` and string-array `securityOpt`
 - When config is validated
 - Then validation does not reject either key as an unknown top-level property and their values follow **Top-level init and securityOpt behavior**
+
+#### Scenario: Expanded low-risk property surface admits
+- Given a valid image config containing `$schema`, `otherPortsAttributes`, `secrets`, Boolean `privileged`, `overrideCommand: true`, and valid top-level `capAdd`
+- When config is admitted and resolved
+- Then no key fails as unknown, each follows its exact/silent/degraded behavior, and only effective capability behavior reaches create/hash material
 
 See also: [lifecycle-hooks.md](lifecycle-hooks.md), [runargs-host.md](runargs-host.md), [features.md](features.md), [vscode.md](vscode.md) for detailed property behavior; **Remote connection user resolution** and **Create process user** for the user chain and create `-u`.
 
@@ -327,39 +338,89 @@ Connection/exec/nameConfig/VS Code consumers continue to use the connection-user
 
 ### Requirement: Unsupported property policy
 
-The CLI MUST fail closed on unsupported or unknown-dangerous configuration. Errors MUST be structured and actionable: identify the property/flag, state that it is unsupported, and indicate what to remove or change. Known Apple-incompatible **optional** bits MUST warn-and-skip (never silent ignore). The CLI MUST NEVER silently ignore unknown-dangerous entries.
+Every top-level Dev Container input MUST be classified by known semantics:
 
-**Warn-skip (v1) — continue `up` with effective config stripped**
+| Class | Default behavior | Hash behavior |
+|-------|------------------|---------------|
+| Exact translation | Apply through a typed product/runtime mapping; no compatibility issue | Hash normalized effective behavior |
+| Bounded emulation | Apply the documented substitute and emit one emulated issue | Hash delivered behavior |
+| Harmless metadata/no-op | Admit silently without claiming runtime semantics | Hash-neutral |
+| Known optional unsupported | Emit one ignored issue, strip from effective behavior, and continue | Hash-neutral |
+| Blocked | Structured actionable error | No effective hash/result |
 
-- Feature refs containing `docker-outside-of-docker` / `docker-in-docker` / `docker-from-docker` (any registry/tag or local path) — drop from admitted features; warn
-- Feature/image metadata `privileged: true` or non-empty `securityOpt` — warn; do not apply to create; feature may still install if admitted
-- `runArgs` known-incompatible family (`--privileged`, `--device…`, `--security-opt`, `--gpus`, `--ipc`, `--pid`, `--userns`, `--cgroupns`, `--hostname`, `--add-host`, `--sysctl`, `--group-add`, `--runtime`, Docker-only `--network` modes) — skip entry with warn; keep allowlisted siblings
+Hard rejection MUST be limited to malformed input or semantics whose omission would make execution incoherent, unsafe, destructive, or materially misleading. This includes unrepresentable configuration-source selectors (`build`/legacy Dockerfile and Compose until separately supported), custom workspace/process semantics that would run different content or commands, required host capabilities that are unmet or unverifiable, data/security-sensitive protections that cannot be preserved, unsupported substitutions, invalid Feature option/package requirements, and first-class runArg collisions. A recognized property MUST NOT be rejected merely because it lacks an implementation when its omission is registered as harmless or optional and reported as required.
 
-**Hard-error (v1) — Features-aware**
+Truly unknown non-metadata top-level keys MUST remain blocked because their semantic consequence cannot be classified. Object-shaped registered tool namespaces under `customizations` are metadata, not a precedent for arbitrary top-level acceptance. Unknown runArgs and raw Apple CLI passthrough remain blocked; only the typed runtime model and explicit runArgs allowlist may produce Apple arguments.
 
-- `runArgs` entries not on the runArgs allowlist (and not in the warn-skip family)
+The existing known optional families remain warn-and-ignore in default mode: docker-* Features, privileged/device/security/runtime runArgs, Feature/image privileged or securityOpt metadata, top-level non-empty securityOpt, and other entries explicitly registered under this policy. Strict compatibility overrides continuation by failing on their compatibility issues.
+
+**Registered warn-and-ignore inputs — continue in default mode with effective config stripped**
+
+- Feature refs containing `docker-outside-of-docker` / `docker-in-docker` / `docker-from-docker` (any registry/tag or local path) — drop from admitted features; report one ignored issue
+- Feature/image metadata `privileged: true` or non-empty `securityOpt` — report one ignored issue; do not apply to create; the Feature may still install if admitted
+- `runArgs` known-incompatible family (`--privileged`, `--device…`, `--security-opt`, `--gpus`, `--ipc`, `--pid`, `--userns`, `--cgroupns`, `--hostname`, `--add-host`, `--sysctl`, `--group-add`, `--runtime`, Docker-only `--network` modes) — skip the entry with one ignored issue; keep allowlisted siblings
+
+**Blocked inputs — Features-aware**
+
+- `runArgs` entries not on the runArgs allowlist and not in the registered warn-and-ignore family
 - First-class smuggling via runArgs (`-e`, `-u`, `-w`, `-p`, `-v`, …)
 - Docker Compose keys / compose-file driven multi-service config
-- Unknown top-level dangerous properties; missing `image`; invalid feature option shapes; hostRequirements shortfalls; unsupported substitutions
+- Unknown top-level dangerous properties; missing `image`; invalid Feature option shapes; hostRequirements shortfalls; unsupported substitutions
 
-**No longer reject**
+**Admitted behavior retained from the realized policy**
 
-- Non-ood OCI `features` entries solely for being features — they MUST enter the Features runner path
-- Local path feature refs — they MUST enter the Features runner path (load from disk relative to workspace)
-- Presence of docker-* features or privileged/device runArgs alone — warn-skip instead of failing whole config
+- Non-docker OCI `features` entries and local path Feature refs MUST enter the Features runner path rather than being rejected solely for being Features
+- Other object-shaped editor metadata and `customizations.*` namespaces not applied in v1 MUST NOT fail parse; well-formed `customizations.vscode.extensions` and `settings` remain retained and applied under their realized requirements, while malformed nested shapes soft-skip apply with a warning when `customizations.vscode` itself is an object
+- Optional non-empty `name` remains identity-affecting rather than pure metadata
+- `hostRequirements` remains evaluated rather than silently ignored
 
-**May ignore or store as metadata (MUST NOT fail parse)**
-- Other benign editor metadata and other `customizations.*` namespaces that are not applied in v1 (MUST NOT fail parse). `customizations.vscode` is **no longer pure ignore** for apply purposes (see **No longer pure-ignore** below).
+#### Scenario: Truly unknown top-level property remains blocked
 
-**Not pure metadata (identity-affecting)**
-- Optional `name` — when non-empty after trim, MUST drive the human base of container name and Features derived tag (see Deterministic identity and labels); MUST NOT fail parse
+- Given an otherwise valid config containing an unregistered top-level property
+- When admission runs
+- Then the CLI returns a structured unsupported-property error naming the key rather than silently ignoring it or passing it through
 
-**No longer pure-ignore**
-- `hostRequirements` — MUST evaluate per **hostRequirements preflight** (not silent ignore)
-- `customizations.vscode` — MUST still admit without failing parse when present as an object under object-shaped `customizations` (see existing scenario **customizations.vscode does not fail**). When nested `extensions` / `settings` are well-formed, the CLI MUST retain them and MUST apply per **Parse and retain customizations.vscode extensions and settings**, **Apply vscode settings on create-path (and repair on drift)**, **Apply vscode extensions when --vscode is set (before open)**, and **Vscode customizations apply idempotency**. Malformed nested shapes soft-skip apply with warn rather than failing whole-config resolve when `customizations.vscode` is an object.
+#### Scenario: Recognized optional property no longer blocks default mode
 
-**Unknown non-metadata top-level properties**
-- MUST hard-error (fail closed), except keys explicitly supported in core plus lifecycle hooks, allowlisted `runArgs`, `hostRequirements`, and **`features`**.
+- Given a structurally valid property registered as known optional unsupported
+- When admission and resolution run in default mode
+- Then the property is stripped, one compatibility warning describes the omission, and the remaining effective config MUST NOT fail solely because that property was ignored
+
+#### Scenario: Malformed recognized property remains blocked
+
+- Given a registered exact, harmless, emulated, or optional property with an invalid required shape
+- When admission runs
+- Then the CLI returns a property-specific structured validation error rather than treating the value as absent
+
+#### Scenario: Unrepresentable source selector remains blocked
+
+- Given a config selects Dockerfile build or Docker Compose without a separately supported translation
+- When admission runs
+- Then the CLI fails before choosing another image or creating a semantically unrelated container
+
+#### Scenario: Material workspace or process mismatch remains blocked
+
+- Given `workspaceMount`, `remoteEnv`, `overrideCommand: false`, or another registered behavior whose omission would mount different content or run different processes
+- When no bounded implementation exists
+- Then the CLI fails with an actionable property-specific error rather than warn-ignoring the behavior
+
+#### Scenario: Required host or protection semantics remain blocking
+
+- Given a required host capability is unmet/unverifiable or a requested data/security protection cannot be preserved
+- When preflight classifies the requirement
+- Then the command fails before the affected runtime or destructive action
+
+#### Scenario: First-class runArg collision remains blocked
+
+- Given runArgs attempts to set product-owned env, user, workdir, port, mount, name, label, entrypoint, or lifecycle flags
+- When runArgs admission runs
+- Then the CLI fails with the existing collision policy and does not passthrough the flag
+
+#### Scenario: Existing Apple-incompatible optional inputs remain tolerant
+
+- Given default mode with docker-* Features, privileged/device/security-family runArgs, or privileged/securityOpt metadata
+- When the applicable admission or metadata boundary completes
+- Then each omitted item produces a deterministic ignored compatibility issue and compatible siblings remain effective
 
 #### Scenario: Warn-skip docker-outside-of-docker
 - Given a config with `features` including a docker-outside-of-docker ref (optionally plus a non-docker feature)
@@ -961,9 +1022,9 @@ See also: [runargs-host.md](runargs-host.md), [features.md](features.md), and [l
 
 The CLI MUST admit top-level `init` when its value is a Boolean. `init: true` MUST request an init process for effective create behavior; `init: false` MUST contribute no init request. Effective init MUST be the Boolean union of top-level `init`, allowlisted `runArgs` `--init`, and compatible Feature/image metadata init contributions. The resulting Apple create argv MUST contain at most one `--init`. A false or absent top-level value MUST NOT veto an init request from another source.
 
-The CLI MUST admit top-level `securityOpt` when its value is an array containing only strings. An empty array MUST have no effect and MUST NOT emit a warning. A non-empty array MUST emit exactly one stderr warning per config resolve stating that the property was ignored/not applied on Apple container; when the array includes `no-new-privileges`, the warning MUST explicitly state that `no-new-privileges` is not enforced. No top-level security option MUST reach effective runtime configuration or Apple create argv.
+The CLI MUST admit top-level `securityOpt` when its value is an array containing only strings. An empty array MUST have no effect and MUST NOT emit a compatibility issue. In default tolerant mode, a non-empty array MUST emit exactly one ignored compatibility issue per config resolve stating that the property was ignored/not applied on Apple container; when the array includes `no-new-privileges`, the issue MUST explicitly state that `no-new-privileges` is not enforced. No top-level security option MUST reach effective runtime configuration or Apple create argv. In strict compatibility mode, that same issue MUST cause `compatibility_degraded` before the affected runtime action.
 
-Invalid shapes MUST fail closed with a structured error naming the property: `init` values other than Boolean, `securityOpt` values other than an array, and any non-string `securityOpt` entry are invalid. Unknown top-level properties remain governed by the realized fail-closed policy.
+Invalid shapes MUST fail closed with a structured error naming the property: `init` values other than Boolean, `securityOpt` values other than an array, and any non-string `securityOpt` entry are invalid. Unknown top-level properties remain governed by **Unsupported property policy**.
 
 For these properties, config hash material MUST represent normalized config-time effective behavior: one effective init request contributes one init entry regardless of duplicate top-level and `runArgs` declarations; false and absent top-level init are equivalent when no other config-time source requests init; and warn-stripped `securityOpt` contributes no hash material. Existing Feature refs/options remain hash inputs under the realized Features identity contract, while Feature init merge MUST still avoid duplicate create tokens.
 
@@ -1000,22 +1061,22 @@ For these properties, config hash material MUST represent normalized config-time
 #### Scenario: Non-empty securityOpt warns without enforcement
 
 - Given an image-based config with `securityOpt: ["no-new-privileges"]`
-- When the config is resolved and create argv is built
-- Then resolution succeeds with exactly one stderr warning stating that the property was not applied and `no-new-privileges` is not enforced
+- When the config is resolved and create argv is built in default tolerant mode
+- Then resolution succeeds with exactly one ignored compatibility issue stating that the property was not applied and `no-new-privileges` is not enforced
 - And no security option reaches effective runtime configuration, create argv, or config hash material
 
 #### Scenario: Other securityOpt values warn and strip
 
 - Given an image-based config with a non-empty string array such as `securityOpt: ["seccomp=profile.json"]`
-- When the config is resolved and create argv is built
-- Then resolution succeeds with exactly one stderr warning stating that the property was not applied on Apple container
+- When the config is resolved and create argv is built in default tolerant mode
+- Then resolution succeeds with exactly one ignored compatibility issue stating that the property was not applied on Apple container
 - And no security option reaches effective runtime configuration, create argv, or config hash material
 
 #### Scenario: Empty securityOpt is silent
 
 - Given an image-based config with `securityOpt: []`
 - When the config is resolved
-- Then resolution succeeds without a securityOpt warning and the property contributes no effective behavior or hash material
+- Then resolution succeeds without a securityOpt compatibility issue and the property contributes no effective behavior or hash material
 
 #### Scenario: Invalid securityOpt fails closed
 
@@ -1026,8 +1087,14 @@ For these properties, config hash material MUST represent normalized config-time
 #### Scenario: Ignored securityOpt is hash-neutral
 
 - Given two otherwise identical valid configs, one omitting `securityOpt` and one containing a non-empty string array
-- When both configs are resolved
-- Then their effective runtime configurations and config hashes are equal, while the non-empty form emits its required warning
+- When both configs are resolved in default tolerant mode
+- Then their effective runtime configurations and config hashes are equal, while the non-empty form emits its required compatibility issue
+
+#### Scenario: Strict securityOpt blocks before runtime
+
+- Given the same config with `ADEVCONTAINER_STRICT_COMPATIBILITY=1`
+- When config is resolved for a runtime command
+- Then the command fails with `compatibility_degraded` before the affected create, start, reuse-success, build, or destructive action
 
 ---
 
@@ -1060,3 +1127,173 @@ All three fixtures MUST resolve without an unsupported-property failure after th
 - Given the representative applied Bare Go fixture
 - When the fixture is resolved
 - Then both cache volumes and nested VS Code settings are retained under their existing contracts, while create argv contains cap-drop ALL and exactly one `--init` and does not contain a security option
+
+---
+
+### Requirement: Deterministic compatibility degradation reporting
+
+The CLI MUST represent every recognized bounded-emulation or warn-and-ignore decision as a compatibility issue with a stable code, property path, disposition (`emulated` or `ignored`), and actionable message describing the effective behavior or omitted semantics. Compatibility issue messages MUST NOT expose secret metadata keys/values, credentials, or other values protected by existing redaction rules.
+
+Within each completed compatibility evaluation boundary, issues MUST be deduplicated by stable code, property path, and safe subject identity, then ordered by property path, code, and safe subject identity. Pre-substitution and post-substitution admission MUST NOT emit duplicate issues for the same input. Each resulting issue MUST emit exactly one `warning: ` line through the existing stderr warning channel in default mode; QUIET MUST NOT suppress it, and warnings MUST NOT contaminate JSON stdout.
+
+Exact translations and explicitly harmless metadata MUST NOT produce compatibility issues. Malformed input and blocked semantics MUST retain specific structured errors rather than being relabeled as degradation.
+
+The first compatibility slice MUST expose these stable issue codes; property path and safe subject identity distinguish individual occurrences:
+
+| Stable code | Registered degradation |
+|-------------|------------------------|
+| `config_other_ports_attributes_ignored` | Non-empty top-level `otherPortsAttributes` |
+| `config_secrets_ignored` | Non-empty top-level `secrets` recommendation metadata |
+| `config_privileged_ignored` | Top-level `privileged: true` |
+| `config_security_opt_ignored` | Non-empty top-level `securityOpt` |
+| `run_arg_ignored` | Each registered Apple-incompatible runArgs entry |
+| `docker_feature_ignored` | Each docker-in/outside/from-docker Feature omitted at admission |
+| `feature_privileged_ignored` | Feature metadata privilege request omitted |
+| `feature_security_opt_ignored` | Feature metadata security options omitted |
+| `image_privileged_ignored` | Image metadata privilege request omitted |
+| `image_security_opt_ignored` | Image metadata security options omitted |
+| `mount_file_bind_promoted` | File-bind source promoted to the documented directory substitute |
+
+This change's compatibility issue vocabulary is exactly the codes in the table. Existing sidecar notices that are not those classification decisions — including the extra NET_ADMIN contextual warning after skipped privileged/device runArgs, `hostRequirements.gpu`, and vscode apply soft-skip warnings — MUST keep their realized default-mode behavior and MUST NOT alone raise `compatibility_degraded`.
+
+Compatibility issue data and presentation text MUST NOT participate in config hash material. Ignored and harmless properties MUST be hash-neutral. Exact translations MUST hash their normalized effective behavior; bounded emulations MUST hash the behavior actually delivered rather than unsupported raw syntax.
+
+#### Scenario: Default mode reports known degradation once
+
+- Given a valid config containing the same known optional unsupported item observed during both admission passes
+- When configuration resolution completes in default mode
+- Then exactly one compatibility warning with a stable code, property path, ignored disposition, and omitted-semantics explanation is emitted
+
+#### Scenario: Compatibility warnings are deterministic
+
+- Given a config that produces multiple compatibility issues in an evaluation boundary
+- When the same config is resolved repeatedly
+- Then issue order is stable by property path, code, and safe subject identity and duplicate observations do not add warnings
+
+#### Scenario: Exact and harmless inputs do not warn
+
+- Given a config containing only exact translations and harmless metadata
+- When compatibility classification completes
+- Then no compatibility degradation warning is emitted
+
+#### Scenario: Compatibility warnings preserve terminal channels
+
+- Given default compatibility mode with `ADEVCONTAINER_QUIET=1` and JSON command output
+- When a known optional property is ignored
+- Then stderr contains its `warning: ` compatibility issue and stdout remains pure JSON
+
+#### Scenario: Ignored input is hash-neutral
+
+- Given otherwise identical configs where one adds only a known ignored optional property
+- When their effective config hashes are computed
+- Then the hashes are equal and the config containing the property reports degradation
+
+#### Scenario: Emulation hashes delivered behavior
+
+- Given a supported bounded emulation such as file-bind promotion
+- When effective config hash material is produced
+- Then the normalized delivered mount behavior participates in the hash and unsupported raw options do not
+
+#### Scenario: Sidecar notices stay outside the issue vocabulary
+
+- Given default or strict mode with `hostRequirements.gpu`, skipped privileged/device runArgs that also produce the extra NET_ADMIN contextual warning, or a vscode apply soft-skip
+- When compatibility classification completes
+- Then those notices are not compatibility issues, do not use a table code, and do not alone cause `compatibility_degraded`
+
+---
+
+### Requirement: Strict compatibility automation
+
+The environment value `ADEVCONTAINER_STRICT_COMPATIBILITY=1` MUST enable strict compatibility for `up`, `clone`, `rebuild`, `start`, and `exec` when those commands resolve or load Dev Container configuration. Other values and absence MUST select default tolerant mode. Other commands that do not resolve workspace configuration for a runtime action remain unchanged.
+
+In strict mode, any compatibility issue with disposition `ignored` or `emulated` MUST fail the command with structured code `compatibility_degraded`, identify the first deterministically ordered property, and summarize all issue codes without exposing protected values. The gate MUST occur before the affected container create, start, reuse-success, derived-image build, old-container delete, or other destructive lifecycle action. Read-only parse, image inspection, and Feature artifact retrieval needed to classify compatibility MAY occur before the gate.
+
+Strict mode MUST NOT fail solely for harmless metadata or exact translations and MUST NOT alter effective config hash material. Independently malformed or blocked input MUST keep its more specific error instead of becoming `compatibility_degraded`.
+
+#### Scenario: Default tolerant mode continues
+
+- Given a structurally valid config with a known optional ignored property and strict compatibility unset
+- When `up`, `clone`, or `rebuild` resolves the config
+- Then the command emits the compatibility warning, retains only effective behavior, and MUST NOT fail solely because that property was ignored
+
+#### Scenario: Strict mode blocks degradation before runtime effects
+
+- Given the same config with `ADEVCONTAINER_STRICT_COMPATIBILITY=1`
+- When `up`, `clone`, `rebuild`, `start`, or `exec` resolves all compatibility needed for its next runtime action
+- Then it fails with `compatibility_degraded` before create, start, reuse-success, user exec, derived-image build, or old-container deletion
+
+#### Scenario: Strict error aggregation is deterministic and redacted
+
+- Given strict mode and multiple ignored or emulated issues including secrets metadata
+- When the strict gate fails
+- Then the error property is the first deterministic property, its summary lists stable issue codes, and no secret key or value is emitted
+
+#### Scenario: Strict mode accepts exact and harmless inputs
+
+- Given strict mode and a config whose registered properties are exact translations or harmless metadata only
+- When the config is resolved
+- Then strict compatibility does not fail the command
+
+#### Scenario: Malformed input keeps its specific error
+
+- Given strict mode and a recognized property with an invalid JSON shape
+- When admission runs
+- Then the command fails with the property-specific structured validation error rather than `compatibility_degraded`
+
+---
+
+### Requirement: Low-risk standard metadata and no-op compatibility
+
+The supported top-level registry MUST admit these standard properties with exact shape validation:
+
+| Property | Shape | Default-mode behavior |
+|----------|-------|-----------------------|
+| `$schema` | string | Harmless parser/editor metadata; silently ignore; hash-neutral |
+| `otherPortsAttributes` | object | Empty object is silent; non-empty object emits one ignored compatibility issue stating that default port UI/auto-forward actions are not applied; hash-neutral |
+| `secrets` | object whose entries are objects | Empty object is silent; non-empty object emits one ignored compatibility issue stating that recommendations are not injected or validated; never print entry names or values; hash-neutral |
+| `privileged` | Boolean | false is silent; true emits one ignored compatibility issue and contributes no privilege flag or Apple virtualization behavior; hash-neutral |
+| `overrideCommand` | Boolean | true is a silent harmless restatement of the product default keep-alive override (hash-neutral; no distinct effective behavior); false remains blocked because the image command is not preserved |
+
+Wrong top-level or required nested shapes MUST fail with a structured error naming the property. These admissions MUST NOT create a generic extension mechanism for arbitrary top-level keys.
+
+#### Scenario: Schema metadata is silent
+
+- Given a valid image config with string `$schema`
+- When the config is resolved in default or strict mode
+- Then resolution does not fail or warn solely for `$schema`, and its value does not affect the config hash
+
+#### Scenario: Non-empty otherPortsAttributes degrades visibly
+
+- Given a valid config with non-empty object `otherPortsAttributes`
+- When the config is resolved in default mode
+- Then resolution emits exactly one ignored compatibility issue stating that its port actions are not applied and the property does not affect effective config or hash
+
+#### Scenario: Secrets recommendations are not exposed
+
+- Given a valid config with non-empty object `secrets` containing named recommendation metadata
+- When the config is resolved in default or strict mode
+- Then default mode emits one property-level ignored issue without secret names or values, strict mode fails with the redacted issue, and neither mode injects secrets
+
+#### Scenario: Privileged true is warn-stripped
+
+- Given a valid config with `privileged: true`
+- When create behavior is resolved in default mode
+- Then one ignored compatibility issue is emitted and no privileged or virtualization token reaches effective config or Apple create argv
+
+#### Scenario: Harmless false and empty forms are silent
+
+- Given a valid config with `privileged: false`, empty `otherPortsAttributes`, empty `secrets`, and `overrideCommand: true`
+- When the config is resolved in default or strict mode
+- Then these values emit no compatibility issue and do not affect the config hash
+
+#### Scenario: Override command false remains blocking
+
+- Given a valid image config with `overrideCommand: false`
+- When config admission runs
+- Then the CLI fails with a structured error explaining that preserving the image command is unsupported
+
+#### Scenario: Invalid metadata shapes remain blocking
+
+- Given `$schema` is not a string, `otherPortsAttributes` or `secrets` is not an object, a secrets entry is not an object, or `privileged`/`overrideCommand` is not Boolean
+- When admission runs
+- Then the CLI fails with a structured error naming the malformed property

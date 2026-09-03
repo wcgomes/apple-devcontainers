@@ -6,7 +6,7 @@
 
 ## Scope
 
-- Modify [core.md](../../core.md) **Supported property surface**, **Unsupported property policy**, and **Top-level init and securityOpt behavior** to define exact translation, bounded emulation, harmless metadata, known optional degradation, and blocking outcomes.
+- Modify [core.md](../../../core.md) **Supported property surface**, **Unsupported property policy**, and **Top-level init and securityOpt behavior** to define exact translation, bounded emulation, harmless metadata, known optional degradation, and blocking outcomes.
 - Add deterministic compatibility issue reporting with stable codes, property paths, dispositions, deduplication, redaction, and effective-config hash rules.
 - Add opt-in strict automation through `ADEVCONTAINER_STRICT_COMPATIBILITY=1`, promoting reported compatibility degradation to a structured failure before the affected container create/start/reuse or destructive lifecycle action.
 - Admit `$schema` as silent harmless metadata; admit object-shaped `otherPortsAttributes` and `secrets` as hash-neutral metadata with one warning when non-empty.

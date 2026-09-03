@@ -1,6 +1,6 @@
 # Tasks: tolerant-config-compatibility
 
-Spec ref: `specs/changes/tolerant-config-compatibility/`. Execute test-first. Preserve the realized init/securityOpt default contract, existing runArgs allowlist, friendly-name/resource identity, and workspace ownership behavior. Do not add raw Apple CLI passthrough, Dockerfile build, Compose, private registry auth, complex workspace semantics, or any other non-goal.
+Spec ref: `specs/changes/archive/20260903-tolerant-config-compatibility/`. Execute test-first. Preserve the realized init/securityOpt default contract, existing runArgs allowlist, friendly-name/resource identity, and workspace ownership behavior. Do not add raw Apple CLI passthrough, Dockerfile build, Compose, private registry auth, complex workspace semantics, or any other non-goal.
 
 ## 1. Compatibility contract tests and fixture
 
