@@ -289,6 +289,9 @@ public enum CloneCommand {
             throw BringUpRecovery.eligible(error)
         }
 
+        let compatibilityMode = CompatibilityMode.from(environment: localEnv)
+        try resolved.config.compatibilityReport.enforce(mode: compatibilityMode)
+
         try enforceHostRequirements(config: resolved.config, host: hostResources)
 
         do {
@@ -328,10 +331,6 @@ public enum CloneCommand {
             throw BringUpRecovery.eligible(
                 ContainerIdentity.nameInUseError(name: identity.containerName)
             )
-        }
-
-        if !resolved.mountPromotions.isEmpty {
-            StatusPrinter.warning(MountNormalizer.warningMessage(promotions: resolved.mountPromotions))
         }
 
         var effectiveConfig = resolved.config
@@ -375,12 +374,17 @@ public enum CloneCommand {
                 deps: deps,
                 remoteUser: resolved.config.remoteUser,
                 containerUser: resolved.config.containerUser,
-                nameBase: identity.base
+                nameBase: identity.base,
+                compatibilityMode: compatibilityMode
             )
+            let beforeFeatures = effectiveConfig.compatibilityReport
             effectiveConfig = try FeatureContributionMerge.apply(
                 contributions: featuresResult.contributions,
                 to: effectiveConfig
             )
+            effectiveConfig.compatibilityReport.subtracting(beforeFeatures).emitWarnings()
+            effectiveConfig.compatibilityReport.add(contentsOf: featuresResult.compatibilityIssues)
+            try effectiveConfig.compatibilityReport.enforce(mode: compatibilityMode)
             effectiveConfig.image = featuresResult.derivedImage
             if featuresResult.didInspectBaseUser {
                 knownOCIUser = featuresResult.baseImageUser
@@ -391,12 +395,15 @@ public enum CloneCommand {
                 StatusPrinter.status("Pulling image", item: effectiveConfig.image)
                 try? runtime.pullImage(effectiveConfig.image, platform: platform)
             }
+            let beforeImage = effectiveConfig.compatibilityReport
             let applied = try FeatureContributionMerge.applyFromImage(
                 imageRef: effectiveConfig.image,
                 to: effectiveConfig,
                 runtime: runtime
             )
             effectiveConfig = applied.config
+            effectiveConfig.compatibilityReport.subtracting(beforeImage).emitWarnings()
+            try effectiveConfig.compatibilityReport.enforce(mode: compatibilityMode)
             knownMetadataUsers = applied.users
         }
 

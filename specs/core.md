@@ -64,16 +64,17 @@ After parse, the resolver MUST apply this substitution subset anywhere string va
 | `${localWorkspaceFolderBasename}` | Basename of the workspace root |
 | `${localEnv:VAR}` | Value of host environment variable `VAR` (empty string if unset, unless a default form is later specified) |
 | `${containerWorkspaceFolder}` | Resolved container workspace folder path (after `workspaceFolder` resolution) |
-| `${devcontainerId}` | Managed container name used at create (`adev-{base}-{hash12}` / create `--name`). Same identity for bind-mode `up` and volume-mode `clone`/`rebuild` (reused name). |
+| `${devcontainerId}` | Resource identity stem `adev-{base}-{hash12}` (empty resource base → `adev-{hash12}`). **Base** is the sanitized workspace folder basename (`up`) or git URL repo basename (`clone`) only — MUST NOT use config `name`. Hash material matches the product workspace volume (bind: workspace path + config path; volume: normalized git URL + config relative path). MUST NOT be the create `--name` / DNS hostname. Official meaning is unique + stable across rebuilds; this stem is that analogue. |
 
 Unsupported substitution tokens MUST cause a structured error naming the token. Substitution MUST run before runtime admission and mount/port mapping.
 
 **`${devcontainerId}` lifecycle — MUST**
 
 - Feature metadata mounts (and config mounts) MAY embed `${devcontainerId}` in volume `source` (e.g. shell-history `source=${devcontainerId}-shellhistory`).
-- When the create name is not yet known at config resolve (common for feature mounts; clone volume-mode name differs from bind-mode path identity), the token MAY remain unsubstituted through resolve.
-- Before named-volume ensure and `container create`, the CLI MUST expand `${devcontainerId}` to the create `--name` value so Apple volume names match `^[A-Za-z0-9][A-Za-z0-9_.-]*$`.
+- When the resource identity stem is not yet known at config resolve, the token MAY remain unsubstituted through resolve.
+- Before named-volume ensure and `container create`, the CLI MUST expand `${devcontainerId}` to the resource identity stem so Apple volume names match `^[A-Za-z0-9][A-Za-z0-9_.-]*$`.
 - Volume-mode config hash / `devcontainer.config_volumes` labels MUST use post-expansion mount sources so identity stays stable and purge sees real volume names.
+- A rebuild that only changes config `name` (create name) MUST expand `${devcontainerId}` to the same stem as before so those volumes are reused.
 
 #### Scenario: localEnv in mount source
 - Given `containerEnv` or a mount `source` containing `${localEnv:HOME}/.kube/config` and `HOME` is set on the host
@@ -81,9 +82,9 @@ Unsupported substitution tokens MUST cause a structured error naming the token. 
 - Then the token is replaced with the host value
 
 #### Scenario: devcontainerId in feature volume mount source
-- Given a feature mount `source=${devcontainerId}-shellhistory` (type volume) and create name `adev-proj-abc123def456`
+- Given a feature mount `source=${devcontainerId}-shellhistory` (type volume), workspace folder `foo`, `"name": "My App"`, and identity `hash12`
 - When the container is created
-- Then the volume name is `adev-proj-abc123def456-shellhistory` and volume create succeeds
+- Then the volume name is `adev-foo-{hash12}-shellhistory` and volume create succeeds
 
 #### Scenario: Unknown substitution token
 - Given a string value containing `${unknownToken}`
@@ -94,11 +95,13 @@ Unsupported substitution tokens MUST cause a structured error naming the token. 
 
 ### Requirement: Supported property surface (core + lifecycle/runArgs/host)
 
-The CLI MUST accept and honor the property surface below. Properties outside this surface that are hard-error (Compose, unknown-dangerous) or unknown-dangerous MUST hard-error (see Unsupported property policy). Known optional Apple-incompatibles are warn-skip, not hard-error. Parseable `customizations.vscode.extensions` / `settings` are **honored by apply**, not ignored, while still never failing parse solely for presence. Other benign editor metadata MAY be ignored per Unsupported property policy.
+The CLI MUST accept and honor the property surface below. Properties outside this surface follow **Unsupported property policy** and **Deterministic compatibility degradation reporting**. Truly unknown non-metadata top-level properties and blocked recognized semantics MUST hard-error. Parseable `customizations.vscode.extensions` / `settings` are **honored by apply**, not ignored, while still never failing parse solely for presence. Other benign editor metadata MAY be ignored per Unsupported property policy.
 
 **Image & workspace**
-- `name` (optional; when non-empty after trim, drives the human base of deterministic container/image identity — see Deterministic identity and labels)
+- `$schema` — optional string parser/editor metadata; silent and hash-neutral
+- `name` (optional; when non-empty after trim, drives the DNS-friendly create name and does not drive the resource base, per the live Deterministic identity and labels contract)
 - `image` (required for image-based dev containers)
+- `overrideCommand` — Boolean; true is a silent restatement of the existing keep-alive override and false is blocked
 - Implicit workspace bind: host workspace root → container workspace folder
 
 **Env & user**
@@ -113,6 +116,7 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - `mounts` — bind and volume entries (string or object form consistent with devcontainers mount syntax subset)
 - `forwardPorts` — published to the Apple container as port publish/mappings
 - `portsAttributes` — retained and surfaced as metadata only (no IDE auto-forward semantics promised)
+- `otherPortsAttributes` — object; empty is silent, non-empty is warn-ignored because default port actions are not applied
 
 **Lifecycle**
 - `initializeCommand` — string, argv array, or object map; host command per [lifecycle-hooks.md](lifecycle-hooks.md) **initializeCommand host execution**
@@ -121,17 +125,22 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - `userEnvProbe` — enum; default `loginInteractiveShell`; policy per **userEnvProbe merge**
 - `shutdownAction` — enum; default `stopContainer` for this image/Dockerfile product; `stopCompose` fails closed; policy per **shutdownAction admission**
 
-**runArgs + hostRequirements**
+**Runtime options, runArgs, and hostRequirements**
+- `init` — Boolean; true requests one effective `--init`, unioned and deduplicated with `runArgs` and Feature/image init contributions; false is an additive no-op
+- `privileged` — Boolean; false is silent and true is warn-stripped without Apple virtualization semantics
+- `capAdd` — array of validated capability names; translated through the typed capability path
+- `securityOpt` — array of strings; empty is a silent no-op, non-empty is explicitly warn-skipped and never represented as enforced
 - `runArgs` — allowlisted subset only; mapped on create
 - `hostRequirements` — evaluated preflight (fail on capacity shortfall; map memory/cpus to create limits; fail on parse/unknown keys)
 
 **Features**
 - `features` — object map of OCI or local path feature ref → options; processed by the Features runner (see Features requirements)
 
-**Editor customizations (config-file, v1)**
+**Editor customizations and recommendations (config-file, v1)**
 - `customizations.vscode.extensions` — array of string extension IDs; retained and applied when `--vscode` is set (before open; not gated on open success) per apply requirements
 - `customizations.vscode.settings` — JSON object; retained and merged into guest Machine settings on create-path (and repair on drift) per apply requirements
 - Other `customizations` content remains admitted metadata and is not applied in v1
+- `secrets` — object whose entries are recommendation objects; empty is silent and non-empty is warn-ignored without injection or disclosure
 
 #### Scenario: Minimal image config
 - Given fixture `Tests/Fixtures/smoke.json` as the workspace config
@@ -163,8 +172,8 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - When `up` runs
 - Then `up` fails with a structured error including the exit code and MUST NOT report overall success
 
-#### Scenario: Lifecycle / runArgs / hostRequirements property set does not hard-error as unknown
-- Given a config that includes only core supported keys plus the lifecycle properties in this requirement, allowlisted `runArgs`, and `hostRequirements`
+#### Scenario: Lifecycle runtime options runArgs and hostRequirements property set does not hard-error as unknown
+- Given a config that includes only core supported keys plus the lifecycle properties in this requirement, valid `init` and `securityOpt`, allowlisted `runArgs`, and `hostRequirements`
 - When config is validated
 - Then validation does not fail with unsupported-property for those keys
 
@@ -183,7 +192,17 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - When config is resolved
 - Then resolve succeeds and those fields are available to apply paths
 
-See also: [lifecycle-hooks.md](lifecycle-hooks.md), [runargs-host.md](runargs-host.md), [features.md](features.md), [vscode.md](vscode.md) for detailed property behavior; **Remote connection user resolution** and **Create process user** below for user chain and create `-u`.
+#### Scenario: top-level init and securityOpt are on the supported surface
+- Given a minimal image config with Boolean `init` and string-array `securityOpt`
+- When config is validated
+- Then validation does not reject either key as an unknown top-level property and their values follow **Top-level init and securityOpt behavior**
+
+#### Scenario: Expanded low-risk property surface admits
+- Given a valid image config containing `$schema`, `otherPortsAttributes`, `secrets`, Boolean `privileged`, `overrideCommand: true`, and valid top-level `capAdd`
+- When config is admitted and resolved
+- Then no key fails as unknown, each follows its exact/silent/degraded behavior, and only effective capability behavior reaches create/hash material
+
+See also: [lifecycle-hooks.md](lifecycle-hooks.md), [runargs-host.md](runargs-host.md), [features.md](features.md), [vscode.md](vscode.md) for detailed property behavior; **Remote connection user resolution** and **Create process user** for the user chain and create `-u`.
 
 ---
 
@@ -320,39 +339,89 @@ Connection/exec/nameConfig/VS Code consumers continue to use the connection-user
 
 ### Requirement: Unsupported property policy
 
-The CLI MUST fail closed on unsupported or unknown-dangerous configuration. Errors MUST be structured and actionable: identify the property/flag, state that it is unsupported, and indicate what to remove or change. Known Apple-incompatible **optional** bits MUST warn-and-skip (never silent ignore). The CLI MUST NEVER silently ignore unknown-dangerous entries.
+Every top-level Dev Container input MUST be classified by known semantics:
 
-**Warn-skip (v1) — continue `up` with effective config stripped**
+| Class | Default behavior | Hash behavior |
+|-------|------------------|---------------|
+| Exact translation | Apply through a typed product/runtime mapping; no compatibility issue | Hash normalized effective behavior |
+| Bounded emulation | Apply the documented substitute and emit one emulated issue | Hash delivered behavior |
+| Harmless metadata/no-op | Admit silently without claiming runtime semantics | Hash-neutral |
+| Known optional unsupported | Emit one ignored issue, strip from effective behavior, and continue | Hash-neutral |
+| Blocked | Structured actionable error | No effective hash/result |
 
-- Feature refs containing `docker-outside-of-docker` / `docker-in-docker` / `docker-from-docker` (any registry/tag or local path) — drop from admitted features; warn
-- Feature/image metadata `privileged: true` or non-empty `securityOpt` — warn; do not apply to create; feature may still install if admitted
-- `runArgs` known-incompatible family (`--privileged`, `--device…`, `--security-opt`, `--gpus`, `--ipc`, `--pid`, `--userns`, `--cgroupns`, `--hostname`, `--add-host`, `--sysctl`, `--group-add`, `--runtime`, Docker-only `--network` modes) — skip entry with warn; keep allowlisted siblings
+Hard rejection MUST be limited to malformed input or semantics whose omission would make execution incoherent, unsafe, destructive, or materially misleading. This includes unrepresentable configuration-source selectors (`build`/legacy Dockerfile and Compose until separately supported), custom workspace/process semantics that would run different content or commands, required host capabilities that are unmet or unverifiable, data/security-sensitive protections that cannot be preserved, unsupported substitutions, invalid Feature option/package requirements, and first-class runArg collisions. A recognized property MUST NOT be rejected merely because it lacks an implementation when its omission is registered as harmless or optional and reported as required.
 
-**Hard-error (v1) — Features-aware**
+Truly unknown non-metadata top-level keys MUST remain blocked because their semantic consequence cannot be classified. Object-shaped registered tool namespaces under `customizations` are metadata, not a precedent for arbitrary top-level acceptance. Unknown runArgs and raw Apple CLI passthrough remain blocked; only the typed runtime model and explicit runArgs allowlist may produce Apple arguments.
 
-- `runArgs` entries not on the runArgs allowlist (and not in the warn-skip family)
+The existing known optional families remain warn-and-ignore in default mode: docker-* Features, privileged/device/security/runtime runArgs, Feature/image privileged or securityOpt metadata, top-level non-empty securityOpt, and other entries explicitly registered under this policy. Strict compatibility overrides continuation by failing on their compatibility issues.
+
+**Registered warn-and-ignore inputs — continue in default mode with effective config stripped**
+
+- Feature refs containing `docker-outside-of-docker` / `docker-in-docker` / `docker-from-docker` (any registry/tag or local path) — drop from admitted features; report one ignored issue
+- Feature/image metadata `privileged: true` or non-empty `securityOpt` — report one ignored issue; do not apply to create; the Feature may still install if admitted
+- `runArgs` known-incompatible family (`--privileged`, `--device…`, `--security-opt`, `--gpus`, `--ipc`, `--pid`, `--userns`, `--cgroupns`, `--hostname`, `--add-host`, `--sysctl`, `--group-add`, `--runtime`, Docker-only `--network` modes) — skip the entry with one ignored issue; keep allowlisted siblings
+
+**Blocked inputs — Features-aware**
+
+- `runArgs` entries not on the runArgs allowlist and not in the registered warn-and-ignore family
 - First-class smuggling via runArgs (`-e`, `-u`, `-w`, `-p`, `-v`, …)
 - Docker Compose keys / compose-file driven multi-service config
-- Unknown top-level dangerous properties; missing `image`; invalid feature option shapes; hostRequirements shortfalls; unsupported substitutions
+- Unknown top-level dangerous properties; missing `image`; invalid Feature option shapes; hostRequirements shortfalls; unsupported substitutions
 
-**No longer reject**
+**Admitted behavior retained from the realized policy**
 
-- Non-ood OCI `features` entries solely for being features — they MUST enter the Features runner path
-- Local path feature refs — they MUST enter the Features runner path (load from disk relative to workspace)
-- Presence of docker-* features or privileged/device runArgs alone — warn-skip instead of failing whole config
+- Non-docker OCI `features` entries and local path Feature refs MUST enter the Features runner path rather than being rejected solely for being Features
+- Other object-shaped editor metadata and `customizations.*` namespaces not applied in v1 MUST NOT fail parse; well-formed `customizations.vscode.extensions` and `settings` remain retained and applied under their realized requirements, while malformed nested shapes soft-skip apply with a warning when `customizations.vscode` itself is an object
+- Optional non-empty `name` remains identity-affecting rather than pure metadata
+- `hostRequirements` remains evaluated rather than silently ignored
 
-**May ignore or store as metadata (MUST NOT fail parse)**
-- Other benign editor metadata and other `customizations.*` namespaces that are not applied in v1 (MUST NOT fail parse). `customizations.vscode` is **no longer pure ignore** for apply purposes (see **No longer pure-ignore** below).
+#### Scenario: Truly unknown top-level property remains blocked
 
-**Not pure metadata (identity-affecting)**
-- Optional `name` — when non-empty after trim, MUST drive the human base of container name and Features derived tag (see Deterministic identity and labels); MUST NOT fail parse
+- Given an otherwise valid config containing an unregistered top-level property
+- When admission runs
+- Then the CLI returns a structured unsupported-property error naming the key rather than silently ignoring it or passing it through
 
-**No longer pure-ignore**
-- `hostRequirements` — MUST evaluate per **hostRequirements preflight** (not silent ignore)
-- `customizations.vscode` — MUST still admit without failing parse when present as an object under object-shaped `customizations` (see existing scenario **customizations.vscode does not fail**). When nested `extensions` / `settings` are well-formed, the CLI MUST retain them and MUST apply per **Parse and retain customizations.vscode extensions and settings**, **Apply vscode settings on create-path (and repair on drift)**, **Apply vscode extensions when --vscode is set (before open)**, and **Vscode customizations apply idempotency**. Malformed nested shapes soft-skip apply with warn rather than failing whole-config resolve when `customizations.vscode` is an object.
+#### Scenario: Recognized optional property no longer blocks default mode
 
-**Unknown non-metadata top-level properties**
-- MUST hard-error (fail closed), except keys explicitly supported in core plus lifecycle hooks, allowlisted `runArgs`, `hostRequirements`, and **`features`**.
+- Given a structurally valid property registered as known optional unsupported
+- When admission and resolution run in default mode
+- Then the property is stripped, one compatibility warning describes the omission, and the remaining effective config MUST NOT fail solely because that property was ignored
+
+#### Scenario: Malformed recognized property remains blocked
+
+- Given a registered exact, harmless, emulated, or optional property with an invalid required shape
+- When admission runs
+- Then the CLI returns a property-specific structured validation error rather than treating the value as absent
+
+#### Scenario: Unrepresentable source selector remains blocked
+
+- Given a config selects Dockerfile build or Docker Compose without a separately supported translation
+- When admission runs
+- Then the CLI fails before choosing another image or creating a semantically unrelated container
+
+#### Scenario: Material workspace or process mismatch remains blocked
+
+- Given `workspaceMount`, `remoteEnv`, `overrideCommand: false`, or another registered behavior whose omission would mount different content or run different processes
+- When no bounded implementation exists
+- Then the CLI fails with an actionable property-specific error rather than warn-ignoring the behavior
+
+#### Scenario: Required host or protection semantics remain blocking
+
+- Given a required host capability is unmet/unverifiable or a requested data/security protection cannot be preserved
+- When preflight classifies the requirement
+- Then the command fails before the affected runtime or destructive action
+
+#### Scenario: First-class runArg collision remains blocked
+
+- Given runArgs attempts to set product-owned env, user, workdir, port, mount, name, label, entrypoint, or lifecycle flags
+- When runArgs admission runs
+- Then the CLI fails with the existing collision policy and does not passthrough the flag
+
+#### Scenario: Existing Apple-incompatible optional inputs remain tolerant
+
+- Given default mode with docker-* Features, privileged/device/security-family runArgs, or privileged/securityOpt metadata
+- When the applicable admission or metadata boundary completes
+- Then each omitted item produces a deterministic ignored compatibility issue and compatible siblings remain effective
 
 #### Scenario: Warn-skip docker-outside-of-docker
 - Given a config with `features` including a docker-outside-of-docker ref (optionally plus a non-docker feature)
@@ -422,13 +491,13 @@ The CLI MUST fail closed on unsupported or unknown-dangerous configuration. Erro
 
 On create, the CLI MUST assign a deterministic container name and MUST set labels. Apple `container create --name` MUST equal the container id used for later inspect/exec/stop/delete/start.
 
-Sanitize MUST be DNS-safe: lowercase; replace each run of characters outside `[a-z0-9-]` with `-`; trim leading/trailing hyphens; clip the base to about 20 characters (same policy as the implementation).
+Sanitize MUST be DNS-safe: lowercase; replace each run of characters outside `[a-z0-9-]` with `-`; collapse consecutive hyphens; trim leading/trailing hyphens.
+
+`name` is not metadata-only: when set (non-empty after trim), it MUST drive the **create name** (DNS / human identification). It MUST NOT drive the resource base used for `${devcontainerId}`, Features derived image tags, or product workspace volumes.
 
 When `features` is present, config hash material MUST include the selected feature refs, options, and ordered identity inputs. Changing features MUST change config hash so reuse and drift detection remain correct (a new create path runs when features change).
 
-`name` is not metadata-only: when set (non-empty after trim), it MUST drive the human base used for the container name and for Features derived image tags.
-
-**Bind-mode (`up`) identity** MUST remain: `hash12` from workspace path + config path. On create, labels MUST include:
+**Bind-mode (`up`) workspace identity** MUST remain: `hash12` from workspace path + config path is still the bind-mode identity hash for hashed sidecars that need it. Reuse and occupancy MUST key off labels (`devcontainer.local_folder` + `devcontainer.config_file`), not off embedding that hash in the create name. On create, labels MUST include:
 
 | Label | Requirement |
 |-------|-------------|
@@ -442,39 +511,58 @@ When `features` is present, config hash material MUST include the selected featu
 | `devcontainer.config_volumes` | Comma-separated config `type=volume` sources when any; omit/empty otherwise |
 | `devcontainer.git_url` / `devcontainer.workspace_volume` | MUST NOT be set (or empty; purge ignores missing ws vol) |
 
-**Human base (bind-mode)**
+**Resource base** (rebuild-stable sidecars only)
+
+1. Sanitize the workspace folder basename (bind) or the git URL repo basename (volume). MUST NOT use config `name`.
+2. Clip the resource base to about 20 characters.
+3. Resource base is used for Features tags, the product workspace volume, and the `${devcontainerId}` stem only. An empty resource base after sanitize/clip MUST NOT invent a hashed create name; create-name emptiness is a structured failure (below). Features empty-base tag fallback `adevcontainer:{contentHash}` remains for the tag path. Empty resource base for the stem is `adev-{hash12}`.
+
+**Create name (container id / DNS hostname)**
 
 1. If `devcontainer.json` `name` is present and non-empty after trim → sanitize that value.
-2. Else → sanitize the workspace folder basename.
+2. Else → sanitize the workspace folder basename (bind) or the git URL repo basename (volume).
+3. MUST NOT prefix `adev-`. MUST NOT append an identity hash.
+4. The create name MUST be ≤ 63 characters and MAY use the full 63-character budget. If the sanitized value exceeds 63, the product MUST clip to 63 characters and trim leading/trailing hyphens afterward.
+5. If the create name is empty after sanitize (and clip/trim), the CLI MUST fail with a structured error that asks the user to set a DNS-safe `name` in `devcontainer.json`. MUST NOT fall back to `adev-{hash12}` or any other invented create name.
+6. Occupancy of that create name MUST follow **Create-name occupancy classification**.
 
-**Container name (bind-mode)**
-
-- Format: `adev-{base}-{hash12}` where `hash12` is a 12-character hash of workspace path + config path.
-- If the human base is empty after sanitize → `adev-{hash12}`.
-- The full name MUST be ≤ 63 characters.
-
-**Volume-mode (`clone`) identity** MUST use the volume-mode identity and labels requirements (git URL + config relative path; managed/volume labels; adapted `local_folder`). The two modes MUST NOT collide solely because a temp path string matches a host workspace path. Volume-mode create MUST stamp `devcontainer.remote_user` to the same **resolved remote connection user** (non-empty) as bind-mode.
+**Volume-mode (`clone`) identity** MUST use the volume-mode identity and labels requirements (git URL + config relative path; managed/volume labels; adapted `local_folder`). Bind and volume workspace hashes MUST stay distinct. Two invocations MAY still compute the same create name when sanitized `name` / fallback values match; that is a name occupancy, not a hash collision. Volume-mode create MUST stamp `devcontainer.remote_user` to the same **resolved remote connection user** (non-empty) as bind-mode.
 
 On every successful managed create (`up` bind, `clone` volume, `rebuild` new container), the product MUST stamp `devcontainer.remote_user` to the resolved remote connection user from **Remote connection user resolution**.
 
 Greenfield: existing containers with empty labels are out of scope for automatic repair; `exec` continues to honor whatever is stamped (empty → omit `-u` on exec as today). New creates MUST always stamp non-empty.
 
-Discovery and reuse MUST prefer deterministic name + inspect, NOT Docker-style `ps --filter label=` as the primary mechanism. Discovery of managed containers for `list` / `start` / extended `stop` MUST filter client-side on `devcontainer.managed=adevcontainer` after machine JSON list (Apple `container` has no label filter API).
+Discovery and reuse MUST prefer create name + inspect + managed labels, NOT Docker-style `ps --filter label=` as the primary mechanism. Discovery of managed containers for `list` / `start` / extended `stop` MUST filter client-side on `devcontainer.managed=adevcontainer` after machine JSON list (Apple `container` has no label filter API).
 
 #### Scenario: Stable name across invocations
-- Given the same workspace path and config content
+- Given the same workspace path, config `name`, and config content
 - When `up` is invoked twice without delete
-- Then the second invocation reuses the same container identity rather than creating a conflicting duplicate
+- Then the second invocation reuses the same create name and same-workspace occupant rather than creating a conflicting duplicate
 
 #### Scenario: Container name uses config name when set
-- Given a config with `"name": "My App"` and a workspace folder basename `other-folder`
-- When the container name is computed
-- Then the human base is derived from `My App` (sanitized), not from `other-folder`, and the name matches `adev-{base}-{hash12}` (or is clipped to ≤ 63 characters)
+- Given a config with `"name": "My App"` and a workspace folder basename `foo`
+- When the container name and resource stem are computed
+- Then the create name is `my-app` (DNS-safe sanitize of `My App`) and the resource stem is `adev-foo-{hash12}` (not `adev-my-app-{hash12}`)
 
 #### Scenario: Container name falls back to workspace basename
-- Given a config with no `name` (or only whitespace)
+- Given a config with no `name` (or only whitespace) and workspace folder basename `other-folder`
 - When the container name is computed
-- Then the human base is the sanitized workspace folder basename and the name matches `adev-{base}-{hash12}` (empty base → `adev-{hash12}`)
+- Then the create name is the sanitized workspace folder basename (`other-folder` or equivalent sanitize result) with no `adev-` prefix and no identity hash
+
+#### Scenario: Empty sanitize asks for a DNS-safe name
+- Given a config whose `name` (or fallback basename, when `name` is omitted) sanitizes to empty
+- When `up` or `clone` computes the create name
+- Then the CLI fails with a structured error asking for a DNS-safe `name` and MUST NOT create a container named `adev-{hash12}`
+
+#### Scenario: Create name may use 63 characters
+- Given a sanitized create name of 63 `a-z0-9-` characters
+- When the container is created
+- Then Apple `create --name` equals that 63-character value
+
+#### Scenario: Punctuation-heavy name collapses hyphens
+- Given a config with `"name": "C# (.NET)"` and workspace folder basename `proj`
+- When the create name and resource base are computed
+- Then the create name is `c-net` (not `c----net`) and the resource base is the sanitized folder basename (`proj`), not `c-net`
 
 #### Scenario: Labels present on inspect
 - Given a container created by `up`
@@ -486,10 +574,11 @@ Discovery and reuse MUST prefer deterministic name + inspect, NOT Docker-style `
 - When config hashes are computed
 - Then the hashes differ
 
-#### Scenario: Bind and volume modes distinct hash inputs
-- Given a bind-mode up on host path `/Projects/foo` and a clone of a git URL whose repo basename is also `foo`
+#### Scenario: Bind and volume modes distinct workspace hashes
+- Given a bind-mode up on host path `/Projects/foo` and a clone of a git URL whose repo basename is also `foo`, both without an overriding `name`
 - When identities are computed
-- Then the hash inputs differ (path+config vs git URL+config relpath) so container names are not required to match and MUST follow each mode’s rules
+- Then bind hash material (path+config) differs from volume hash material (git URL+config relpath) so workspace-volume names stay mode-specific
+- And both create names are the sanitized `foo` (or equivalent); if that name is already taken by the other mode, occupancy classification applies
 
 #### Scenario: Up create stamps managed bind labels
 - Given a successful `up` create
@@ -947,3 +1036,608 @@ Fixtures MUST be valid for their capability (no hard-error props such as Compose
 - Then each fixture is admitted for its capability without unexpected unsupported-property errors
 
 See also: [runargs-host.md](runargs-host.md), [features.md](features.md), and [lifecycle-hooks.md](lifecycle-hooks.md) for domain-specific fixture requirements that reference this inventory.
+
+---
+
+### Requirement: Top-level init and securityOpt behavior
+
+The CLI MUST admit top-level `init` when its value is a Boolean. `init: true` MUST request an init process for effective create behavior; `init: false` MUST contribute no init request. Effective init MUST be the Boolean union of top-level `init`, allowlisted `runArgs` `--init`, and compatible Feature/image metadata init contributions. The resulting Apple create argv MUST contain at most one `--init`. A false or absent top-level value MUST NOT veto an init request from another source.
+
+The CLI MUST admit top-level `securityOpt` when its value is an array containing only strings. An empty array MUST have no effect and MUST NOT emit a compatibility issue. In default tolerant mode, a non-empty array MUST emit exactly one ignored compatibility issue per config resolve stating that the property was ignored/not applied on Apple container; when the array includes `no-new-privileges`, the issue MUST explicitly state that `no-new-privileges` is not enforced. No top-level security option MUST reach effective runtime configuration or Apple create argv. In strict compatibility mode, that same issue MUST cause `compatibility_degraded` before the affected runtime action.
+
+Invalid shapes MUST fail closed with a structured error naming the property: `init` values other than Boolean, `securityOpt` values other than an array, and any non-string `securityOpt` entry are invalid. Unknown top-level properties remain governed by **Unsupported property policy**.
+
+For these properties, config hash material MUST represent normalized config-time effective behavior: one effective init request contributes one init entry regardless of duplicate top-level and `runArgs` declarations; false and absent top-level init are equivalent when no other config-time source requests init; and warn-stripped `securityOpt` contributes no hash material. Existing Feature refs/options remain hash inputs under the realized Features identity contract, while Feature init merge MUST still avoid duplicate create tokens.
+
+#### Scenario: Top-level init true maps to create
+
+- Given two otherwise identical image-based configs with no other init source, one with `init: true` and one omitting `init`
+- When both configs are resolved and create argv is built
+- Then the true form requests init and produces exactly one `--init`, the omitted form produces no `--init`, and their config hashes differ
+
+#### Scenario: Top-level init false is an additive no-op
+
+- Given two otherwise identical configs, one omitting `init` and one setting `init: false`, with no other init source
+- When both configs are resolved
+- Then neither effective config requests init, neither create argv contains `--init`, and their config hashes are equal
+
+#### Scenario: Top-level and runArgs init deduplicate
+
+- Given two otherwise identical configs whose `runArgs` contain `--init`, one also setting top-level `init: true` and one omitting top-level `init`
+- When both configs are resolved and create argv is built
+- Then both effective configs produce exactly one `--init` and their config hashes are equal
+
+#### Scenario: Feature and image metadata init union with config init
+
+- Given configs whose top-level `init` is respectively true and false, and each compatible contribution source in turn—Feature metadata and image metadata—requests init
+- When each contribution is merged before create
+- Then every resulting create argv contains exactly one `--init`: true is deduplicated and false does not veto the metadata request
+
+#### Scenario: Invalid init fails closed
+
+- Given an image-based config whose top-level `init` is a string, number, object, array, or null
+- When config admission or resolution runs
+- Then the CLI fails with a structured error naming `init` and creates no container
+
+#### Scenario: Non-empty securityOpt warns without enforcement
+
+- Given an image-based config with `securityOpt: ["no-new-privileges"]`
+- When the config is resolved and create argv is built in default tolerant mode
+- Then resolution succeeds with exactly one ignored compatibility issue stating that the property was not applied and `no-new-privileges` is not enforced
+- And no security option reaches effective runtime configuration, create argv, or config hash material
+
+#### Scenario: Other securityOpt values warn and strip
+
+- Given an image-based config with a non-empty string array such as `securityOpt: ["seccomp=profile.json"]`
+- When the config is resolved and create argv is built in default tolerant mode
+- Then resolution succeeds with exactly one ignored compatibility issue stating that the property was not applied on Apple container
+- And no security option reaches effective runtime configuration, create argv, or config hash material
+
+#### Scenario: Empty securityOpt is silent
+
+- Given an image-based config with `securityOpt: []`
+- When the config is resolved
+- Then resolution succeeds without a securityOpt compatibility issue and the property contributes no effective behavior or hash material
+
+#### Scenario: Invalid securityOpt fails closed
+
+- Given an image-based config whose `securityOpt` is not an array or whose array contains a non-string entry
+- When config admission or resolution runs
+- Then the CLI fails with a structured error naming `securityOpt` and creates no container
+
+#### Scenario: Ignored securityOpt is hash-neutral
+
+- Given two otherwise identical valid configs, one omitting `securityOpt` and one containing a non-empty string array
+- When both configs are resolved in default tolerant mode
+- Then their effective runtime configurations and config hashes are equal, while the non-empty form emits its required compatibility issue
+
+#### Scenario: Strict securityOpt blocks before runtime
+
+- Given the same config with `ADEVCONTAINER_STRICT_COMPATIBILITY=1`
+- When config is resolved for a runtime command
+- Then the command fails with `compatibility_degraded` before the affected create, start, reuse-success, build, or destructive action
+
+---
+
+### Requirement: Bare template compatibility fixtures
+
+The repository MUST retain representative post-template-application fixtures for the active property shapes used by the eleven public Bare Dev Container templates inventoried at `bare-devcontainer/templates@b6a41219`. The fixtures MUST use concrete image tags rather than unresolved `${templateOption:*}` tokens and MUST cover these equivalence classes:
+
+| Fixture class | Required coverage |
+|---------------|-------------------|
+| Debian | Common baseline: name, image, non-root remoteUser, `runArgs` cap-drop ALL, non-empty securityOpt, and init true |
+| uv | Common baseline plus containerEnv, one `${devcontainerId}` named cache volume, and VS Code extensions/settings |
+| Go | Common baseline plus multiple `${devcontainerId}` named cache volumes and deeply nested VS Code settings |
+
+All three fixtures MUST resolve without an unsupported-property failure after this change. Each MUST preserve its already-supported effective fields, request exactly one init create token, and warn without claiming enforcement for non-empty securityOpt. This compatibility requirement does not guarantee direct consumption of upstream template source files or actual `no-new-privileges` enforcement.
+
+#### Scenario: Bare Debian baseline resolves
+
+- Given the representative applied Bare Debian fixture
+- When the fixture is admitted, resolved, and mapped to create argv
+- Then its common baseline fields remain effective, argv includes cap-drop ALL and exactly one `--init`, and securityOpt is warn-stripped without enforcement
+
+#### Scenario: Bare uv rich single-volume profile resolves
+
+- Given the representative applied Bare uv fixture
+- When the fixture is resolved
+- Then its environment value, `${devcontainerId}` cache volume, and VS Code extensions/settings are retained under their existing contracts, while init and securityOpt follow this change
+
+#### Scenario: Bare Go multi-volume profile resolves
+
+- Given the representative applied Bare Go fixture
+- When the fixture is resolved
+- Then both cache volumes and nested VS Code settings are retained under their existing contracts, while create argv contains cap-drop ALL and exactly one `--init` and does not contain a security option
+
+---
+
+### Requirement: Deterministic compatibility degradation reporting
+
+The CLI MUST represent every recognized bounded-emulation or warn-and-ignore decision as a compatibility issue with a stable code, property path, disposition (`emulated` or `ignored`), and actionable message describing the effective behavior or omitted semantics. Compatibility issue messages MUST NOT expose secret metadata keys/values, credentials, or other values protected by existing redaction rules.
+
+Within each completed compatibility evaluation boundary, issues MUST be deduplicated by stable code, property path, and safe subject identity, then ordered by property path, code, and safe subject identity. Pre-substitution and post-substitution admission MUST NOT emit duplicate issues for the same input. Each resulting issue MUST emit exactly one `warning: ` line through the existing stderr warning channel in default mode; QUIET MUST NOT suppress it, and warnings MUST NOT contaminate JSON stdout.
+
+Exact translations and explicitly harmless metadata MUST NOT produce compatibility issues. Malformed input and blocked semantics MUST retain specific structured errors rather than being relabeled as degradation.
+
+The first compatibility slice MUST expose these stable issue codes; property path and safe subject identity distinguish individual occurrences:
+
+| Stable code | Registered degradation |
+|-------------|------------------------|
+| `config_other_ports_attributes_ignored` | Non-empty top-level `otherPortsAttributes` |
+| `config_secrets_ignored` | Non-empty top-level `secrets` recommendation metadata |
+| `config_privileged_ignored` | Top-level `privileged: true` |
+| `config_security_opt_ignored` | Non-empty top-level `securityOpt` |
+| `run_arg_ignored` | Each registered Apple-incompatible runArgs entry |
+| `docker_feature_ignored` | Each docker-in/outside/from-docker Feature omitted at admission |
+| `feature_privileged_ignored` | Feature metadata privilege request omitted |
+| `feature_security_opt_ignored` | Feature metadata security options omitted |
+| `image_privileged_ignored` | Image metadata privilege request omitted |
+| `image_security_opt_ignored` | Image metadata security options omitted |
+| `mount_file_bind_promoted` | File-bind source promoted to the documented directory substitute |
+
+This change's compatibility issue vocabulary is exactly the codes in the table. Existing sidecar notices that are not those classification decisions — including the extra NET_ADMIN contextual warning after skipped privileged/device runArgs, `hostRequirements.gpu`, and vscode apply soft-skip warnings — MUST keep their realized default-mode behavior and MUST NOT alone raise `compatibility_degraded`.
+
+Compatibility issue data and presentation text MUST NOT participate in config hash material. Ignored and harmless properties MUST be hash-neutral. Exact translations MUST hash their normalized effective behavior; bounded emulations MUST hash the behavior actually delivered rather than unsupported raw syntax.
+
+#### Scenario: Default mode reports known degradation once
+
+- Given a valid config containing the same known optional unsupported item observed during both admission passes
+- When configuration resolution completes in default mode
+- Then exactly one compatibility warning with a stable code, property path, ignored disposition, and omitted-semantics explanation is emitted
+
+#### Scenario: Compatibility warnings are deterministic
+
+- Given a config that produces multiple compatibility issues in an evaluation boundary
+- When the same config is resolved repeatedly
+- Then issue order is stable by property path, code, and safe subject identity and duplicate observations do not add warnings
+
+#### Scenario: Exact and harmless inputs do not warn
+
+- Given a config containing only exact translations and harmless metadata
+- When compatibility classification completes
+- Then no compatibility degradation warning is emitted
+
+#### Scenario: Compatibility warnings preserve terminal channels
+
+- Given default compatibility mode with `ADEVCONTAINER_QUIET=1` and JSON command output
+- When a known optional property is ignored
+- Then stderr contains its `warning: ` compatibility issue and stdout remains pure JSON
+
+#### Scenario: Ignored input is hash-neutral
+
+- Given otherwise identical configs where one adds only a known ignored optional property
+- When their effective config hashes are computed
+- Then the hashes are equal and the config containing the property reports degradation
+
+#### Scenario: Emulation hashes delivered behavior
+
+- Given a supported bounded emulation such as file-bind promotion
+- When effective config hash material is produced
+- Then the normalized delivered mount behavior participates in the hash and unsupported raw options do not
+
+#### Scenario: Sidecar notices stay outside the issue vocabulary
+
+- Given default or strict mode with `hostRequirements.gpu`, skipped privileged/device runArgs that also produce the extra NET_ADMIN contextual warning, or a vscode apply soft-skip
+- When compatibility classification completes
+- Then those notices are not compatibility issues, do not use a table code, and do not alone cause `compatibility_degraded`
+
+---
+
+### Requirement: Strict compatibility automation
+
+The environment value `ADEVCONTAINER_STRICT_COMPATIBILITY=1` MUST enable strict compatibility for `up`, `clone`, `rebuild`, `start`, and `exec` when those commands resolve or load Dev Container configuration. Other values and absence MUST select default tolerant mode. Other commands that do not resolve workspace configuration for a runtime action remain unchanged.
+
+In strict mode, any compatibility issue with disposition `ignored` or `emulated` MUST fail the command with structured code `compatibility_degraded`, identify the first deterministically ordered property, and summarize all issue codes without exposing protected values. The gate MUST occur before the affected container create, start, reuse-success, derived-image build, old-container delete, or other destructive lifecycle action. Read-only parse, image inspection, and Feature artifact retrieval needed to classify compatibility MAY occur before the gate.
+
+Strict mode MUST NOT fail solely for harmless metadata or exact translations and MUST NOT alter effective config hash material. Independently malformed or blocked input MUST keep its more specific error instead of becoming `compatibility_degraded`.
+
+#### Scenario: Default tolerant mode continues
+
+- Given a structurally valid config with a known optional ignored property and strict compatibility unset
+- When `up`, `clone`, or `rebuild` resolves the config
+- Then the command emits the compatibility warning, retains only effective behavior, and MUST NOT fail solely because that property was ignored
+
+#### Scenario: Strict mode blocks degradation before runtime effects
+
+- Given the same config with `ADEVCONTAINER_STRICT_COMPATIBILITY=1`
+- When `up`, `clone`, `rebuild`, `start`, or `exec` resolves all compatibility needed for its next runtime action
+- Then it fails with `compatibility_degraded` before create, start, reuse-success, user exec, derived-image build, or old-container deletion
+
+#### Scenario: Strict error aggregation is deterministic and redacted
+
+- Given strict mode and multiple ignored or emulated issues including secrets metadata
+- When the strict gate fails
+- Then the error property is the first deterministic property, its summary lists stable issue codes, and no secret key or value is emitted
+
+#### Scenario: Strict mode accepts exact and harmless inputs
+
+- Given strict mode and a config whose registered properties are exact translations or harmless metadata only
+- When the config is resolved
+- Then strict compatibility does not fail the command
+
+#### Scenario: Malformed input keeps its specific error
+
+- Given strict mode and a recognized property with an invalid JSON shape
+- When admission runs
+- Then the command fails with the property-specific structured validation error rather than `compatibility_degraded`
+
+---
+
+### Requirement: Low-risk standard metadata and no-op compatibility
+
+The supported top-level registry MUST admit these standard properties with exact shape validation:
+
+| Property | Shape | Default-mode behavior |
+|----------|-------|-----------------------|
+| `$schema` | string | Harmless parser/editor metadata; silently ignore; hash-neutral |
+| `otherPortsAttributes` | object | Empty object is silent; non-empty object emits one ignored compatibility issue stating that default port UI/auto-forward actions are not applied; hash-neutral |
+| `secrets` | object whose entries are objects | Empty object is silent; non-empty object emits one ignored compatibility issue stating that recommendations are not injected or validated; never print entry names or values; hash-neutral |
+| `privileged` | Boolean | false is silent; true emits one ignored compatibility issue and contributes no privilege flag or Apple virtualization behavior; hash-neutral |
+| `overrideCommand` | Boolean | true is a silent harmless restatement of the product default keep-alive override (hash-neutral; no distinct effective behavior); false remains blocked because the image command is not preserved |
+
+Wrong top-level or required nested shapes MUST fail with a structured error naming the property. These admissions MUST NOT create a generic extension mechanism for arbitrary top-level keys.
+
+#### Scenario: Schema metadata is silent
+
+- Given a valid image config with string `$schema`
+- When the config is resolved in default or strict mode
+- Then resolution does not fail or warn solely for `$schema`, and its value does not affect the config hash
+
+#### Scenario: Non-empty otherPortsAttributes degrades visibly
+
+- Given a valid config with non-empty object `otherPortsAttributes`
+- When the config is resolved in default mode
+- Then resolution emits exactly one ignored compatibility issue stating that its port actions are not applied and the property does not affect effective config or hash
+
+#### Scenario: Secrets recommendations are not exposed
+
+- Given a valid config with non-empty object `secrets` containing named recommendation metadata
+- When the config is resolved in default or strict mode
+- Then default mode emits one property-level ignored issue without secret names or values, strict mode fails with the redacted issue, and neither mode injects secrets
+
+#### Scenario: Privileged true is warn-stripped
+
+- Given a valid config with `privileged: true`
+- When create behavior is resolved in default mode
+- Then one ignored compatibility issue is emitted and no privileged or virtualization token reaches effective config or Apple create argv
+
+#### Scenario: Harmless false and empty forms are silent
+
+- Given a valid config with `privileged: false`, empty `otherPortsAttributes`, empty `secrets`, and `overrideCommand: true`
+- When the config is resolved in default or strict mode
+- Then these values emit no compatibility issue and do not affect the config hash
+
+#### Scenario: Override command false remains blocking
+
+- Given a valid image config with `overrideCommand: false`
+- When config admission runs
+- Then the CLI fails with a structured error explaining that preserving the image command is unsupported
+
+#### Scenario: Invalid metadata shapes remain blocking
+
+- Given `$schema` is not a string, `otherPortsAttributes` or `secrets` is not an object, a secrets entry is not an object, or `privileged`/`overrideCommand` is not Boolean
+- When admission runs
+- Then the CLI fails with a structured error naming the malformed property
+
+---
+
+### Requirement: Create-name occupancy classification
+
+Before `up` or `clone` creates a container, the CLI MUST classify any existing container whose runtime name equals the desired create name, and MUST classify any existing managed container for the same workspace under a different runtime name.
+
+**Same workspace** means the occupant’s managed labels match this invocation:
+
+| Mode | Matching labels |
+|------|-----------------|
+| Bind (`up`) | `devcontainer.local_folder` + `devcontainer.config_file` equal this workspace path and config path |
+| Volume (`clone`) | `devcontainer.git_url` + config identity (`devcontainer.config_file` / repo-relative config path) equal this normalized git URL and config relative path |
+
+**Classification — MUST**
+
+| Occupant | Command | Outcome |
+|----------|---------|---------|
+| Same workspace, same create name, managed | `up` | Existing reuse, start-stopped, or `config_hash_mismatch` → hint `rebuild`. MUST NOT offer a rename-to-duplicate path. |
+| Same workspace, same create name, managed | `clone` | Fail closed with a structured error naming the existing container. MUST NOT silently reuse, replace, attach, or offer rename-to-duplicate. |
+| Same workspace, different runtime name (managed or not) | `up` / `clone` | Fail with a structured error and a delete-hint. MUST NOT offer the foreign-name rename prompt. MUST NOT silently reuse, rename, or attach. |
+| Desired create name taken by a different workspace identity, or by an unmanaged container | `up` / `clone` | Foreign occupant — see **Foreign create-name collision offer**. |
+| No occupant of the desired create name, and no same-workspace container under another name | `up` / `clone` | Create under the desired create name. |
+
+`start` MUST NOT apply this classification as a create-name collision trigger. `rebuild` MUST NOT use this `up`/`clone` leftover delete-hint; it is the rename / naming-migration path — see **Rebuild replacement create name**.
+
+Idle containers (no `rebuild` or delete) MUST keep their runtime names. `up`/`clone` MUST NOT auto-rename an existing `adev-*` occupant.
+
+#### Scenario: up reuses same-workspace same-name occupant
+
+- Given a managed bind-mode container whose create name equals the desired create name and whose `local_folder`+`config_file` match this workspace
+- When the user runs `up` and the stamped config hash matches
+- Then the CLI reuses or starts that container and MUST NOT prompt to rename
+
+#### Scenario: up hash mismatch on same-workspace same-name occupant
+
+- Given a managed bind-mode container whose create name equals the desired create name and whose workspace labels match, but stamped `devcontainer.config_hash` differs
+- When the user runs `up`
+- Then the CLI fails with `config_hash_mismatch`, does not delete the occupant, and does not offer the foreign-name rename prompt
+
+#### Scenario: clone fails closed on same-workspace same-name occupant
+
+- Given a managed volume-mode container whose create name equals the desired create name and whose git URL + config identity match this clone
+- When the user runs `clone` for that identity
+- Then the CLI fails with a structured error naming the existing container and MUST NOT create, start, populate, or offer rename-to-duplicate
+
+#### Scenario: same-workspace occupant under a different name is a delete-hint
+
+- Given a managed container for this workspace already exists under a different runtime name (including a leftover `adev-*` name)
+- When the user runs `up` or `clone` for that workspace
+- Then the CLI fails with a structured error that hints to delete the existing container and MUST NOT present the foreign-name rename prompt
+
+#### Scenario: start does not offer create-name collision
+
+- Given a managed container selectable by `--name` or the managed picker, and some other container already uses a name that would collide with a sanitized config `name`
+- When the user runs `start`
+- Then start does not classify or offer a create-name collision rename prompt
+
+#### Scenario: no idle migration of existing containers
+
+- Given an existing managed container whose runtime name is `adev-{base}-{hash12}`
+- When the user does not delete or rebuild it
+- Then that container keeps its runtime name and `up`/`clone` do not rename it
+
+---
+
+### Requirement: Rebuild replacement create name
+
+`rebuild` MUST create the replacement container under the **current** computed create name from the live config (sanitized `name` when set, else the mode fallback), not under `selected.name`, when those values differ.
+
+The product MUST NOT delete the selected (old) container until that replacement create name is known and occupiable. If the computed name is taken by a **foreign** occupant, `rebuild` MUST follow **Foreign create-name collision offer** and MUST leave the selected container in place.
+
+When the replacement is created, `rebuild` MUST:
+
+- Reuse the existing product workspace volume `adev-{base}-{hash12}-ws` (volume mode) with its data. MUST NOT rename, delete, or re-populate that volume.
+- Reuse user-literal volume `source` strings as written (same attach/reuse as today’s rebuild).
+- Expand `${devcontainerId}` in mounts to the **same** resource identity stem as before the rebuild (`adev-{base}-{hash12}`, empty resource base → `adev-{hash12}`), not to the new create name, so those volumes are reused. Config `name` MUST NOT change that stem.
+
+When the computed create name equals the selected name, `rebuild` MUST keep today’s same-name replacement behavior (container-only delete then create under that name).
+
+#### Scenario: rebuild after editing name uses the new create name
+
+- Given a managed container whose live config `name` was edited so the computed create name differs from the selected runtime name
+- When the user runs `rebuild` for that selected container and the new name is occupiable
+- Then the replacement is created under the new computed create name, the old container is gone, the product `*-ws` volume is reused with its data, and user-literal volume sources remain attached as written
+
+#### Scenario: rebuild migrates an adev-* name to the short computed name
+
+- Given a managed container named `adev-myapp-abc123def456` whose live config `name` still sanitizes to `myapp`
+- When the user runs `rebuild` for that selected container and `myapp` is occupiable
+- Then the replacement is named `myapp`, the old `adev-myapp-abc123def456` container is gone, and the product `*-ws` volume is reused
+
+#### Scenario: rebuild same computed name is unchanged
+
+- Given a managed container whose selected runtime name already equals the live computed create name
+- When the user runs `rebuild` for that container
+- Then the replacement is created under that same name (today’s same-name rebuild)
+
+#### Scenario: rebuild foreign occupant does not delete the selected container
+
+- Given a managed container selected for rebuild whose computed create name is taken by a foreign occupant
+- When the user runs `rebuild`
+- Then the CLI MUST NOT delete the selected container and MUST follow **Foreign create-name collision offer** (TTY change-name prompt, or non-TTY/`--json` structured fail + hint)
+
+#### Scenario: rebuild keeps the same devcontainerId stem when create name changes
+
+- Given a bind workspace folder `foo` (or volume-mode repo basename `foo`) whose identity stem is `adev-foo-{hash12}`, a volume mount `source=${devcontainerId}-shellhistory`, and a rebuild that only changes config `name` so the create name becomes `myapp`
+- When the replacement is created
+- Then that mount source is still `adev-foo-{hash12}-shellhistory` and the shell-history volume is reused
+
+---
+
+### Requirement: Foreign create-name collision offer
+
+When occupancy classification yields a **foreign occupant** of the desired create name on `up`, `clone`, or `rebuild`, the CLI MUST warn that the name is in use and is not the same workspace, and MUST NOT delete, replace, or attach to that occupant. On `rebuild`, the selected container MUST remain until the replacement create name is known and occupiable. The CLI MUST NOT open bring-up recovery or any editor on this path, MUST NOT offer a suffix-append choice, and MUST NOT present a two-option recovery list.
+
+**TTY (stdin is a TTY and `--json` is absent) — MUST**
+
+1. Emit the warning with that reason.
+2. Ask whether the user wants to change the name (Y/n) on stderr. This prompt is interactive and MUST remain usable under QUIET (not a silenced progress line).
+3. On yes: prompt for the new **full** name (not a suffix appended to the current base). Sanitize with the same DNS-safe rules as create-name identity (no `adev-` prefix, no identity hash, ≤ 63 characters). Persist that sanitized value into the editable config `name` (`up`: host `devcontainer.json`; `clone`: retained checkout; `rebuild`: the live config this rebuild is reading) so the next `up`/`clone`/`rebuild` of this config is stable, then retry MUST re-resolve. MUST NOT delete the occupant (on `rebuild`, MUST NOT delete the selected container).
+4. A name that is empty after sanitize, or that is not a DNS-safe name of at most 63 characters, MUST re-prompt for the new name without persisting.
+5. If the name after persist is still a foreign occupant (or otherwise still collides), the CLI MUST re-ask (warn that this name is also in use, then Y/n again).
+6. Decline, cancel, or EOF at the Y/n prompt or the name prompt MUST fail with the original structured name-in-use error. The occupant MUST remain untouched.
+7. A successful `clone` retry after a persisted `name` MUST leave that `name` in the workspace `devcontainer.json` after populate, matching **Clone recovery persists edited config into workspace**. Bind `up` remains host-edit only.
+
+**Non-TTY or `--json` — MUST**
+
+- Never prompt, never open an editor, never collect a new name.
+- Fail with a structured error plus an edit/retry hint (`up`: host config path; `clone`: retained checkout and exact retry command when retention applies; `rebuild`: hint to free or change `name` and retry `rebuild --name` of the still-present selected container).
+- Leave the occupant untouched. On `rebuild`, the selected container MUST still exist.
+
+`start` MUST NOT offer this rename prompt. `rebuild` MUST offer it when the computed replacement name is a foreign occupant.
+
+#### Scenario: TTY asks whether to change the name
+
+- Given the desired create name is already used by a container for a different workspace (or an unmanaged container), and stdin is a TTY without `--json`
+- When the user runs `up`, `clone`, or `rebuild`
+- Then the CLI warns that the name is in use and not the same workspace, and asks whether to change the name (Y/n) on stderr
+- And the CLI MUST NOT open an editor or present an editor-or-suffix list
+
+#### Scenario: yes prompts for the new full name and persists it
+
+- Given a TTY foreign-name offer
+- When the user affirms and types `My App 2` (or `my-app-2`)
+- Then the product persists `name` as `my-app-2` (or the equivalent sanitized result) into the editable config, retries from a re-resolve, and creates under that name when it is free
+- And the foreign occupant still exists unchanged
+
+#### Scenario: successful clone rename retry leaves name in the workspace config
+
+- Given a TTY foreign-name offer on `clone`, a persisted new `name`, and a successful retry through populate
+- When the workspace `devcontainer.json` is read inside the new container
+- Then `name` is the persisted create name, not the original git-populated value
+
+#### Scenario: empty or invalid name re-prompts
+
+- Given a TTY foreign-name offer and the user affirmed the change-name question
+- When the user types a name that sanitizes to empty or is not DNS-safe within 63 characters
+- Then the CLI does not persist `name` and re-prompts for the new name
+
+#### Scenario: still-colliding name re-asks
+
+- Given a TTY foreign-name offer and the user types a new name that is also occupied by a foreign occupant
+- When that name would be persisted
+- Then the CLI does not delete either occupant and re-asks whether to change the name
+
+#### Scenario: decline leaves the occupant untouched
+
+- Given a TTY foreign-name offer
+- When the user declines, cancels, or sends EOF
+- Then the CLI fails with the original name-in-use error and the occupant is unchanged
+
+#### Scenario: non-TTY and json never prompt
+
+- Given the same foreign occupant and a non-TTY stdin or `--json`
+- When the user runs `up`, `clone`, or `rebuild`
+- Then the CLI never prompts or opens an editor, fails with a structured error plus an edit/retry hint, and leaves the occupant untouched
+- And on `rebuild` the selected container is still present
+
+#### Scenario: rename prompts remain usable under QUIET
+
+- Given `ADEVCONTAINER_QUIET=1` and a TTY foreign-name offer
+- When the Y/n or new-name prompt is presented
+- Then those prompts and the warning remain usable on stderr (not classified as silenced progress)
+
+---
+
+### Requirement: Hashed sidecar names and literal volume sources stay
+
+This change MUST NOT use config `name` as the **base** of product-generated Features tags, product workspace volumes, or `${devcontainerId}`. Those stay hashed `adev-{base}:…` / `adev-{base}-{hash12}-ws` / `adev-{base}-{hash12}` where **base** is the workspace/repo basename only. User-literal volume `source` strings stay as written.
+
+- Features derived tags MUST remain `adev-{base}:{contentHash}` where `base` is the resource base (about-20-character clip of the workspace folder basename on `up`, or git URL repo basename on `clone`) and `contentHash` is the Features content hash including `recipeVersion`. Empty resource base MUST still map to `adevcontainer:{contentHash}`. MUST NOT use sanitized config `name` or the short create name as the tag, and MUST NOT drop the `adev-` tag prefix.
+- Volume-mode product workspace volumes MUST remain `adev-{base}-{hash12}-ws` using that same resource base and the volume-mode identity `hash12` (normalized git URL + config relative path). MUST NOT rename the workspace volume to the short create name or to sanitized config `name`.
+- A config or feature mount `source` that is a user-written literal (no unsubstituted `${devcontainerId}` token) MUST be used as written. The product MUST NOT rewrite that literal to include the create name, an `adev-` prefix, or an identity hash.
+- `${devcontainerId}` MUST expand to the resource identity stem `adev-{base}-{hash12}` (empty resource base → `adev-{hash12}`), using the same hash material and the same resource base as the product workspace volume. It MUST NOT expand to the create `--name` / DNS hostname and MUST NOT include sanitized config `name` in the stem. This is not a rewrite of a user-literal source.
+
+#### Scenario: Features tag keeps hashed adev- form
+
+- Given a Features build in workspace folder `foo` with `"name": "My App"`
+- When the derived image tag is computed
+- Then the tag is `adev-foo:{contentHash}` and is not `adev-my-app:{contentHash}` or `my-app:{contentHash}`
+
+#### Scenario: workspace volume keeps hashed adev- form
+
+- Given a clone whose git URL repo basename is `foo`, config `"name": "My App"`, and identity `hash12`
+- When the workspace volume name is computed
+- Then the volume name is `adev-foo-{hash12}-ws` and is not `adev-my-app-{hash12}-ws` or `my-app-ws`
+
+#### Scenario: user-literal volume source is not rewritten
+
+- Given a config `type=volume` mount whose `source` is the literal `team-cache`
+- When the container is created or rebuilt under create name `my-app`
+- Then the volume source remains `team-cache` and is not rewritten to `my-app-team-cache` or `adev-my-app-{hash}-team-cache`
+
+#### Scenario: devcontainerId token expands to the resource identity stem
+
+- Given a feature mount `source=${devcontainerId}-shellhistory`, config `"name": "My App"`, workspace folder basename `foo`, and identity `hash12`
+- When the container is created
+- Then the create name is `my-app` and the volume name is `adev-foo-{hash12}-shellhistory` (not `adev-my-app-{hash12}-shellhistory` or `my-app-shellhistory`)
+
+#### Scenario: bind and volume devcontainerId stems stay distinct
+
+- Given a bind-mode up on host path `/Projects/foo` and a clone of a git URL whose repo basename is also `foo`, both without an overriding `name`
+- When `${devcontainerId}` is expanded
+- Then the bind stem uses path+config `hash12` and the volume stem uses git URL+config relpath `hash12`, matching each mode’s `*-ws` material, so the stems are not required to match
+
+---
+
+### Requirement: Workspace parent directories writable on create paths
+
+On the managed create paths — `up` fresh create (bind mode), `clone` (volume mode), and `rebuild` replacement create (bind and volume mode) — the CLI MUST make the container-rootfs parent directories of the resolved container workspace folder writable by the resolved remote connection user before any create-path lifecycle hook (onCreateCommand, updateContentCommand, postCreateCommand, postStartCommand) runs: it MUST create the workspace folder path with `mkdir -p` as needed, then non-recursively `chown` each ancestor directory from the workspace folder's parent upward to the connection user (or `user:user` when a group of that name exists), stopping at the system-top break list — `/`, `/home`, `/Users`, `/var`, `/usr`, `/opt`, `/tmp`, `/root`, `/etc`, `/mnt`, `/media`, `/dev`, `/proc`, `/sys`, `/run`, `/boot`, `/lib`, `/lib64`, `/bin`, `/sbin` — and it MUST NOT chown any break-list entry.
+
+The workspace folder itself MUST be chowned only in volume mode, under the existing recursive workspace-folder chown semantics (clone: always after start; rebuild: only when the resolved connection user differs from the stamped `devcontainer.remote_user`). In bind mode the workspace folder is the host bind target and MUST NEVER be chowned on any path, including by the parent fix-up. On `clone` the parent outcome is already achieved by the existing workspace-folder chown's parent walk, so the CLI MUST NOT add a second fix-up mechanism on `clone`; regression coverage MUST prove the parent outcome is delivered.
+
+When the resolved connection user is empty or the literal `root`, the CLI MUST NOT run any parent fix-up exec. The parent fix-up MUST NOT run on non-create paths: `up` reuse of a running matching container, `up` start-stopped, and bare `start` MUST NOT chown workspace parents.
+
+#### Scenario: up bind fresh create fixes parents before hooks
+
+- Given a bind-mode `up` fresh create with a non-root connection user `alice` and workspace folder `/workspaces/project`
+- When container create and start succeed and create-path hooks are about to run
+- Then before any hook exec the CLI runs a single root exec whose script contains `mkdir -p` for the workspace folder path and non-recursive `chown` of `/workspaces` (and any other ancestors up to the break list) to `alice`, no `chown -R`, and no `chown` of the workspace folder itself, and a `postCreateCommand` that creates a sibling directory under `/workspaces` succeeds
+
+#### Scenario: up bind never chowns the host bind target
+
+- Given a bind-mode `up` fresh create with a non-root connection user
+- When the create path runs
+- Then no exec on the create path contains `chown -R` of the workspace folder and no exec chowns the workspace folder path itself (parents only)
+
+#### Scenario: clone achieves parents via the existing workspace chown (regression)
+
+- Given a volume-mode `clone` create with a non-root connection user and workspace folder `/workspaces/repo`
+- When the existing workspace-folder chown runs after start and before populate
+- Then its single script non-recursively chowns `/workspaces` as a parent of the recursively chowned `/workspaces/repo`, making parents writable before create-path hooks, and no second parent fix-up exec runs on `clone`
+
+#### Scenario: rebuild bind fixes parents before hooks and never chowns the target
+
+- Given a bind-mode managed container rebuilt with a non-root connection user
+- When the rebuild create path runs after start and before create-path hooks
+- Then a parents-only exec runs (the workspace folder itself is never chowned) and create-path hooks observe writable parents
+
+#### Scenario: rebuild volume fixes parents even when the connection user is unchanged
+
+- Given a volume-mode rebuild where the resolved connection user equals the stamped `devcontainer.remote_user`
+- When the rebuild create path runs
+- Then the recursive workspace-folder chown is NOT invoked (the volume data tree is left as is) and a parents-only exec still runs against the new container's rootfs before create-path hooks
+
+#### Scenario: root or unset connection user is a no-op
+
+- Given a bind-mode `up` fresh create whose resolved connection user is `root` (or unset)
+- When create and start succeed
+- Then no parent fix-up exec runs
+
+#### Scenario: nested workspaceFolder creates intermediates and stops at the break list
+
+- Given a workspace folder `/workspaces/a/b/c` whose intermediate directories do not exist in the container rootfs
+- When the parent fix-up runs
+- Then `mkdir -p` creates the chain, non-recursive `chown` applies to `/workspaces/a/b`, `/workspaces/a`, and `/workspaces`, and neither `/` nor any break-list entry is chowned
+
+#### Scenario: break-list stop under home
+
+- Given a workspace folder `/home/alice/ws`
+- When the parent fix-up runs
+- Then `/home/alice` is chowned and `/home` is not
+
+#### Scenario: workspace folder directly under a break-list entry has nothing to chown
+
+- Given a workspace folder `/opt/tool` (or `/tmp/x`)
+- When the parent fix-up runs
+- Then the walk stops at the break-list entry, no ancestor is chowned, and the fix-up does not fail
+
+#### Scenario: up reuse and start-stopped do not run the parent fix-up
+
+- Given a matching running or stopped bind-mode container
+- When `up` reuses the running container or starts the stopped one
+- Then no parent fix-up exec runs
+
+---
+
+### Requirement: Parent fix-up failure semantics
+
+Failure of the parent fix-up MUST follow the per-command create-path ownership semantics:
+
+- `up` fresh create: fix-up failure MUST fail `up` with a structured error, MUST delete the created container, and MUST remain eligible for bring-up recovery (the realized `workspace-ownership` recovery trigger).
+- `rebuild` (both modes): fix-up failure MUST be a soft-fail — warn on stderr and continue the create path; it MUST NOT delete the new container and MUST NOT enter bring-up recovery.
+- `clone` (volume): no new mechanism; the existing workspace-folder chown failure semantics are unchanged.
+
+#### Scenario: up parent fix-up failure deletes and stays recovery-eligible
+
+- Given a bind-mode `up` fresh create whose parent fix-up exec fails
+- When the failure is observed
+- Then `up` fails with a structured error, the created container is deleted, and the failure is eligible for bring-up recovery
+
+#### Scenario: rebuild parent fix-up failure warns and continues
+
+- Given a `rebuild` (bind or volume) whose parent fix-up exec fails
+- When the failure is observed
+- Then stderr carries a warning, the rebuild continues through create-path hooks and succeeds absent other failures, and the new container is not deleted
+
+#### Scenario: clone parent outcome failure keeps existing throwing semantics (regression)
+
+- Given a volume-mode `clone` whose workspace-folder chown fails
+- When clone runs
+- Then clone fails with a structured error, deletes the managed container and the `*-ws` workspace volume, and remains eligible for bring-up recovery (unchanged)

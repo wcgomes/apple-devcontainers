@@ -95,6 +95,7 @@ For containers created by `clone`, deterministic identity MUST be derived as fol
 
 - MUST hash **normalized git URL** + **config relative path** (path within the repo, e.g. `.devcontainer/devcontainer.json`).
 - MUST NOT use the host temporary directory path as durable hash material (temp paths change per invocation).
+- This `hash12` MUST continue to identify the product workspace volume. It MUST NOT be appended to the create name.
 
 **URL normalization (`normalizeGitURL`) — MUST**
 
@@ -105,37 +106,39 @@ For containers created by `clone`, deterministic identity MUST be derived as fol
 - Normalization MUST be deterministic and covered by tests.
 - Host `git` invocations MUST still receive the **original** (caller-supplied) URL so credential helpers and embedded tokens continue to work; only identity/labels/JSON use the normalized form.
 
-**Human base**
+**Resource base**
 
-1. If resolved `name` is present and non-empty after trim → sanitize that value (same DNS-safe sanitize as Deterministic identity and labels).
-2. Else → sanitize the **repository basename** derived from the git URL (not a host folder basename).
+1. Sanitize the **repository basename** derived from the git URL (not a host folder basename and not config `name`).
+2. Clip to about 20 characters for hashed sidecar names only.
 
-**Container name**
+**Create name**
 
-- Format: `adev-{base}-{hash12}`; empty base → `adev-{hash12}`; full name ≤ 63 characters (same scheme as existing identity).
+- The create name MUST be the sanitized `name` when set, else the sanitized repository basename, with no `adev-` prefix and no identity hash, ≤ 63 characters (MAY use the full 63-character budget).
+- Empty create name after sanitize MUST fail with a structured error asking for a DNS-safe `name`.
+- Occupancy MUST follow **Create-name occupancy classification**.
 
 **Workspace volume name**
 
-- Format: `adev-{base}-{hash12}-ws` (same `base` and `hash12` as the container).
-- MUST include container identity material and the `-ws` suffix.
+- Format: `adev-{base}-{hash12}-ws` (resource base + identity `hash12`, not the short create name and not sanitized config `name`).
+- MUST include workspace identity material and the `-ws` suffix.
 - If the name must be clipped to satisfy runtime length limits, the implementation MUST retain `hash12` and the `-ws` suffix (clip the base / middle as needed).
 
 Apple `container create --name` MUST equal the container id used for later inspect/exec/stop/delete/start, consistent with the base contract.
 
-#### Scenario: Volume name includes container identity
-- Given a clone identity with base `myapp` and a computed `hash12`
+#### Scenario: Volume name includes workspace identity not the short create name
+- Given a clone whose repo basename sanitizes to `foo`, config `"name": "My App"`, and a computed `hash12`
 - When container and workspace volume names are computed
-- Then the container name is `adev-myapp-{hash12}` (or ≤ 63-char clipped form per policy) and the workspace volume name is `adev-myapp-{hash12}-ws` (or a clipped form that still contains `{hash12}` and ends with `-ws`)
+- Then the create name is `my-app` and the workspace volume name is `adev-foo-{hash12}-ws` (or a clipped form that still contains `{hash12}` and ends with `-ws`)
 
 #### Scenario: Same URL and config path stable identity
 - Given the same normalized git URL and config relative path
 - When identity is computed on two separate clone invocations (different temp dirs)
-- Then `hash12`, container name, and workspace volume name are identical
+- Then `hash12` and the workspace volume name are identical, and the create name is identical when `name` / repo basename are unchanged
 
-#### Scenario: Human base from repo basename when name omitted
-- Given a config without `name` and URL ending in `sample-repo.git`
-- When the container name is computed
-- Then the human base is the sanitized repo basename (`sample-repo` or equivalent sanitize result), not a temp directory name
+#### Scenario: Resource base from repo basename even when name is set
+- Given a config with `"name": "My App"` and URL ending in `sample-repo.git`
+- When the create name and resource stem are computed
+- Then the create name is `my-app` and the resource base / `*-ws` / `${devcontainerId}` stem use `sample-repo`, not `my-app` and not a temp directory name
 
 #### Scenario: Scheme URL userinfo stripped from identity
 - Given a git URL `https://token:x-oauth-basic@github.com/org/repo.git`
@@ -159,7 +162,7 @@ On `clone` create, the CLI MUST:
 1. **Workspace volume freshness (re-clone) — `clone` only:** If the workspace named volume already exists, `clone` MUST **delete it and create it empty** before mount. MUST NOT reuse a dirty existing workspace volume tree. (Config `type=volume` mounts remain list-then-create/reuse per Named volume reuse policy — only the clone workspace `*-ws` volume is delete-and-create.)
 2. **`rebuild` carve-out:** `rebuild` of a volume-mode managed container MUST **reuse** the existing `*-ws` volume tree with its data and MUST NOT delete, replace, or re-populate it; MUST NOT run git re-clone or `git pull` inside it. The freshness rule applies to `clone` only.
 3. Mount that volume as the **container workspace folder** (the implicit workspace mount). MUST NOT bind-mount a durable host project directory as the workspace for clone-created containers.
-4. **Existing managed container name:** If a container with the computed managed name already exists, `clone` MUST fail with a structured error and MUST NOT silently reuse, replace, or attach to that container. (No automatic delete/replacement of an existing managed container on `clone`; use `rebuild` to force-rebuild while preserving the volume.)
+4. **Existing occupant of the create name:** classify per **Create-name occupancy classification**. Same-workspace same-name MUST fail closed (MUST NOT silently reuse, replace, or attach; MUST NOT offer rename-to-duplicate). Foreign occupant MUST follow **Foreign create-name collision offer**. Same-workspace different-name MUST fail with a delete-hint.
 5. Set labels on create:
 
 | Label | Requirement |
@@ -194,13 +197,18 @@ Additional existing labels MAY be set. Discovery of managed containers for `list
 
 #### Scenario: rebuild reuses the workspace volume instead of replacing it
 - Given a volume-mode managed container whose `*-ws` volume exists with data
-- When the user runs `adevcontainer rebuild --name <that-name>`
+- When the user runs `adevcontainer rebuild --name <that-name>` (including when the replacement create name differs from the selected name)
 - Then the CLI does not delete or replace the volume, mounts the same volume on the new container, and the data remains present (no re-clone)
 
 #### Scenario: Existing managed container name fails closed
-- Given a container already exists with the computed clone container name
+- Given a container already exists with the computed clone create name and the same git URL + config identity
 - When the user runs `adevcontainer clone` for that identity
 - Then the CLI fails with a structured error naming the existing container and MUST NOT create, start, or populate a second instance under that name
+
+#### Scenario: Foreign occupant of the clone create name offers a rename prompt
+- Given a container already exists with the computed clone create name but a different git URL or config identity
+- When the user runs `adevcontainer clone` on a TTY without `--json`
+- Then the CLI follows **Foreign create-name collision offer** and MUST NOT silently reuse or replace that occupant
 
 #### Scenario: config_volumes label records config named volumes
 - Given a clone config with a `type=volume` mount whose source is `data-vol`

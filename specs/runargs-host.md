@@ -193,3 +193,43 @@ Ordinary fixtures MUST NOT include Compose or unknown/first-class-smuggling runA
 - When parsed and validated under admission rules
 - Then admission succeeds without unsupported-property errors
 
+---
+
+### Requirement: Top-level capAdd translation
+
+The CLI MUST admit top-level `capAdd` only as an array of non-empty capability-name strings accepted by the existing `--cap-add` validation. Valid entries MUST normalize into the same typed effective capability representation and Apple create tokens used by allowlisted `runArgs --cap-add` and Feature/image `capAdd` contributions. The product MUST NOT pass raw array entries directly to Apple `container`.
+
+Top-level and runArgs capability declarations MUST deduplicate by normalized capability name while preserving deterministic order. Equivalent config-time declarations through top-level `capAdd` and `runArgs --cap-add` MUST produce equivalent effective config hash material. Feature references/options remain their existing identity inputs even when a Feature capability contribution deduplicates against config-time capability behavior.
+
+An omitted or empty top-level array MUST be a silent no-op. A non-array value, non-string entry, empty name, name beginning with `-`, or otherwise invalid capability name MUST fail with a structured error naming `capAdd` before create.
+
+#### Scenario: Top-level capAdd maps through the typed create path
+
+- Given a config with `capAdd: ["SYS_PTRACE", "NET_ADMIN"]`
+- When the config is resolved and create argv is built
+- Then effective capabilities contain both names and argv contains typed `--cap-add` pairs without raw passthrough
+
+#### Scenario: Top-level and runArgs capAdd deduplicate
+
+- Given otherwise identical configs where one declares `SYS_PTRACE` top-level and the other through allowlisted runArgs, including a config declaring both
+- When effective config and hash material are produced
+- Then all forms contain one normalized capability entry, equivalent config-time forms hash equally, and create argv contains one token pair
+
+#### Scenario: Feature capability still preserves Feature identity
+
+- Given top-level `capAdd` and an admitted Feature both contribute the same capability
+- When Feature contributions merge
+- Then create argv contains one capability token pair while the Feature ref/options remain in existing config and derived-image identity material
+
+#### Scenario: Empty capAdd is silent
+
+- Given `capAdd: []`
+- When the config is resolved in default or strict mode
+- Then resolution succeeds without a compatibility issue and no capability token is added
+
+#### Scenario: Invalid capAdd blocks before create
+
+- Given top-level `capAdd` is not an array or contains a non-string, empty, dash-prefixed, or invalid capability name
+- When admission runs
+- Then the CLI fails with a structured error naming `capAdd` and creates no container
+

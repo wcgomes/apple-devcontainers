@@ -305,8 +305,17 @@ public enum CommandSurface {
 
         Config notes:
           - Optional Apple-incompatibles (docker-* features, privileged/device runArgs,
-            privileged/securityOpt metadata) are warn-skipped — up continues with a warning.
-          - Docker Compose keys, unknown runArgs, and first-class smuggling still hard-error.
+            privileged/securityOpt metadata, non-empty otherPortsAttributes/secrets,
+            privileged: true, non-empty securityOpt) warn once with a stable
+            `warning: [code] path (ignored|emulated): …` line and continue.
+          - Harmless metadata (`$schema`, empty objects, privileged: false, overrideCommand: true)
+            is silent. Top-level capAdd is an exact typed `--cap-add` translation.
+          - ADEVCONTAINER_STRICT_COMPATIBILITY=1 fails up/clone/rebuild/start/exec with
+            compatibility_degraded before create/start/reuse/exec/build/delete when any
+            ignored or emulated issue is present. Exact and harmless inputs still succeed.
+          - Docker Compose keys, Dockerfile build, workspaceMount, remoteEnv,
+            overrideCommand: false, unknown top-level keys, unknown runArgs, and
+            first-class smuggling still hard-error.
 
         Exit codes: 0 success, non-zero failure
         """

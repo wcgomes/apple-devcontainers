@@ -177,16 +177,30 @@ public struct FeatureMetadata: Equatable, Sendable {
 
     /// Warn-and-strip privileged / securityOpt contributions (feature may still install).
     public func warnStripUnsafeContributions(featureRef: String) {
+        CompatibilityReport.emit(compatibilityIssues(featureRef: featureRef))
+    }
+
+    public func compatibilityIssues(featureRef: String) -> [CompatibilityIssue] {
+        var issues: [CompatibilityIssue] = []
         if privileged {
-            StatusPrinter.warning(
-                "Feature '\(featureRef)' sets privileged: true; ignored (not applied on Apple container)"
-            )
+            issues.append(CompatibilityIssue(
+                code: CompatibilityCode.featurePrivilegedIgnored,
+                propertyPath: "features",
+                disposition: .ignored,
+                message: "Feature '\(featureRef)' sets privileged: true; ignored (not applied on Apple container)",
+                subjectIdentity: featureRef
+            ))
         }
         if !securityOpt.isEmpty {
-            StatusPrinter.warning(
-                "Feature '\(featureRef)' sets securityOpt; ignored (not applied on Apple container)"
-            )
+            issues.append(CompatibilityIssue(
+                code: CompatibilityCode.featureSecurityOptIgnored,
+                propertyPath: "features",
+                disposition: .ignored,
+                message: "Feature '\(featureRef)' sets securityOpt; ignored (not applied on Apple container)",
+                subjectIdentity: featureRef
+            ))
         }
+        return issues
     }
 
     private static func boolValue(_ any: Any?) -> Bool? {

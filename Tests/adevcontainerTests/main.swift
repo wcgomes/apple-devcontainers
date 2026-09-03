@@ -21,6 +21,11 @@ let allTests: [(String, () throws -> Void)] = []
     + parserTests
     + substitutionTests
     + admissionTests
+    + supportInitSecurityOptTests
+    + compatibilityContractTests
+    + compatibilityPolicyTests
+    + compatibilityCapAddTests
+    + compatibilityStrictModeTests
     + errorModelTests
     + remoteUserResolutionTests
     + runtimeTests

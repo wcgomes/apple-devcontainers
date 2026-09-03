@@ -30,13 +30,16 @@ public enum StartCommand {
         runtime: AppleContainerRuntime,
         picker: InteractivePicker = .default,
         isTTY: Bool = AppleContainerConfig.stdinIsTTY(),
-        openEditorPrompt: RecoveryOpenEditorPrompt = .default
+        openEditorPrompt: RecoveryOpenEditorPrompt = .default,
+        localEnv: [String: String] = ProcessInfo.processInfo.environment
     ) throws {
         let info = try ManagedContainers.resolveSelection(
             name: options.name,
             runtime: runtime,
             picker: picker
         )
+
+        try preflightStrictCompatibility(info: info, runtime: runtime, localEnv: localEnv)
 
         if info.isRunning {
             StatusPrinter.status("Container already running", item: info.id)
@@ -229,6 +232,34 @@ public enum StartCommand {
             isTTY: isTTY,
             openEditorPrompt: openEditorPrompt
         )
+    }
+
+    /// Strict mode: classify stamped config and available image metadata before start/reuse/open.
+    private static func preflightStrictCompatibility(
+        info: ContainerInfo,
+        runtime: AppleContainerRuntime,
+        localEnv: [String: String]
+    ) throws {
+        let mode = CompatibilityMode.from(environment: localEnv)
+        guard mode == .strict else { return }
+        var report = CompatibilityReport()
+        if let config = try ConfigReader.read(
+            labels: info.labels,
+            containerId: info.id,
+            runtime: runtime,
+            localEnv: localEnv,
+            mode: .bestEffort
+        ) {
+            report.merge(config.compatibilityReport)
+        }
+        let image = (info.image ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !image.isEmpty, let labels = try? runtime.imageLabels(ref: image) {
+            report.add(contentsOf: DevContainerMetadataLabel.unsafeCompatibilityIssues(
+                from: labels,
+                imageRef: image
+            ))
+        }
+        try report.enforce(mode: mode)
     }
 
     /// Host initialize only: stamped config without metadata remelt (no image inspect).

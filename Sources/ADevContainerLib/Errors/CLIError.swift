@@ -251,4 +251,6 @@ public enum CLIErrorCode {
     public static let recoveryCancelled = "recovery_cancelled"
     /// Recovery readback or final visibility verification did not match the expected bytes.
     public static let recoveryVerificationFailed = "recovery_verification_failed"
+    /// Opt-in strict compatibility: ignored or emulated input was present.
+    public static let compatibilityDegraded = "compatibility_degraded"
 }

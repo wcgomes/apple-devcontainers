@@ -86,6 +86,10 @@ public enum ConfigResolver {
         var resolved = try buildResolved(subDict, defaultWorkspaceFolder: provisionalFolder)
         let normalized = MountNormalizer.normalize(mounts: resolved.mounts, fileManager: fileManager)
         resolved.mounts = normalized.mounts
+        for promotion in normalized.promotions {
+            resolved.compatibilityReport.add(MountNormalizer.compatibilityIssue(for: promotion))
+        }
+        resolved.compatibilityReport.emitWarnings()
         let hash = ContainerIdentity.configHash(from: resolved.hashMaterial())
         let name = try ContainerIdentity.requireCreateName(
             ContainerIdentity.containerName(
@@ -198,12 +202,69 @@ public enum ConfigResolver {
         let userEnvProbe = try UserEnvProbe.parse(raw["userEnvProbe"])
         let shutdownAction = try ShutdownAction.parse(raw["shutdownAction"])
 
-        let runArgs = try RunArgsAdmission.parse(raw["runArgs"])
+        let parsedRunArgs = try RunArgsAdmission.parseResult(raw["runArgs"])
+        var report = CompatibilityReport(issues: parsedRunArgs.issues)
+        var topLevelCaps: [String] = []
+        if let capAdd = raw["capAdd"] as? [Any] {
+            topLevelCaps = capAdd.compactMap { $0 as? String }
+        }
+        var effectiveRunArgs = RunArgsAdmission.mergingCapabilities(topLevelCaps, into: parsedRunArgs.args)
+        if raw["init"] as? Bool == true, !effectiveRunArgs.contains(.initFlag) {
+            effectiveRunArgs.append(.initFlag)
+        }
+        RunArgsAdmission.emitNetAdminSidecarIfNeeded(
+            skippedPrivilegedOrDevice: parsedRunArgs.skippedPrivilegedOrDevice,
+            args: effectiveRunArgs
+        )
+        if let securityOpt = raw["securityOpt"] as? [Any], !securityOpt.isEmpty {
+            let includesNoNewPrivileges = securityOpt.contains {
+                ($0 as? String) == "no-new-privileges"
+            }
+            let message: String
+            if includesNoNewPrivileges {
+                message =
+                    "Top-level securityOpt was ignored and not applied on Apple container; "
+                    + "no-new-privileges is not enforced"
+            } else {
+                message = "Top-level securityOpt was ignored and not applied on Apple container"
+            }
+            report.add(CompatibilityIssue(
+                code: CompatibilityCode.configSecurityOptIgnored,
+                propertyPath: "securityOpt",
+                disposition: .ignored,
+                message: message
+            ))
+        }
+        if let otherPorts = raw["otherPortsAttributes"] as? [String: Any], !otherPorts.isEmpty {
+            report.add(CompatibilityIssue(
+                code: CompatibilityCode.configOtherPortsAttributesIgnored,
+                propertyPath: "otherPortsAttributes",
+                disposition: .ignored,
+                message: "otherPortsAttributes default port UI/auto-forward actions are not applied"
+            ))
+        }
+        if let secrets = raw["secrets"] as? [String: Any], !secrets.isEmpty {
+            report.add(CompatibilityIssue(
+                code: CompatibilityCode.configSecretsIgnored,
+                propertyPath: "secrets",
+                disposition: .ignored,
+                message: "secrets recommendation metadata is not injected or validated"
+            ))
+        }
+        if raw["privileged"] as? Bool == true {
+            report.add(CompatibilityIssue(
+                code: CompatibilityCode.configPrivilegedIgnored,
+                propertyPath: "privileged",
+                disposition: .ignored,
+                message: "privileged is not applied on Apple container"
+            ))
+        }
         let hostRequirements = try HostRequirements.parse(raw["hostRequirements"])
 
         let vscode = parseVscodeCustomizations(raw["customizations"])
 
-        let features = try FeatureAdmission.parse(raw["features"])
+        let parsedFeatures = try FeatureAdmission.parseResult(raw["features"])
+        report.add(contentsOf: parsedFeatures.issues)
 
         return ResolvedDevContainerConfig(
             name: raw["name"] as? String,
@@ -224,12 +285,13 @@ public enum ConfigResolver {
             waitFor: waitFor,
             userEnvProbe: userEnvProbe,
             shutdownAction: shutdownAction,
-            runArgs: runArgs,
+            runArgs: effectiveRunArgs,
             hostRequirements: hostRequirements,
             hasVscodeCustomizations: vscode.hasVscode,
             vscodeExtensions: vscode.extensions,
             vscodeSettingsJSON: vscode.settingsJSON,
-            features: features
+            features: parsedFeatures.features,
+            compatibilityReport: report
         )
     }
 

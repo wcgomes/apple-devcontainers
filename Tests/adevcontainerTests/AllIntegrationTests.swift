@@ -196,6 +196,98 @@ enum IntegrationSupport {
 }
 
 nonisolated(unsafe) let integrationTests: [(String, () throws -> Void)] = [
+    ("compatibilityWarningsStayOnStderrUnderQuietJSON", {
+        let previousEnabled = StatusPrinter.enabled
+        let previousSuppress = StatusPrinter.suppressWarningStderr
+        let previousWrite = StatusPrinter.writeStderr
+        let previousOn = StatusPrinter.onWarning
+        let previousStdout = SuccessPresentation.writeStdout
+        let previousEmitted = SuccessPresentation.didEmitSuccessJSON
+        defer {
+            StatusPrinter.enabled = previousEnabled
+            StatusPrinter.suppressWarningStderr = previousSuppress
+            StatusPrinter.writeStderr = previousWrite
+            StatusPrinter.onWarning = previousOn
+            SuccessPresentation.writeStdout = previousStdout
+            SuccessPresentation.didEmitSuccessJSON = previousEmitted
+        }
+        StatusPrinter.enabled = false
+        StatusPrinter.suppressWarningStderr = false
+        var stderr = ""
+        var stdout = ""
+        StatusPrinter.writeStderr = { stderr += String(data: $0, encoding: .utf8) ?? "" }
+        StatusPrinter.onWarning = { _ in }
+        SuccessPresentation.writeStdout = { stdout += String(data: $0, encoding: .utf8) ?? "" }
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        { "image": "alpine:3.20", "privileged": true }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "create" {
+                    return ProcessResult(exitCode: 0, stdout: Data("ctr\n".utf8), stderr: Data())
+                }
+                if args.first == "start" || args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, jsonOutput: true, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            isTTY: false
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(stderr.contains("warning:"))
+        try MiniTest.expect(stderr.contains(CompatibilityCode.configPrivilegedIgnored))
+        try MiniTest.expect(!stdout.contains("warning:"))
+        let obj = try JSONSerialization.jsonObject(with: Data(stdout.utf8)) as? [String: Any]
+        try MiniTest.expectEqual(obj?["outcome"] as? String, "success")
+    }),
+    ("strictCompatibilityErrorRemainsStructuredJSON", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        { "image": "alpine:3.20", "privileged": true }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "create" {
+                    return ProcessResult(exitCode: 0, stdout: Data("ctr\n".utf8), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: workspace.path, jsonOutput: true, skipPull: true),
+                runtime: runtime,
+                localEnv: [CompatibilityMode.environmentKey: "1"],
+                isTTY: false
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.compatibilityDegraded)
+            let obj = err.jsonObject()
+            try MiniTest.expectEqual(obj["outcome"] as? String, "error")
+            try MiniTest.expectEqual(obj["code"] as? String, CLIErrorCode.compatibilityDegraded)
+            try MiniTest.expectEqual(obj["property"] as? String, "privileged")
+            try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+        }
+    }),
     ("fixtureE2E_ensureImage_doesNotPullWhenCached", {
         let mock = MockProcessRunner()
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
@@ -351,6 +443,14 @@ nonisolated(unsafe) let integrationTests: [(String, () throws -> Void)] = [
     ("fixtureE2E_runargsHost", {
         // Allowlisted runArgs + hostRequirements enforce+apply (8gb/4 cpus OK on typical Macs).
         try IntegrationSupport.runFixtureE2E(fixtureFile: "runargs-host.json")
+    }),
+    ("fixtureE2E_bareDebian", {
+        // Bare Debian is a representative init/securityOpt compatibility regression.
+        // The helper skips cleanly without Apple container or a pullable fixture image.
+        try IntegrationSupport.runFixtureE2E(
+            fixtureFile: "bare-debian-default.json",
+            smokeCommand: ["sh", "-lc", "test \"$(id -un)\" = dev"]
+        )
     }),
     ("fixtureE2E_featuresNode_skipsWithoutNetworkOrRuntime", {
         // Live OCI fetch + container build requires network and Apple container.

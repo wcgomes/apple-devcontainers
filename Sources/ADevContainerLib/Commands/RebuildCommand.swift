@@ -221,6 +221,9 @@ public enum RebuildCommand {
             resolvedConfig = config
         }
 
+        let compatibilityMode = CompatibilityMode.from(environment: localEnv)
+        try resolvedConfig.compatibilityReport.enforce(mode: compatibilityMode)
+
         let localIdentityReader = localIdentityReaderOverride ?? DefaultRebuildLocalIdentityReader()
         let capturedLocalIdentity: GitAuthorIdentity
         if isVolumeMode {
@@ -421,12 +424,17 @@ public enum RebuildCommand {
                 deps: deps,
                 remoteUser: effectiveConfig.remoteUser,
                 containerUser: effectiveConfig.containerUser,
-                nameBase: nameBase
+                nameBase: nameBase,
+                compatibilityMode: compatibilityMode
             )
+            let beforeFeatures = effectiveConfig.compatibilityReport
             effectiveConfig = try FeatureContributionMerge.apply(
                 contributions: featuresResult.contributions,
                 to: effectiveConfig
             )
+            effectiveConfig.compatibilityReport.subtracting(beforeFeatures).emitWarnings()
+            effectiveConfig.compatibilityReport.add(contentsOf: featuresResult.compatibilityIssues)
+            try effectiveConfig.compatibilityReport.enforce(mode: compatibilityMode)
             effectiveConfig.image = featuresResult.derivedImage
             if featuresResult.didInspectBaseUser {
                 knownOCIUser = featuresResult.baseImageUser
@@ -437,12 +445,15 @@ public enum RebuildCommand {
                 StatusPrinter.status("Pulling image", item: effectiveConfig.image)
                 try? runtime.pullImage(effectiveConfig.image, platform: platform)
             }
+            let beforeImage = effectiveConfig.compatibilityReport
             let applied = try FeatureContributionMerge.applyFromImage(
                 imageRef: effectiveConfig.image,
                 to: effectiveConfig,
                 runtime: runtime
             )
             effectiveConfig = applied.config
+            effectiveConfig.compatibilityReport.subtracting(beforeImage).emitWarnings()
+            try effectiveConfig.compatibilityReport.enforce(mode: compatibilityMode)
             knownMetadataUsers = applied.users
         }
 
