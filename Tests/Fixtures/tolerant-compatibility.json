@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
+  "name": "Tolerant compatibility",
+  "image": "alpine:3.20",
+  "otherPortsAttributes": {
+    "onAutoForward": "ignore"
+  },
+  "secrets": {
+    "ghToken": {
+      "description": "GitHub token recommendation"
+    }
+  },
+  "privileged": true,
+  "overrideCommand": true,
+  "capAdd": ["SYS_PTRACE", "NET_ADMIN"]
+}

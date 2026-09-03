@@ -7,8 +7,26 @@ public enum FeatureAdmission {
     /// Docker-* markers are warn-skipped (not admitted); other hard errors still throw.
     /// - Parameter emitWarnings: When false, still skip docker-* markers but do not warn
     ///   (used by pre-resolve admission so resolve emits each skip warning once).
+    public struct ParseResult: Equatable, Sendable {
+        public var features: [AdmittedFeature]
+        public var issues: [CompatibilityIssue]
+
+        public init(features: [AdmittedFeature] = [], issues: [CompatibilityIssue] = []) {
+            self.features = features
+            self.issues = issues
+        }
+    }
+
     public static func parse(_ features: Any?, emitWarnings: Bool = true) throws -> [AdmittedFeature] {
-        guard let features else { return [] }
+        let parsed = try parseResult(features)
+        if emitWarnings {
+            CompatibilityReport.emit(parsed.issues)
+        }
+        return parsed.features
+    }
+
+    public static func parseResult(_ features: Any?) throws -> ParseResult {
+        guard let features else { return ParseResult() }
 
         guard let dict = features as? [String: Any] else {
             throw CLIError(
@@ -19,16 +37,19 @@ public enum FeatureAdmission {
             )
         }
 
-        if dict.isEmpty { return [] }
+        if dict.isEmpty { return ParseResult() }
 
         var admitted: [AdmittedFeature] = []
+        var issues: [CompatibilityIssue] = []
         for key in dict.keys.sorted() {
             if let marker = FeatureRef.warnSkippedDockerMarker(in: key) {
-                if emitWarnings {
-                    StatusPrinter.warning(
-                        "Feature '\(key)' is incompatible with Apple container (no Docker socket / DinD path); skipped (\(marker))"
-                    )
-                }
+                issues.append(CompatibilityIssue(
+                    code: CompatibilityCode.dockerFeatureIgnored,
+                    propertyPath: "features",
+                    disposition: .ignored,
+                    message: "Feature '\(key)' is incompatible with Apple container (no Docker socket / DinD path); skipped (\(marker))",
+                    subjectIdentity: key
+                ))
                 continue
             }
 
@@ -36,7 +57,7 @@ public enum FeatureAdmission {
             let options = try parseOptions(optionsRaw, featureKey: key)
             admitted.append(AdmittedFeature(reference: key, options: options))
         }
-        return admitted
+        return ParseResult(features: admitted, issues: issues)
     }
 
     private static func parseOptions(_ value: Any?, featureKey: String) throws -> [String: FeatureOptionValue] {

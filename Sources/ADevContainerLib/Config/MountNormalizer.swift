@@ -31,6 +31,18 @@ public enum MountNormalizer {
         return (result, promotions)
     }
 
+    public static func compatibilityIssue(for promotion: Promotion) -> CompatibilityIssue {
+        CompatibilityIssue(
+            code: CompatibilityCode.mountFileBindPromoted,
+            propertyPath: "mounts",
+            disposition: .emulated,
+            message:
+                "Apple container does not support binding individual files; binding parent directory instead: "
+                + "\(promotion.from.source) -> \(promotion.from.target) became \(promotion.to.source) -> \(promotion.to.target)",
+            subjectIdentity: "\(promotion.from.source) -> \(promotion.from.target)"
+        )
+    }
+
     /// Human-readable warning for stderr (all promotions).
     public static func warningMessage(promotions: [Promotion]) -> String {
         var lines = [

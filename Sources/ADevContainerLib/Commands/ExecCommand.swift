@@ -25,7 +25,8 @@ public enum ExecCommand {
     @discardableResult
     public static func run(
         options: ExecOptions,
-        runtime: AppleContainerRuntime
+        runtime: AppleContainerRuntime,
+        localEnv: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> Int32 {
         let info = try ManagedContainers.resolveSelection(name: options.name, runtime: runtime)
         let labeledUser = info.labels[ContainerIdentity.labelRemoteUser]
@@ -41,14 +42,17 @@ public enum ExecCommand {
             )
         }
 
+        let compatibilityMode = CompatibilityMode.from(environment: localEnv)
         // Exec is not attach — probe (unless none) and merge; never run postAttach.
         var env: [String: String] = [:]
         if var loaded = try ConfigReader.read(
             labels: info.labels,
             containerId: info.id,
             runtime: runtime,
+            localEnv: localEnv,
             mode: .bestEffort
         ) {
+            try loaded.compatibilityReport.enforce(mode: compatibilityMode)
             if let user { loaded.remoteUser = user }
             if let workdir { loaded.workspaceFolder = workdir }
             try LifecycleRunner.applyUserEnvProbe(

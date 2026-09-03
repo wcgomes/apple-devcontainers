@@ -100,6 +100,9 @@ public enum FeatureContributionMerge {
         mounts.append(contentsOf: contributions.mounts)
         let normalized = MountNormalizer.normalize(mounts: mounts, fileManager: fileManager)
         out.mounts = normalized.mounts
+        for promotion in normalized.promotions {
+            out.compatibilityReport.add(MountNormalizer.compatibilityIssue(for: promotion))
+        }
 
         // runArgs: init + capAdd via allowlist path
         var runArgs = config.runArgs
@@ -108,7 +111,7 @@ public enum FeatureContributionMerge {
         }
         for cap in contributions.capAdd {
             // Validate through the same allowlist rules as runArgs --cap-add
-            guard isValidCapabilityName(cap) else {
+            guard RunArgsAdmission.isValidCapabilityName(cap) else {
                 throw CLIError(
                     code: CLIErrorCode.unsupportedFeature,
                     property: "features",
@@ -137,14 +140,17 @@ public enum FeatureContributionMerge {
         to config: ResolvedDevContainerConfig,
         runtime: AppleContainerRuntime
     ) throws -> (config: ResolvedDevContainerConfig, users: DevContainerMetadataLabel.ImageMetadataUsers) {
-        let loaded = DevContainerMetadataLabel.loadContributions(imageRef: imageRef, runtime: runtime)
-        guard loaded.contributions != .empty else {
-            return (config, loaded.users)
+        guard let labels = try? runtime.imageLabels(ref: imageRef) else {
+            return (config, .empty)
         }
-        return (try apply(contributions: loaded.contributions, to: config), loaded.users)
+        let issues = DevContainerMetadataLabel.unsafeCompatibilityIssues(from: labels, imageRef: imageRef)
+        let loaded = DevContainerMetadataLabel.loadContributions(imageRef: imageRef, runtime: runtime)
+        var merged = config
+        merged.compatibilityReport.add(contentsOf: issues)
+        guard loaded.contributions != .empty else {
+            return (merged, loaded.users)
+        }
+        return (try apply(contributions: loaded.contributions, to: merged), loaded.users)
     }
 
-    private static func isValidCapabilityName(_ name: String) -> Bool {
-        !name.isEmpty && !name.hasPrefix("-")
-    }
 }

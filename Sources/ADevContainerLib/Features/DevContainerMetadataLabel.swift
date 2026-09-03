@@ -26,7 +26,6 @@ public enum DevContainerMetadataLabel {
         guard let labels = try? runtime.imageLabels(ref: imageRef) else {
             return (.empty, .empty)
         }
-        warnStripUnsafe(from: labels, imageRef: imageRef)
         return (parseContributions(from: labels), parseUsers(from: labels))
     }
 
@@ -215,9 +214,16 @@ public enum DevContainerMetadataLabel {
     /// Warn when metadata label requires privileged/securityOpt (do not apply; do not fail).
     /// Checks each fragment when the label is a top-level array.
     public static func warnStripUnsafe(from labels: [String: String], imageRef: String) {
+        CompatibilityReport.emit(unsafeCompatibilityIssues(from: labels, imageRef: imageRef))
+    }
+
+    public static func unsafeCompatibilityIssues(
+        from labels: [String: String],
+        imageRef: String
+    ) -> [CompatibilityIssue] {
         guard let raw = labels[labelKey], let data = raw.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) else {
-            return
+            return []
         }
         let fragments: [[String: Any]]
         if let obj = json as? [String: Any] {
@@ -225,23 +231,37 @@ public enum DevContainerMetadataLabel {
         } else if let arr = json as? [Any] {
             fragments = arr.compactMap { $0 as? [String: Any] }
         } else {
-            return
+            return []
         }
+        var issues: [CompatibilityIssue] = []
         for obj in fragments {
             if let p = obj["privileged"] as? Bool, p {
-                StatusPrinter.warning(
-                    "Image '\(imageRef)' devcontainer.metadata sets privileged: true; ignored (not applied on Apple container)"
-                )
+                issues.append(CompatibilityIssue(
+                    code: CompatibilityCode.imagePrivilegedIgnored,
+                    propertyPath: "devcontainer.metadata",
+                    disposition: .ignored,
+                    message: "Image '\(imageRef)' devcontainer.metadata sets privileged: true; ignored (not applied on Apple container)",
+                    subjectIdentity: imageRef
+                ))
             }
+            let hasSecurityOpt: Bool
             if let s = obj["securityOpt"] as? [Any], !s.isEmpty {
-                StatusPrinter.warning(
-                    "Image '\(imageRef)' devcontainer.metadata sets securityOpt; ignored (not applied on Apple container)"
-                )
+                hasSecurityOpt = true
             } else if let s = obj["securityOpt"] as? String, !s.isEmpty {
-                StatusPrinter.warning(
-                    "Image '\(imageRef)' devcontainer.metadata sets securityOpt; ignored (not applied on Apple container)"
-                )
+                hasSecurityOpt = true
+            } else {
+                hasSecurityOpt = false
+            }
+            if hasSecurityOpt {
+                issues.append(CompatibilityIssue(
+                    code: CompatibilityCode.imageSecurityOptIgnored,
+                    propertyPath: "devcontainer.metadata",
+                    disposition: .ignored,
+                    message: "Image '\(imageRef)' devcontainer.metadata sets securityOpt; ignored (not applied on Apple container)",
+                    subjectIdentity: imageRef
+                ))
             }
         }
+        return issues
     }
 }

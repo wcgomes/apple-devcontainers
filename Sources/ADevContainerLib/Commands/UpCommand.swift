@@ -159,6 +159,9 @@ public enum UpCommand {
             throw BringUpRecovery.eligible(error)
         }
 
+        let compatibilityMode = CompatibilityMode.from(environment: localEnv)
+        try resolved.config.compatibilityReport.enforce(mode: compatibilityMode)
+
         // hostRequirements: fail up on shortfall/unreadable host; warn gpu; limits applied on create.
         try enforceHostRequirements(config: resolved.config, host: hostResources)
 
@@ -319,10 +322,6 @@ public enum UpCommand {
         }
 
         // Create path (missing container)
-        if !resolved.mountPromotions.isEmpty {
-            StatusPrinter.warning(MountNormalizer.warningMessage(promotions: resolved.mountPromotions))
-        }
-
         var effectiveConfig = resolved.config
         let platform = ContainerPlatform.defaultLinuxPlatform
         /// When Features inspected the base image, reuse that USER for connection resolution
@@ -362,13 +361,18 @@ public enum UpCommand {
                 deps: deps,
                 remoteUser: resolved.config.remoteUser,
                 containerUser: resolved.config.containerUser,
-                nameBase: nameBase
+                nameBase: nameBase,
+                compatibilityMode: compatibilityMode
             )
             // Create uses derived image; merge runtime contributions from feature metadata.
+            let beforeFeatures = effectiveConfig.compatibilityReport
             effectiveConfig = try FeatureContributionMerge.apply(
                 contributions: featuresResult.contributions,
                 to: effectiveConfig
             )
+            effectiveConfig.compatibilityReport.subtracting(beforeFeatures).emitWarnings()
+            effectiveConfig.compatibilityReport.add(contentsOf: featuresResult.compatibilityIssues)
+            try effectiveConfig.compatibilityReport.enforce(mode: compatibilityMode)
             effectiveConfig.image = featuresResult.derivedImage
             if featuresResult.didInspectBaseUser {
                 knownOCIUser = featuresResult.baseImageUser
@@ -379,12 +383,15 @@ public enum UpCommand {
                 StatusPrinter.status("Pulling image", item: effectiveConfig.image)
                 try? runtime.pullImage(effectiveConfig.image, platform: platform)
             }
+            let beforeImage = effectiveConfig.compatibilityReport
             let applied = try FeatureContributionMerge.applyFromImage(
                 imageRef: effectiveConfig.image,
                 to: effectiveConfig,
                 runtime: runtime
             )
             effectiveConfig = applied.config
+            effectiveConfig.compatibilityReport.subtracting(beforeImage).emitWarnings()
+            try effectiveConfig.compatibilityReport.enforce(mode: compatibilityMode)
             knownMetadataUsers = applied.users
         }
 

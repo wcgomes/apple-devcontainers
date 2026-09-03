@@ -1546,8 +1546,10 @@ nonisolated(unsafe) let supportInitSecurityOptTests: [(String, () throws -> Void
         try MiniTest.expect(warnings[0].contains("securityOpt"))
         try MiniTest.expect(warnings[0].lowercased().contains("not applied"))
         try MiniTest.expect(!warnings[0].contains("no-new-privileges"))
-        try MiniTest.expectEqual(cleanResolved.config, noisyResolved.config)
+        try MiniTest.expectEqual(cleanResolved.config.runArgs, noisyResolved.config.runArgs)
         try MiniTest.expectEqual(cleanResolved.configHash, noisyResolved.configHash)
+        try MiniTest.expect(!cleanResolved.config.compatibilityReport.hasDegradation)
+        try MiniTest.expect(noisyResolved.config.compatibilityReport.hasDegradation)
         let noisyArgs = CreateRequest.from(
             resolved: noisyResolved.config,
             identityName: noisyResolved.containerName,
@@ -6438,5 +6440,157 @@ nonisolated(unsafe) let guestGitCredentialSeedTests: [(String, () throws -> Void
             try String(contentsOf: storePath, encoding: .utf8), stored,
             "erase leaves stored credentials intact"
         )
+    })
+]
+
+nonisolated(unsafe) let compatibilityContractTests: [(String, () throws -> Void)] = [
+    ("compatibilityIssueCodesAndDeterministicOrder", {
+        var report = CompatibilityReport()
+        report.add(CompatibilityIssue(
+            code: CompatibilityCode.configPrivilegedIgnored,
+            propertyPath: "privileged",
+            disposition: .ignored,
+            message: "privileged is not applied"
+        ))
+        report.add(CompatibilityIssue(
+            code: CompatibilityCode.configSecretsIgnored,
+            propertyPath: "secrets",
+            disposition: .ignored,
+            message: "secrets are not injected"
+        ))
+        report.add(CompatibilityIssue(
+            code: CompatibilityCode.configPrivilegedIgnored,
+            propertyPath: "privileged",
+            disposition: .ignored,
+            message: "duplicate observation"
+        ))
+        report.add(CompatibilityIssue(
+            code: CompatibilityCode.runArgIgnored,
+            propertyPath: "runArgs",
+            disposition: .ignored,
+            message: "skipped --device",
+            subjectIdentity: "--device"
+        ))
+        report.add(CompatibilityIssue(
+            code: CompatibilityCode.runArgIgnored,
+            propertyPath: "runArgs",
+            disposition: .ignored,
+            message: "skipped --privileged",
+            subjectIdentity: "--privileged"
+        ))
+        try MiniTest.expectEqual(report.issues.map(\.code), [
+            CompatibilityCode.configPrivilegedIgnored,
+            CompatibilityCode.runArgIgnored,
+            CompatibilityCode.runArgIgnored,
+            CompatibilityCode.configSecretsIgnored
+        ])
+        try MiniTest.expectEqual(report.issues.map(\.subjectIdentity), ["", "--device", "--privileged", ""])
+        try MiniTest.expectEqual(report.issues[0].message, "privileged is not applied")
+    }),
+    ("compatibilityWarningsPreserveQuietAndDoNotUseTableCodesForSidecars", {
+        let previousEnabled = StatusPrinter.enabled
+        let previousOn = StatusPrinter.onWarning
+        defer {
+            StatusPrinter.enabled = previousEnabled
+            StatusPrinter.onWarning = previousOn
+        }
+        StatusPrinter.enabled = false
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+        let resolved = try TestRepo.resolveConfig("""
+        {
+          "image": "alpine:3.20",
+          "otherPortsAttributes": { "onAutoForward": "ignore" },
+          "hostRequirements": { "gpu": true }
+        }
+        """)
+        try MiniTest.expect(warnings.contains { $0.contains(CompatibilityCode.configOtherPortsAttributesIgnored) })
+        try MiniTest.expect(!resolved.compatibilityReport.issues.contains { $0.code.contains("gpu") })
+        let evaluation = HostRequirementsEvaluation.evaluate(
+            resolved.hostRequirements,
+            host: MockHostResourceInfo(physicalMemoryBytes: 64 << 30, cpuCount: 8)
+        )
+        try MiniTest.expect(evaluation.warnings.contains { $0.contains("gpu") })
+        try MiniTest.expect(!evaluation.warnings.contains { $0.contains(CompatibilityCode.configOtherPortsAttributesIgnored) })
+    }),
+    ("ignoredInputIsHashNeutralAndEmulationHashesDeliveredMounts", {
+        let clean = try TestRepo.resolveConfig(#"{ "image": "alpine:3.20", "workspaceFolder": "/workspaces/x" }"#)
+        let ignored = try TestRepo.resolveConfig(#"{ "image": "alpine:3.20", "workspaceFolder": "/workspaces/x", "privileged": true }"#)
+        try MiniTest.expectEqual(
+            ContainerIdentity.configHash(from: clean.hashMaterial()),
+            ContainerIdentity.configHash(from: ignored.hashMaterial())
+        )
+        try MiniTest.expect(ignored.compatibilityReport.hasDegradation)
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("compat-bind-\(UUID().uuidString)", isDirectory: true)
+        let kubeDir = root.appendingPathComponent(".kube", isDirectory: true)
+        try FileManager.default.createDirectory(at: kubeDir, withIntermediateDirectories: true)
+        let configFile = kubeDir.appendingPathComponent("config")
+        try Data("k".utf8).write(to: configFile)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fileMount = MountSpec(
+            type: .bind,
+            source: configFile.path,
+            target: "/home/vscode/.kube/config",
+            readonly: true
+        )
+        let (normalized, promotions) = MountNormalizer.normalize(mounts: [fileMount])
+        try MiniTest.expectEqual(promotions.count, 1)
+        let delivered = ResolvedDevContainerConfig(image: "alpine:3.20", workspaceFolder: "/ws", mounts: normalized)
+        let rawShape = ResolvedDevContainerConfig(image: "alpine:3.20", workspaceFolder: "/ws", mounts: [fileMount])
+        try MiniTest.expect(
+            ContainerIdentity.configHash(from: delivered.hashMaterial())
+                != ContainerIdentity.configHash(from: rawShape.hashMaterial())
+        )
+        try MiniTest.expectEqual(delivered.mounts[0].source, kubeDir.path)
+    }),
+    ("sidecarNoticesStayOutsideCompatibilityVocabulary", {
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+        let parsed = try RunArgsAdmission.parse([
+            "--privileged",
+            "--cap-add=NET_ADMIN",
+            "--init"
+        ] as [Any])
+        try MiniTest.expectEqual(parsed, [.capAdd("NET_ADMIN"), .initFlag])
+        let pairing = warnings.filter { $0.contains("NET_ADMIN") && $0.contains("privileged/device") }
+        try MiniTest.expectEqual(pairing.count, 1)
+        try MiniTest.expect(!pairing[0].contains(CompatibilityCode.runArgIgnored))
+        let gpuConfig = try TestRepo.resolveConfig(#"{ "image": "alpine:3.20", "hostRequirements": { "gpu": true } }"#)
+        try MiniTest.expect(!gpuConfig.compatibilityReport.hasDegradation)
+        try gpuConfig.compatibilityReport.enforce(mode: .strict)
+    }),
+    ("tolerantCompatibilityFixturePreservesIdentityAndInitSecurityOpt", {
+        let fixture = try makeUnitFixtureWorkspace("tolerant-compatibility.json")
+        defer { try? FileManager.default.removeItem(at: fixture.workspace) }
+        let resolved = try ConfigResolver.resolve(workspacePath: fixture.workspace.path, localEnv: [:])
+        try MiniTest.expectEqual(resolved.config.image, "alpine:3.20")
+        try MiniTest.expect(resolved.config.runArgs.contains(.capAdd("SYS_PTRACE")))
+        try MiniTest.expect(resolved.config.runArgs.contains(.capAdd("NET_ADMIN")))
+        try MiniTest.expect(!resolved.config.runArgs.contains { $0.hashEncoding.contains("privileged") })
+        try MiniTest.expect(!resolved.config.runArgs.contains { $0.hashEncoding.contains("security") })
+        let args = CreateRequest.from(
+            resolved: resolved.config,
+            identityName: resolved.containerName,
+            labels: resolved.labels,
+            configHash: resolved.configHash,
+            workspacePath: resolved.workspacePath
+        ).createArguments()
+        try MiniTest.expect(args.contains("--cap-add"))
+        try MiniTest.expect(!args.contains("--security-opt"))
+        try MiniTest.expect(!args.contains { $0.contains("privileged") })
+        let bare = try makeUnitFixtureWorkspace("bare-debian-default.json")
+        defer { try? FileManager.default.removeItem(at: bare.workspace) }
+        let bareResolved = try ConfigResolver.resolve(workspacePath: bare.workspace.path, localEnv: [:])
+        try MiniTest.expectEqual(bareResolved.config.runArgs.filter { $0 == .initFlag }.count, 1)
+    }),
+    ("commandHelpDocumentsStrictCompatibility", {
+        let usage = CommandSurface.usageText()
+        try MiniTest.expect(usage.contains(CompatibilityMode.environmentKey))
+        try MiniTest.expect(usage.contains("compatibility"))
+        try MiniTest.expect(usage.contains("$schema") || usage.contains("capAdd") || usage.contains("warn-skip"))
     })
 ]

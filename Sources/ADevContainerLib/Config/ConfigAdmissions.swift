@@ -28,7 +28,25 @@ public enum ConfigAdmissions {
         "runArgs",
         "features",
         "init",
-        "securityOpt"
+        "securityOpt",
+        "$schema",
+        "otherPortsAttributes",
+        "secrets",
+        "privileged",
+        "overrideCommand",
+        "capAdd"
+    ]
+
+    private static let blockedWorkspaceOrProcessKeys: [String: String] = [
+        "workspaceMount": "workspaceMount is unsupported because it would mount different content than the implicit workspace bind",
+        "remoteEnv": "remoteEnv is unsupported because it would run a different process environment than containerEnv"
+    ]
+
+    private static let blockedSourceKeys: [String: String] = [
+        "build": "Dockerfile build is not supported",
+        "dockerFile": "Dockerfile build is not supported",
+        "dockerfile": "Dockerfile build is not supported",
+        "context": "Dockerfile build is not supported"
     ]
 
     private static let composeKeys: Set<String> = [
@@ -48,6 +66,111 @@ public enum ConfigAdmissions {
                 message: "Docker Compose configuration is not supported",
                 hint: "Remove '\(key)' and use a single image-based devcontainer.json"
             )
+        }
+
+        for (key, message) in blockedSourceKeys where raw[key] != nil {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: key,
+                message: message,
+                hint: "Remove '\(key)' and use a single image-based devcontainer.json"
+            )
+        }
+
+        for (key, message) in blockedWorkspaceOrProcessKeys where raw[key] != nil {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: key,
+                message: message,
+                hint: "Remove '\(key)'"
+            )
+        }
+
+        if let schema = raw["$schema"], !(schema is String) {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: "$schema",
+                message: "$schema must be a string"
+            )
+        }
+
+        if let otherPorts = raw["otherPortsAttributes"], !(otherPorts is [String: Any]) {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: "otherPortsAttributes",
+                message: "otherPortsAttributes must be an object"
+            )
+        }
+
+        if let secrets = raw["secrets"] {
+            guard let dict = secrets as? [String: Any] else {
+                throw CLIError(
+                    code: CLIErrorCode.unsupportedProperty,
+                    property: "secrets",
+                    message: "secrets must be an object whose entries are objects"
+                )
+            }
+            for (_, value) in dict {
+                guard value is [String: Any] else {
+                    throw CLIError(
+                        code: CLIErrorCode.unsupportedProperty,
+                        property: "secrets",
+                        message: "secrets entries must be objects"
+                    )
+                }
+            }
+        }
+
+        if let privileged = raw["privileged"], !isJSONBoolean(privileged) {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: "privileged",
+                message: "privileged must be a Boolean"
+            )
+        }
+
+        if let overrideCommand = raw["overrideCommand"] {
+            guard isJSONBoolean(overrideCommand) else {
+                throw CLIError(
+                    code: CLIErrorCode.unsupportedProperty,
+                    property: "overrideCommand",
+                    message: "overrideCommand must be a Boolean"
+                )
+            }
+            if overrideCommand as? Bool == false {
+                throw CLIError(
+                    code: CLIErrorCode.unsupportedProperty,
+                    property: "overrideCommand",
+                    message: "overrideCommand false is unsupported because the image command is not preserved",
+                    hint: "Omit overrideCommand or set it to true to keep the existing keep-alive override"
+                )
+            }
+        }
+
+        if let capAdd = raw["capAdd"] {
+            guard let values = capAdd as? [Any] else {
+                throw CLIError(
+                    code: CLIErrorCode.unsupportedProperty,
+                    property: "capAdd",
+                    message: "capAdd must be an array of capability-name strings"
+                )
+            }
+            for item in values {
+                guard let name = item as? String else {
+                    throw CLIError(
+                        code: CLIErrorCode.unsupportedProperty,
+                        property: "capAdd",
+                        message: "capAdd entries must be strings"
+                    )
+                }
+                guard RunArgsAdmission.isValidCapabilityName(name) else {
+                    throw CLIError(
+                        code: CLIErrorCode.unsupportedProperty,
+                        property: "capAdd",
+                        message: "capAdd entry '\(name)' is not a valid capability name"
+                    )
+                }
+            }
         }
 
         if let initValue = raw["init"], !isJSONBoolean(initValue) {

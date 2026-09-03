@@ -92,11 +92,39 @@ public enum RunArgsAdmission {
         + "--dns-option, --dns-domain, --no-dns, --ulimit, --tmpfs, --cpus/-c, --memory/-m, "
         + "--network (named only), --rosetta, --ssh, --read-only"
 
+    public struct ParseResult: Equatable, Sendable {
+        public var args: [AllowlistedRunArg]
+        public var issues: [CompatibilityIssue]
+        public var skippedPrivilegedOrDevice: Bool
+
+        public init(
+            args: [AllowlistedRunArg] = [],
+            issues: [CompatibilityIssue] = [],
+            skippedPrivilegedOrDevice: Bool = false
+        ) {
+            self.args = args
+            self.issues = issues
+            self.skippedPrivilegedOrDevice = skippedPrivilegedOrDevice
+        }
+    }
+
     /// Parse `runArgs` array. Omitted/`nil` → empty. Empty array → empty.
     /// - Parameter emitWarnings: When false, still skip Apple-incompatible entries but do not warn
     ///   (used by pre-resolve admission so resolve emits each skip warning once).
     public static func parse(_ value: Any?, emitWarnings: Bool = true) throws -> [AllowlistedRunArg] {
-        guard let value else { return [] }
+        let parsed = try parseResult(value)
+        if emitWarnings {
+            CompatibilityReport.emit(parsed.issues)
+            emitNetAdminSidecarIfNeeded(
+                skippedPrivilegedOrDevice: parsed.skippedPrivilegedOrDevice,
+                args: parsed.args
+            )
+        }
+        return parsed.args
+    }
+
+    public static func parseResult(_ value: Any?) throws -> ParseResult {
+        guard let value else { return ParseResult() }
         guard let items = value as? [Any] else {
             throw CLIError(
                 code: CLIErrorCode.unsupportedProperty,
@@ -106,6 +134,7 @@ public enum RunArgsAdmission {
         }
 
         var result: [AllowlistedRunArg] = []
+        var issues: [CompatibilityIssue] = []
         var sawInit = false
         var sawNoDns = false
         var sawRosetta = false
@@ -125,31 +154,28 @@ public enum RunArgsAdmission {
             // --- Apple-incompatible flags: warn + skip (do not apply) ---
             if arg == "--privileged" || arg.hasPrefix("--privileged=") {
                 skippedPrivilegedOrDevice = true
-                if emitWarnings {
-                    StatusPrinter.warning(
-                        "runArgs entry '--privileged' is incompatible with Apple container; ignored"
-                    )
-                }
+                issues.append(ignoredRunArg(
+                    display: "--privileged",
+                    message: "runArgs entry '--privileged' is incompatible with Apple container; ignored"
+                ))
                 index += 1
                 continue
             }
             if isDeviceArg(arg) || arg == "--device" {
                 skippedPrivilegedOrDevice = true
                 let display = arg == "--device" ? "--device" : arg
-                if emitWarnings {
-                    StatusPrinter.warning(
-                        "runArgs entry '\(display)' is incompatible with Apple container (no device passthrough); ignored"
-                    )
-                }
+                issues.append(ignoredRunArg(
+                    display: display,
+                    message: "runArgs entry '\(display)' is incompatible with Apple container (no device passthrough); ignored"
+                ))
                 index = advancePastOptionalValue(items: items, index: index, bareFlag: arg == "--device")
                 continue
             }
             if let rejected = incompatibleSkippedFlag(arg) {
-                if emitWarnings {
-                    StatusPrinter.warning(
-                        "runArgs entry '\(rejected.display)' is incompatible with Apple container; ignored"
-                    )
-                }
+                issues.append(ignoredRunArg(
+                    display: rejected.display,
+                    message: "runArgs entry '\(rejected.display)' is incompatible with Apple container; ignored"
+                ))
                 index = advancePastOptionalValue(
                     items: items,
                     index: index,
@@ -285,7 +311,8 @@ public enum RunArgsAdmission {
             }
 
             if let (name, nextIndex) = try takeValue("--network", items: items, index: index) {
-                if try shouldSkipDockerOnlyNetwork(name, displayArg: arg, emitWarnings: emitWarnings) {
+                if let skip = try skippedDockerOnlyNetworkIssue(name, displayArg: arg) {
+                    issues.append(skip)
                     index = nextIndex
                     continue
                 }
@@ -331,13 +358,56 @@ public enum RunArgsAdmission {
             )
         }
 
-        if emitWarnings, skippedPrivilegedOrDevice, result.contains(where: isNetAdminCapAdd) {
-            StatusPrinter.warning(
-                "cap-add NET_ADMIN alone does not provide device/privileged/VPN-in-container on Apple container (privileged/device were skipped)"
-            )
-        }
+        return ParseResult(
+            args: result,
+            issues: issues,
+            skippedPrivilegedOrDevice: skippedPrivilegedOrDevice
+        )
+    }
 
+    public static func isValidCapabilityName(_ name: String) -> Bool {
+        !name.isEmpty && !name.hasPrefix("-")
+    }
+
+    /// First-seen case-sensitive capability dedup: existing runArgs order, then extra names.
+    public static func mergingCapabilities(
+        _ names: [String],
+        into runArgs: [AllowlistedRunArg]
+    ) -> [AllowlistedRunArg] {
+        var seen = Set<String>()
+        var result: [AllowlistedRunArg] = []
+        for arg in runArgs {
+            if case .capAdd(let name) = arg {
+                if seen.contains(name) { continue }
+                seen.insert(name)
+            }
+            result.append(arg)
+        }
+        for name in names where !seen.contains(name) {
+            seen.insert(name)
+            result.append(.capAdd(name))
+        }
         return result
+    }
+
+    public static func emitNetAdminSidecarIfNeeded(
+        skippedPrivilegedOrDevice: Bool,
+        args: [AllowlistedRunArg]
+    ) {
+        guard skippedPrivilegedOrDevice, args.contains(where: isNetAdminCapAdd) else { return }
+        StatusPrinter.warning(
+            "cap-add NET_ADMIN alone does not provide device/privileged/VPN-in-container on Apple container (privileged/device were skipped)"
+        )
+    }
+
+    private static func ignoredRunArg(display: String, message: String) -> CompatibilityIssue {
+        CompatibilityIssue(
+            code: CompatibilityCode.runArgIgnored,
+            propertyPath: "runArgs",
+            disposition: .ignored,
+            message: message,
+            subjectIdentity: display
+        )
     }
 
     private static func isNetAdminCapAdd(_ arg: AllowlistedRunArg) -> Bool {
@@ -400,10 +470,6 @@ public enum RunArgsAdmission {
         arg.hasPrefix("--device=") || arg.hasPrefix("--device ")
     }
 
-    private static func isValidCapabilityName(_ name: String) -> Bool {
-        !name.isEmpty && !name.hasPrefix("-")
-    }
-
     private static func isNonEmptyValue(_ value: String) -> Bool {
         !value.isEmpty && !value.hasPrefix("-")
     }
@@ -415,12 +481,11 @@ public enum RunArgsAdmission {
         return raw
     }
 
-    /// Returns true when the network mode was warn-skipped. Empty name still hard-errors.
-    private static func shouldSkipDockerOnlyNetwork(
+    /// Returns an ignored issue when the network mode was skipped. Empty name still hard-errors.
+    private static func skippedDockerOnlyNetworkIssue(
         _ name: String,
-        displayArg: String,
-        emitWarnings: Bool
-    ) throws -> Bool {
+        displayArg: String
+    ) throws -> CompatibilityIssue? {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw CLIError(
@@ -432,14 +497,12 @@ public enum RunArgsAdmission {
         }
         let lower = trimmed.lowercased()
         if lower == "host" || lower == "bridge" || lower == "none" || lower.hasPrefix("container:") {
-            if emitWarnings {
-                StatusPrinter.warning(
-                    "runArgs network mode '\(trimmed)' is incompatible with Apple container; ignored (use a named network)"
-                )
-            }
-            return true
+            return ignoredRunArg(
+                display: trimmed,
+                message: "runArgs network mode '\(trimmed)' is incompatible with Apple container; ignored (use a named network)"
+            )
         }
-        return false
+        return nil
     }
 
     /// After a bare flag token, skip the following value token when present.

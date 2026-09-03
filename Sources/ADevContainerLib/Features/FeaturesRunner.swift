@@ -17,6 +17,7 @@ public struct FeaturesRunnerResult: Equatable, Sendable {
     /// `remoteUser` / `containerUser` from base image `devcontainer.metadata` (for connection resolution;
     /// derived image may not carry the base label).
     public var metadataUsers: DevContainerMetadataLabel.ImageMetadataUsers
+    public var compatibilityIssues: [CompatibilityIssue]
 
     public init(
         contributions: FeatureContributions,
@@ -26,7 +27,8 @@ public struct FeaturesRunnerResult: Equatable, Sendable {
         reusedExistingImage: Bool,
         baseImageUser: String? = nil,
         didInspectBaseUser: Bool = false,
-        metadataUsers: DevContainerMetadataLabel.ImageMetadataUsers = .empty
+        metadataUsers: DevContainerMetadataLabel.ImageMetadataUsers = .empty,
+        compatibilityIssues: [CompatibilityIssue] = []
     ) {
         self.contributions = contributions
         self.orderedRefs = orderedRefs
@@ -36,6 +38,7 @@ public struct FeaturesRunnerResult: Equatable, Sendable {
         self.baseImageUser = baseImageUser
         self.didInspectBaseUser = didInspectBaseUser
         self.metadataUsers = metadataUsers
+        self.compatibilityIssues = compatibilityIssues
     }
 }
 
@@ -71,7 +74,8 @@ public enum FeaturesRunner {
         deps: Dependencies,
         remoteUser: String? = nil,
         containerUser: String? = nil,
-        nameBase: String = ""
+        nameBase: String = "",
+        compatibilityMode: CompatibilityMode = .tolerant
     ) throws -> FeaturesRunnerResult {
         guard !features.isEmpty else {
             throw CLIError(
@@ -85,6 +89,7 @@ public enum FeaturesRunner {
 
         var packages: [FetchedFeaturePackage] = []
         var orderedInput: [FeatureOrder.OrderedFeature] = []
+        var compatibilityIssues: [CompatibilityIssue] = []
 
         for feature in features {
             StatusPrinter.status("Fetching feature", item: feature.reference)
@@ -106,7 +111,7 @@ public enum FeaturesRunner {
             }
             let data = try Data(contentsOf: URL(fileURLWithPath: metaPath))
             let metadata = try FeatureMetadata.parse(data: data, featureRef: feature.reference)
-            metadata.warnStripUnsafeContributions(featureRef: feature.reference)
+            compatibilityIssues.append(contentsOf: metadata.compatibilityIssues(featureRef: feature.reference))
             orderedInput.append(FeatureOrder.OrderedFeature(admitted: feature, metadata: metadata))
         }
 
@@ -117,11 +122,25 @@ public enum FeaturesRunner {
         // Optional: merge base image metadata label when inspect is available.
         var metadataUsers = DevContainerMetadataLabel.ImageMetadataUsers.empty
         if let labels = try? deps.runtime.imageLabels(ref: baseImage) {
-            DevContainerMetadataLabel.warnStripUnsafe(from: labels, imageRef: baseImage)
+            compatibilityIssues.append(contentsOf: DevContainerMetadataLabel.unsafeCompatibilityIssues(
+                from: labels,
+                imageRef: baseImage
+            ))
             let labelContrib = DevContainerMetadataLabel.parseContributions(from: labels)
             contributions = unionContributions(labelContrib, contributions)
             metadataUsers = DevContainerMetadataLabel.parseUsers(from: labels)
         }
+
+        let mountIssues = MountNormalizer.normalize(
+            mounts: contributions.mounts,
+            fileManager: deps.fileManager
+        ).promotions.map(MountNormalizer.compatibilityIssue(for:))
+        let featureReport = CompatibilityReport(issues: compatibilityIssues)
+        featureReport.emitWarnings()
+        var gateReport = featureReport
+        gateReport.add(contentsOf: mountIssues)
+        try gateReport.enforce(mode: compatibilityMode)
+        compatibilityIssues.append(contentsOf: mountIssues)
 
         let derivedImage = DerivedImageTag.compute(
             baseImage: baseImage,
@@ -147,7 +166,8 @@ public enum FeaturesRunner {
                     reusedExistingImage: true,
                     baseImageUser: nil,
                     didInspectBaseUser: false,
-                    metadataUsers: metadataUsers
+                    metadataUsers: metadataUsers,
+                    compatibilityIssues: compatibilityIssues
                 )
             }
             throw CLIError(
@@ -167,7 +187,8 @@ public enum FeaturesRunner {
                     reusedExistingImage: true,
                     baseImageUser: nil,
                     didInspectBaseUser: false,
-                    metadataUsers: metadataUsers
+                    metadataUsers: metadataUsers,
+                    compatibilityIssues: compatibilityIssues
                 )
             }
             throw CLIError(
@@ -188,7 +209,8 @@ public enum FeaturesRunner {
                 reusedExistingImage: true,
                 baseImageUser: baseUser,
                 didInspectBaseUser: true,
-                metadataUsers: metadataUsers
+                metadataUsers: metadataUsers,
+                compatibilityIssues: compatibilityIssues
             )
         }
 
@@ -228,7 +250,8 @@ public enum FeaturesRunner {
             reusedExistingImage: false,
             baseImageUser: baseUser,
             didInspectBaseUser: true,
-            metadataUsers: metadataUsers
+            metadataUsers: metadataUsers,
+            compatibilityIssues: compatibilityIssues
         )
     }
 

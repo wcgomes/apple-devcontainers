@@ -281,6 +281,8 @@ public struct ResolvedDevContainerConfig: Equatable {
     public var featurePostCreateCommands: [NamedLifecycleCommand]
     public var featurePostStartCommands: [NamedLifecycleCommand]
     public var featurePostAttachCommands: [NamedLifecycleCommand]
+    /// Config-stage (and later merged) compatibility issues. Excluded from hash material.
+    public var compatibilityReport: CompatibilityReport
 
     public init(
         name: String? = nil,
@@ -311,7 +313,8 @@ public struct ResolvedDevContainerConfig: Equatable {
         featureUpdateContentCommands: [NamedLifecycleCommand] = [],
         featurePostCreateCommands: [NamedLifecycleCommand] = [],
         featurePostStartCommands: [NamedLifecycleCommand] = [],
-        featurePostAttachCommands: [NamedLifecycleCommand] = []
+        featurePostAttachCommands: [NamedLifecycleCommand] = [],
+        compatibilityReport: CompatibilityReport = CompatibilityReport()
     ) {
         self.name = name
         self.image = image
@@ -342,6 +345,7 @@ public struct ResolvedDevContainerConfig: Equatable {
         self.featurePostCreateCommands = featurePostCreateCommands
         self.featurePostStartCommands = featurePostStartCommands
         self.featurePostAttachCommands = featurePostAttachCommands
+        self.compatibilityReport = compatibilityReport
     }
 
     /// True when there is any applyable vscode customizations payload (extensions and/or non-empty settings).
