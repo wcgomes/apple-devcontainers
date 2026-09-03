@@ -199,6 +199,24 @@ public enum ConfigResolver {
         let shutdownAction = try ShutdownAction.parse(raw["shutdownAction"])
 
         let runArgs = try RunArgsAdmission.parse(raw["runArgs"])
+        var effectiveRunArgs = runArgs
+        if raw["init"] as? Bool == true, !effectiveRunArgs.contains(.initFlag) {
+            effectiveRunArgs.append(.initFlag)
+        }
+        if let securityOpt = raw["securityOpt"] as? [Any], !securityOpt.isEmpty {
+            let includesNoNewPrivileges = securityOpt.contains {
+                ($0 as? String) == "no-new-privileges"
+            }
+            let message: String
+            if includesNoNewPrivileges {
+                message =
+                    "Top-level securityOpt was ignored and not applied on Apple container; "
+                    + "no-new-privileges is not enforced"
+            } else {
+                message = "Top-level securityOpt was ignored and not applied on Apple container"
+            }
+            StatusPrinter.warning(message)
+        }
         let hostRequirements = try HostRequirements.parse(raw["hostRequirements"])
 
         let vscode = parseVscodeCustomizations(raw["customizations"])
@@ -224,7 +242,7 @@ public enum ConfigResolver {
             waitFor: waitFor,
             userEnvProbe: userEnvProbe,
             shutdownAction: shutdownAction,
-            runArgs: runArgs,
+            runArgs: effectiveRunArgs,
             hostRequirements: hostRequirements,
             hasVscodeCustomizations: vscode.hasVscode,
             vscodeExtensions: vscode.extensions,

@@ -46,6 +46,12 @@ Resource identity stem `adev-{base}-{hash12}` (empty base → `adev-{hash12}`). 
 
 **Config hash:** bind-mode hash may keep the deferred token in mount material; **volume-mode** hash / `config_volumes` label use **post-expansion** sources so identity and purge see real volume names. Expand **before** `ensureVolume` so Apple names match `^[A-Za-z0-9][A-Za-z0-9_.-]*$`. Contract: [`specs/core.md`](../../specs/core.md) (Variable substitution subset).
 
+### Strict JSON scalar typing
+
+`JSONCParser.parseObject` delegates scalar decoding to Foundation `JSONSerialization`. Its bridge may expose JSON booleans and numeric values through `NSNumber`, so `as? Bool` and `is Bool` are not strict JSON-Boolean tests: numeric `0`/`1` may pass those checks.
+
+For Boolean-only admission, inspect an `NSNumber`'s Core Foundation identity (`CFGetTypeID(number) == CFBooleanGetTypeID()`) and accept a native `Bool` when it is not bridged as `NSNumber`. Keep numeric values on numeric paths rather than normalizing them before admission.
+
 ## MountNormalizer (file → directory bind promotion)
 
 Apple container accepts **directory** bind sources only ([gaps](../domain/devcontainer-apple-gaps.md)). Before pull/create on `up`, **MountNormalizer** rewrites file binds:

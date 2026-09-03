@@ -1,0 +1,41 @@
+{
+  "name": "Go",
+  "image": "ghcr.io/bare-devcontainer/golang:1.26-trixie",
+  "remoteUser": "dev",
+  "runArgs": ["--cap-drop=ALL"],
+  "securityOpt": ["no-new-privileges"],
+  "init": true,
+  "mounts": [
+    {
+      "source": "${devcontainerId}-golang-pkg-mod",
+      "target": "/home/dev/go/pkg/mod",
+      "type": "volume"
+    },
+    {
+      "source": "${devcontainerId}-golang-build-cache",
+      "target": "/home/dev/.cache/go-build",
+      "type": "volume"
+    }
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go"
+      ],
+      "settings": {
+        "go.toolsManagement.autoUpdate": false,
+        "go.toolsManagement.checkForUpdates": "local",
+        "[go]": {
+          "editor.defaultFormatter": "golang.go",
+          "editor.formatOnSave": true,
+          "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit"
+          }
+        },
+        "gopls": {
+          "ui.semanticTokens": true
+        }
+      }
+    }
+  }
+}

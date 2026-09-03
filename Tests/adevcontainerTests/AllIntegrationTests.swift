@@ -352,6 +352,14 @@ nonisolated(unsafe) let integrationTests: [(String, () throws -> Void)] = [
         // Allowlisted runArgs + hostRequirements enforce+apply (8gb/4 cpus OK on typical Macs).
         try IntegrationSupport.runFixtureE2E(fixtureFile: "runargs-host.json")
     }),
+    ("fixtureE2E_bareDebian", {
+        // Bare Debian is a representative init/securityOpt compatibility regression.
+        // The helper skips cleanly without Apple container or a pullable fixture image.
+        try IntegrationSupport.runFixtureE2E(
+            fixtureFile: "bare-debian-default.json",
+            smokeCommand: ["sh", "-lc", "test \"$(id -un)\" = dev"]
+        )
+    }),
     ("fixtureE2E_featuresNode_skipsWithoutNetworkOrRuntime", {
         // Live OCI fetch + container build requires network and Apple container.
         // Default suite must skip cleanly when either is unavailable.

@@ -1,0 +1,36 @@
+{
+  "name": "Python (uv)",
+  "image": "ghcr.io/bare-devcontainer/uv:trixie",
+  "remoteUser": "dev",
+  "runArgs": ["--cap-drop=ALL"],
+  "securityOpt": ["no-new-privileges"],
+  "init": true,
+  "containerEnv": {
+    "UV_LINK_MODE": "copy"
+  },
+  "mounts": [
+    {
+      "source": "${devcontainerId}-uv-cache",
+      "target": "/home/dev/.cache/uv",
+      "type": "volume"
+    }
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "charliermarsh.ruff"
+      ],
+      "settings": {
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.formatOnSave": true,
+          "editor.codeActionsOnSave": {
+            "source.fixAll": "explicit",
+            "source.organizeImports": "explicit"
+          }
+        }
+      }
+    }
+  }
+}

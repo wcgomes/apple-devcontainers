@@ -1,0 +1,8 @@
+{
+  "name": "Debian",
+  "image": "ghcr.io/bare-devcontainer/debian:trixie",
+  "remoteUser": "dev",
+  "runArgs": ["--cap-drop=ALL"],
+  "securityOpt": ["no-new-privileges"],
+  "init": true
+}

@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 /// Fail-closed admission for the supported property surface.
 public enum ConfigAdmissions {
@@ -25,7 +26,9 @@ public enum ConfigAdmissions {
         "customizations",
         "hostRequirements",
         "runArgs",
-        "features"
+        "features",
+        "init",
+        "securityOpt"
     ]
 
     private static let composeKeys: Set<String> = [
@@ -45,6 +48,31 @@ public enum ConfigAdmissions {
                 message: "Docker Compose configuration is not supported",
                 hint: "Remove '\(key)' and use a single image-based devcontainer.json"
             )
+        }
+
+        if let initValue = raw["init"], !isJSONBoolean(initValue) {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: "init",
+                message: "init must be a Boolean"
+            )
+        }
+
+        if let securityOpt = raw["securityOpt"] {
+            guard let values = securityOpt as? [Any] else {
+                throw CLIError(
+                    code: CLIErrorCode.unsupportedProperty,
+                    property: "securityOpt",
+                    message: "securityOpt must be an array of strings"
+                )
+            }
+            guard values.allSatisfy({ $0 is String }) else {
+                throw CLIError(
+                    code: CLIErrorCode.unsupportedProperty,
+                    property: "securityOpt",
+                    message: "securityOpt entries must be strings"
+                )
+            }
         }
 
         // Features — OCI/local admitted; docker-* markers warn-skipped (no warn here:
@@ -100,5 +128,15 @@ public enum ConfigAdmissions {
                 )
             }
         }
+    }
+
+    /// JSONSerialization bridges both JSON booleans and some NSNumber values to Bool on
+    /// supported platforms. Use the Foundation boolean type identity so numeric 0/1 cannot pass
+    /// Boolean admission while retaining compatibility with native Bool values.
+    private static func isJSONBoolean(_ value: Any) -> Bool {
+        guard let number = value as? NSNumber else {
+            return value is Bool
+        }
+        return CFGetTypeID(number) == CFBooleanGetTypeID()
     }
 }

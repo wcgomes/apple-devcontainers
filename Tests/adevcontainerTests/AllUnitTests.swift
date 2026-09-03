@@ -35,6 +35,15 @@ enum TestRepo {
     }
 }
 
+func makeUnitFixtureWorkspace(_ fileName: String) throws -> (workspace: URL, raw: [String: Any]) {
+    let path = TestRepo.root().appendingPathComponent("Tests/Fixtures/").appendingPathComponent(fileName)
+    let raw = try JSONCParser.loadFile(at: path.path)
+    let data = try JSONSerialization.data(withJSONObject: raw, options: [.sortedKeys])
+    let json = String(data: data, encoding: .utf8) ?? "{}"
+    let workspace = try TestRepo.makeTempWorkspace(configJSON: json, prefix: "adev-fixture")
+    return (workspace, raw)
+}
+
 final class MockProcessRunner: StreamTeeingProcessRunning, @unchecked Sendable {
     private let stateLock = NSLock()
     var calls: [MockProcessCall] = []
@@ -1344,6 +1353,416 @@ nonisolated(unsafe) let admissionTests: [(String, () throws -> Void)] = [
             let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: env)
             try MiniTest.expect(!resolved.config.image.isEmpty, name)
         }
+    })
+]
+
+nonisolated(unsafe) let supportInitSecurityOptTests: [(String, () throws -> Void)] = [
+    ("topLevelInitAndSecurityOptAreAdmitted", {
+        try ConfigAdmissions.admit([
+            "image": "alpine:3.20",
+            "init": true,
+            "securityOpt": ["no-new-privileges", "seccomp=profile.json"] as [Any]
+        ])
+    }),
+    ("topLevelInitTrueMapsToCreateAndChangesHash", {
+        let workspace = try TestRepo.makeTempWorkspace(
+            configJSON: #"{ "image": "alpine:3.20", "workspaceFolder": "/workspaces/init-hash" }"#,
+            prefix: "adev-init-hash"
+        )
+        defer { try? FileManager.default.removeItem(at: workspace) }
+
+        let omitted = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        try #"{ "image": "alpine:3.20", "workspaceFolder": "/workspaces/init-hash", "init": true }"#
+            .write(
+                to: workspace.appendingPathComponent(".devcontainer/devcontainer.json"),
+                atomically: true,
+                encoding: .utf8
+            )
+        let enabled = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        try MiniTest.expect(!omitted.config.runArgs.contains(.initFlag))
+        try MiniTest.expectEqual(enabled.config.runArgs.filter { $0 == .initFlag }.count, 1)
+
+        let omittedArgs = CreateRequest.from(
+            resolved: omitted.config,
+            identityName: omitted.containerName,
+            labels: omitted.labels,
+            configHash: omitted.configHash,
+            workspacePath: omitted.workspacePath
+        ).createArguments()
+        let enabledArgs = CreateRequest.from(
+            resolved: enabled.config,
+            identityName: enabled.containerName,
+            labels: enabled.labels,
+            configHash: enabled.configHash,
+            workspacePath: enabled.workspacePath
+        ).createArguments()
+        try MiniTest.expectEqual(omittedArgs.filter { $0 == "--init" }.count, 0)
+        try MiniTest.expectEqual(enabledArgs.filter { $0 == "--init" }.count, 1)
+        try MiniTest.expect(omitted.configHash != enabled.configHash)
+    }),
+    ("topLevelInitFalseIsHashNeutralAndDoesNotVetoRunArgs", {
+        let omitted = try TestRepo.resolveConfig(
+            #"{ "image": "alpine:3.20", "workspaceFolder": "/workspaces/x" }"#
+        )
+        let falseValue = try TestRepo.resolveConfig(
+            #"{ "image": "alpine:3.20", "workspaceFolder": "/workspaces/x", "init": false }"#
+        )
+        let falseWithRunArg = try TestRepo.resolveConfig(
+            #"{ "image": "alpine:3.20", "workspaceFolder": "/workspaces/x", "init": false, "runArgs": ["--init"] }"#
+        )
+        try MiniTest.expect(!omitted.runArgs.contains(.initFlag))
+        try MiniTest.expect(!falseValue.runArgs.contains(.initFlag))
+        try MiniTest.expectEqual(
+            ContainerIdentity.configHash(from: omitted.hashMaterial()),
+            ContainerIdentity.configHash(from: falseValue.hashMaterial())
+        )
+        try MiniTest.expectEqual(falseWithRunArg.runArgs.filter { $0 == .initFlag }.count, 1)
+        let args = CreateRequest.from(
+            resolved: falseWithRunArg,
+            identityName: "ctr",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        ).createArguments()
+        try MiniTest.expectEqual(args.filter { $0 == "--init" }.count, 1)
+    }),
+    ("topLevelAndRunArgsInitDeduplicateAndHashEqually", {
+        let topLevel = try TestRepo.resolveConfig(
+            #"{ "image": "alpine:3.20", "workspaceFolder": "/workspaces/x", "init": true, "runArgs": ["--init"] }"#
+        )
+        let runArgsOnly = try TestRepo.resolveConfig(
+            #"{ "image": "alpine:3.20", "workspaceFolder": "/workspaces/x", "runArgs": ["--init"] }"#
+        )
+        try MiniTest.expectEqual(topLevel.runArgs.filter { $0 == .initFlag }.count, 1)
+        try MiniTest.expectEqual(runArgsOnly.runArgs.filter { $0 == .initFlag }.count, 1)
+        let topArgs = CreateRequest.from(
+            resolved: topLevel,
+            identityName: "ctr",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        ).createArguments()
+        let runArgs = CreateRequest.from(
+            resolved: runArgsOnly,
+            identityName: "ctr",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        ).createArguments()
+        try MiniTest.expectEqual(topArgs.filter { $0 == "--init" }.count, 1)
+        try MiniTest.expectEqual(runArgs.filter { $0 == "--init" }.count, 1)
+        try MiniTest.expectEqual(
+            ContainerIdentity.configHash(from: topLevel.hashMaterial()),
+            ContainerIdentity.configHash(from: runArgsOnly.hashMaterial())
+        )
+    }),
+    ("featureAndImageMetadataInitUnionWithTopLevelValues", {
+        let featureContribution = FeatureContributions(initProcess: true)
+        for topLevel in [true, false] {
+            let config = try TestRepo.resolveConfig(
+                "{ \"image\": \"alpine:3.20\", \"init\": \(topLevel) }"
+            )
+            let merged = try FeatureContributionMerge.apply(
+                contributions: featureContribution,
+                to: config
+            )
+            let args = CreateRequest.from(
+                resolved: merged,
+                identityName: "ctr",
+                labels: [:],
+                configHash: "h",
+                workspacePath: "/ws"
+            ).createArguments()
+            try MiniTest.expectEqual(merged.runArgs.filter { $0 == .initFlag }.count, 1)
+            try MiniTest.expectEqual(args.filter { $0 == "--init" }.count, 1)
+
+            let labels = [
+                DevContainerMetadataLabel.labelKey: #"{"init":true}"#
+            ]
+            let runner = MockProcessRunner()
+            runner.handlers = [MockProcessRunner.imageInspectHandler(labels: labels)]
+            let runtime = AppleContainerRuntime(
+                executablePath: "/usr/local/bin/container",
+                runner: runner
+            )
+            let fromImage = try FeatureContributionMerge.applyFromImage(
+                imageRef: "alpine:3.20",
+                to: config,
+                runtime: runtime
+            ).config
+            let imageArgs = CreateRequest.from(
+                resolved: fromImage,
+                identityName: "ctr",
+                labels: [:],
+                configHash: "h",
+                workspacePath: "/ws"
+            ).createArguments()
+            try MiniTest.expectEqual(fromImage.runArgs.filter { $0 == .initFlag }.count, 1)
+            try MiniTest.expectEqual(imageArgs.filter { $0 == "--init" }.count, 1)
+        }
+    }),
+    ("nonEmptySecurityOptWarnsOnceAndIsStripped", {
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+        let resolved = try TestRepo.resolveConfig(
+            #"{ "image": "alpine:3.20", "securityOpt": ["no-new-privileges"] }"#
+        )
+        try MiniTest.expectEqual(warnings.count, 1)
+        try MiniTest.expect(warnings[0].contains("securityOpt"))
+        try MiniTest.expect(warnings[0].lowercased().contains("not applied"))
+        try MiniTest.expect(warnings[0].contains("no-new-privileges"))
+        try MiniTest.expect(warnings[0].lowercased().contains("not enforced"))
+        try MiniTest.expect(!resolved.runArgs.contains { $0.hashEncoding.contains("security") })
+        let args = CreateRequest.from(
+            resolved: resolved,
+            identityName: "ctr",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        ).createArguments()
+        try MiniTest.expect(!args.contains("--security-opt"))
+        try MiniTest.expect(!args.contains { $0.contains("no-new-privileges") })
+    }),
+    ("genericSecurityOptWarnsOnceAndIsHashNeutral", {
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+        let clean = try TestRepo.makeTempWorkspace(
+            configJSON: #"{ "image": "alpine:3.20", "workspaceFolder": "/workspaces/x" }"#,
+            prefix: "adev-security-clean"
+        )
+        defer { try? FileManager.default.removeItem(at: clean) }
+        let noisy = try TestRepo.makeTempWorkspace(
+            configJSON: #"{ "image": "alpine:3.20", "workspaceFolder": "/workspaces/x", "securityOpt": ["seccomp=profile.json"] }"#,
+            prefix: "adev-security-noisy"
+        )
+        defer { try? FileManager.default.removeItem(at: noisy) }
+        let cleanResolved = try ConfigResolver.resolve(workspacePath: clean.path, localEnv: [:])
+        let noisyResolved = try ConfigResolver.resolve(workspacePath: noisy.path, localEnv: [:])
+        try MiniTest.expectEqual(warnings.count, 1)
+        try MiniTest.expect(warnings[0].contains("securityOpt"))
+        try MiniTest.expect(warnings[0].lowercased().contains("not applied"))
+        try MiniTest.expect(!warnings[0].contains("no-new-privileges"))
+        try MiniTest.expectEqual(cleanResolved.config, noisyResolved.config)
+        try MiniTest.expectEqual(cleanResolved.configHash, noisyResolved.configHash)
+        let noisyArgs = CreateRequest.from(
+            resolved: noisyResolved.config,
+            identityName: noisyResolved.containerName,
+            labels: noisyResolved.labels,
+            configHash: noisyResolved.configHash,
+            workspacePath: noisyResolved.workspacePath
+        ).createArguments()
+        try MiniTest.expect(!noisyArgs.contains("--security-opt"))
+        try MiniTest.expect(!noisyArgs.contains { $0.contains("seccomp=profile.json") })
+    }),
+    ("emptySecurityOptIsSilent", {
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+        let resolved = try TestRepo.resolveConfig(
+            #"{ "image": "alpine:3.20", "securityOpt": [] }"#
+        )
+        try MiniTest.expect(warnings.isEmpty)
+        try MiniTest.expect(resolved.runArgs.isEmpty)
+    }),
+    ("invalidTopLevelInitShapesFailWithProperty", {
+        let invalid: [Any] = [
+            "true",
+            1,
+            ["nested": true] as [String: Any],
+            [true] as [Any],
+            NSNull()
+        ]
+        for value in invalid {
+            try MiniTest.expectThrows({
+                try ConfigAdmissions.admit(["image": "alpine:3.20", "init": value])
+            }) { error in
+                try MiniTest.expectEqual((error as! CLIError).property, "init")
+            }
+        }
+    }),
+    ("invalidTopLevelSecurityOptShapesFailWithProperty", {
+        let invalid: [Any] = [
+            "no-new-privileges",
+            1,
+            ["nested": true] as [String: Any],
+            [true] as [Any],
+            [1] as [Any],
+            NSNull()
+        ]
+        for value in invalid {
+            try MiniTest.expectThrows({
+                try ConfigAdmissions.admit(["image": "alpine:3.20", "securityOpt": value])
+            }) { error in
+                try MiniTest.expectEqual((error as! CLIError).property, "securityOpt")
+            }
+        }
+    }),
+    ("invalidTopLevelShapesFailBeforeCreate", {
+        let cases = [
+            ("init", #"{ "image": "alpine:3.20", "init": "true" }"#),
+            ("securityOpt", #"{ "image": "alpine:3.20", "securityOpt": ["no-new-privileges", true] }"#)
+        ]
+        for (property, configJSON) in cases {
+            let workspace = try TestRepo.makeTempWorkspace(
+                configJSON: configJSON,
+                prefix: "adev-invalid-\(property)"
+            )
+            defer { try? FileManager.default.removeItem(at: workspace) }
+            let mock = MockProcessRunner()
+            let runtime = AppleContainerRuntime(
+                executablePath: "/usr/local/bin/container",
+                runner: mock
+            )
+            try MiniTest.expectThrows({
+                _ = try UpCommand.run(
+                    options: UpOptions(
+                        workspacePath: workspace.path,
+                        jsonOutput: true,
+                        skipPull: true
+                    ),
+                    runtime: runtime,
+                    localEnv: [:],
+                    isTTY: false
+                )
+            }) { error in
+                let err = error as! CLIError
+                try MiniTest.expectEqual(err.code, CLIErrorCode.unsupportedProperty)
+                try MiniTest.expectEqual(err.property, property)
+            }
+            try MiniTest.expect(
+                !mock.calls.contains { $0.arguments.first == "create" },
+                "invalid \(property) must not create a container"
+            )
+        }
+    }),
+    ("numericJSONInitValuesFailBeforeCreate", {
+        for literal in ["0", "1", "1.0", "-1", "2", "2.5", "1e0"] {
+            let workspace = try TestRepo.makeTempWorkspace(
+                configJSON: "{ \"image\": \"alpine:3.20\", \"init\": \(literal) }",
+                prefix: "adev-invalid-init-number"
+            )
+            defer { try? FileManager.default.removeItem(at: workspace) }
+            let mock = MockProcessRunner()
+            let runtime = AppleContainerRuntime(
+                executablePath: "/usr/local/bin/container",
+                runner: mock
+            )
+            try MiniTest.expectThrows({
+                _ = try UpCommand.run(
+                    options: UpOptions(
+                        workspacePath: workspace.path,
+                        jsonOutput: true,
+                        skipPull: true
+                    ),
+                    runtime: runtime,
+                    localEnv: [:],
+                    isTTY: false
+                )
+            }) { error in
+                let err = error as! CLIError
+                try MiniTest.expectEqual(err.code, CLIErrorCode.unsupportedProperty)
+                try MiniTest.expectEqual(err.property, "init")
+            }
+            try MiniTest.expect(
+                !mock.calls.contains { $0.arguments.first == "create" },
+                "numeric init \(literal) must not create a container"
+            )
+        }
+    }),
+    ("bareDebianFixtureResolvesWithNormalizedRuntimeOptions", {
+        let fixture = try makeUnitFixtureWorkspace("bare-debian-default.json")
+        defer { try? FileManager.default.removeItem(at: fixture.workspace) }
+        let resolved = try ConfigResolver.resolve(workspacePath: fixture.workspace.path, localEnv: [:])
+        try MiniTest.expectEqual(fixture.raw["image"] as? String, "ghcr.io/bare-devcontainer/debian:trixie")
+        try MiniTest.expectEqual(resolved.config.remoteUser, "dev")
+        try MiniTest.expect(resolved.config.runArgs.contains(.capDrop("ALL")))
+        try MiniTest.expectEqual(resolved.config.runArgs.filter { $0 == .initFlag }.count, 1)
+        let request = CreateRequest.from(
+            resolved: resolved.config,
+            identityName: resolved.containerName,
+            labels: resolved.labels,
+            configHash: resolved.configHash,
+            workspacePath: resolved.workspacePath,
+            devcontainerId: "adev-debian-aabbccddeeff"
+        )
+        try MiniTest.expectEqual(request.image, "ghcr.io/bare-devcontainer/debian:trixie")
+        try MiniTest.expectEqual(request.user, "dev")
+        try MiniTest.expectEqual(request.runArgs.filter { $0 == .initFlag }.count, 1)
+        let args = request.createArguments()
+        try MiniTest.expect(args.contains("--cap-drop"))
+        try MiniTest.expectEqual(args.filter { $0 == "--init" }.count, 1)
+        try MiniTest.expect(!args.contains("--security-opt"))
+    }),
+    ("bareUVFixtureResolvesRichSingleVolumeProfile", {
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+        let fixture = try makeUnitFixtureWorkspace("bare-uv-default.json")
+        defer { try? FileManager.default.removeItem(at: fixture.workspace) }
+        let resolved = try ConfigResolver.resolve(workspacePath: fixture.workspace.path, localEnv: [:])
+        try MiniTest.expectEqual(warnings.count, 1)
+        try MiniTest.expect(warnings[0].contains("securityOpt"))
+        try MiniTest.expect(warnings[0].contains("no-new-privileges"))
+        try MiniTest.expect(warnings[0].lowercased().contains("not enforced"))
+        try MiniTest.expectEqual(resolved.config.containerEnv["UV_LINK_MODE"], "copy")
+        try MiniTest.expectEqual(resolved.config.mounts.count, 1)
+        try MiniTest.expectEqual(resolved.config.vscodeExtensions, ["ms-python.python", "charliermarsh.ruff"])
+        let settings = try JSONSerialization.jsonObject(with: resolved.config.vscodeSettingsJSON) as! [String: Any]
+        try MiniTest.expect(settings["[python]"] as? [String: Any] != nil)
+        try MiniTest.expectEqual(resolved.config.runArgs.filter { $0 == .initFlag }.count, 1)
+        let request = CreateRequest.from(
+            resolved: resolved.config,
+            identityName: resolved.containerName,
+            labels: resolved.labels,
+            configHash: resolved.configHash,
+            workspacePath: resolved.workspacePath,
+            devcontainerId: "adev-uv-aabbccddeeff"
+        )
+        try MiniTest.expect(request.mounts[0].source == "adev-uv-aabbccddeeff-uv-cache")
+        let args = request.createArguments()
+        try MiniTest.expectEqual(args.filter { $0 == "--init" }.count, 1)
+        try MiniTest.expect(!args.contains("--security-opt"))
+        try MiniTest.expect(!args.contains { $0.contains("no-new-privileges") })
+    }),
+    ("bareGoFixtureResolvesRichMultiVolumeProfile", {
+        let fixture = try makeUnitFixtureWorkspace("bare-golang-default.json")
+        defer { try? FileManager.default.removeItem(at: fixture.workspace) }
+        let resolved = try ConfigResolver.resolve(workspacePath: fixture.workspace.path, localEnv: [:])
+        try MiniTest.expectEqual(resolved.config.mounts.count, 2)
+        try MiniTest.expectEqual(resolved.config.vscodeExtensions, ["golang.go"])
+        let settings = try JSONSerialization.jsonObject(with: resolved.config.vscodeSettingsJSON) as! [String: Any]
+        try MiniTest.expect(settings["go.toolsManagement.autoUpdate"] as? Bool == false)
+        try MiniTest.expectEqual(settings["go.toolsManagement.checkForUpdates"] as? String, "local")
+        try MiniTest.expect(settings["[go]"] as? [String: Any] != nil)
+        guard let gopls = settings["gopls"] as? [String: Any] else {
+            throw MiniTest.Failure(message: "expected nested gopls settings")
+        }
+        try MiniTest.expectEqual(gopls["ui.semanticTokens"] as? Bool, true)
+        try MiniTest.expectEqual(resolved.config.runArgs.filter { $0 == .initFlag }.count, 1)
+        let request = CreateRequest.from(
+            resolved: resolved.config,
+            identityName: resolved.containerName,
+            labels: resolved.labels,
+            configHash: resolved.configHash,
+            workspacePath: resolved.workspacePath,
+            devcontainerId: "adev-go-aabbccddeeff"
+        )
+        try MiniTest.expectEqual(
+            request.mounts.map(\.source),
+            [
+                "adev-go-aabbccddeeff-golang-pkg-mod",
+                "adev-go-aabbccddeeff-golang-build-cache"
+            ]
+        )
+        let args = request.createArguments()
+        try MiniTest.expectEqual(args.filter { $0 == "--init" }.count, 1)
+        try MiniTest.expect(!args.contains("--security-opt"))
     })
 ]
 
