@@ -329,16 +329,40 @@ public enum UpCommand {
         var knownOCIUser: String?? = nil
         var knownMetadataUsers: DevContainerMetadataLabel.ImageMetadataUsers? = nil
 
-        if !resolved.config.features.isEmpty {
-            // One-time consent to disable BuildKit Rosetta for native arm64 feature image builds.
+        var didEnsureRosetta = false
+        let nameBase = ContainerIdentity.humanBase(workspacePath: resolved.workspacePath)
+        if let dfBuild = effectiveConfig.dockerfileBuild {
             if let override = ensureNativeArmBuildOverride {
                 try override()
             } else {
                 try AppleContainerConfig.ensureNativeArmBuild(runtime: runtime)
             }
+            didEnsureRosetta = true
+            let configDir = (resolved.configPath as NSString).deletingLastPathComponent
+            let built = try DockerfileImageBuilder.buildOrReuse(
+                build: dfBuild,
+                configDirectory: configDir,
+                nameBase: nameBase,
+                runtime: runtime,
+                platform: platform,
+                requireInsideConfigDirectory: false
+            )
+            effectiveConfig.image = built.tag
+        }
+
+        if !resolved.config.features.isEmpty {
+            // One-time consent to disable BuildKit Rosetta for native arm64 feature image builds.
+            if !didEnsureRosetta {
+                if let override = ensureNativeArmBuildOverride {
+                    try override()
+                } else {
+                    try AppleContainerConfig.ensureNativeArmBuild(runtime: runtime)
+                }
+            }
 
             // Pull base image (native platform) before Features build FROM it.
-            if !options.skipPull {
+            // Nested Dockerfile builds are local; --skip-pull does not skip them.
+            if !options.skipPull, effectiveConfig.dockerfileBuild == nil {
                 StatusPrinter.status("Pulling image", item: resolved.config.image)
                 try? runtime.pullImage(resolved.config.image, platform: platform)
             }
@@ -354,10 +378,9 @@ public enum UpCommand {
                 cacheRoot: cacheRoot,
                 platform: platform
             )
-            let nameBase = ContainerIdentity.humanBase(workspacePath: resolved.workspacePath)
             let featuresResult = try FeaturesRunner.run(
                 features: resolved.config.features,
-                baseImage: resolved.config.image,
+                baseImage: effectiveConfig.image,
                 deps: deps,
                 remoteUser: resolved.config.remoteUser,
                 containerUser: resolved.config.containerUser,
@@ -379,7 +402,7 @@ public enum UpCommand {
             }
             knownMetadataUsers = featuresResult.metadataUsers
         } else {
-            if !options.skipPull {
+            if !options.skipPull, effectiveConfig.dockerfileBuild == nil {
                 StatusPrinter.status("Pulling image", item: effectiveConfig.image)
                 try? runtime.pullImage(effectiveConfig.image, platform: platform)
             }

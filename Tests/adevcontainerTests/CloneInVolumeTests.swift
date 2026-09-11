@@ -2650,6 +2650,157 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
             "clone must not touch the guest global git config"
         )
     }),
+    ("cloneInDirectoryDockerfileBuilds", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.writeRootConfigOnly = true
+        git.configJSONToWrite = """
+        { "build": { "dockerfile": "Dockerfile", "context": "." }, "remoteUser": "root" }
+        """
+        git.fetchConfigHandler = { _, dir in
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let json = #"{ "build": { "dockerfile": "Dockerfile", "context": "." }, "remoteUser": "root" }"#
+            try json.write(
+                toFile: (dir as NSString).appendingPathComponent(".devcontainer.json"),
+                atomically: true,
+                encoding: .utf8
+            )
+            try "FROM alpine:3.20\n".write(
+                toFile: (dir as NSString).appendingPathComponent("Dockerfile"),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
+        let dfMock = DockerfileUpMock()
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            dfMock.handler,
+            CloneRuntimeMock.handlers()[1]
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try CloneCommand.run(
+            options: CloneOptions(gitURL: "https://github.com/org/df-app.git", skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(git.fetchConfigCalls.count, 1)
+        let builds = mock.calls.filter { $0.arguments.first == "build" }
+        try MiniTest.expect(builds.count >= 1)
+        let dfBuild = builds.first { call in
+            call.arguments.contains { $0.contains("-df:") }
+        }
+        try MiniTest.expect(dfBuild != nil, "clone must build the product Dockerfile tag")
+        try MiniTest.expect(dfBuild!.arguments.contains("--platform"))
+        try MiniTest.expect(dfBuild!.arguments.contains("linux/arm64"))
+    }),
+    ("cloneSkipPullStillBuildsDockerfile", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.fetchConfigHandler = { _, dir in
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let json = #"{ "build": { "dockerfile": "Dockerfile" }, "remoteUser": "root" }"#
+            try json.write(
+                toFile: (dir as NSString).appendingPathComponent(".devcontainer.json"),
+                atomically: true,
+                encoding: .utf8
+            )
+            try "FROM alpine:3.20\n".write(
+                toFile: (dir as NSString).appendingPathComponent("Dockerfile"),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
+        let dfMock = DockerfileUpMock()
+        let mock = MockProcessRunner()
+        mock.handlers = [dfMock.handler, CloneRuntimeMock.handlers()[1]]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try CloneCommand.run(
+            options: CloneOptions(gitURL: "https://github.com/org/df-skip.git", skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:]
+        )
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "build" })
+    }),
+    ("cloneContextParentIsRejected", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.fetchConfigHandler = { _, dir in
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let dc = (dir as NSString).appendingPathComponent(".devcontainer")
+            try FileManager.default.createDirectory(atPath: dc, withIntermediateDirectories: true)
+            let json = """
+            { "build": { "dockerfile": "../Dockerfile", "context": ".." }, "remoteUser": "root" }
+            """
+            try json.write(
+                toFile: (dc as NSString).appendingPathComponent("devcontainer.json"),
+                atomically: true,
+                encoding: .utf8
+            )
+            try "FROM alpine:3.20\n".write(
+                toFile: (dir as NSString).appendingPathComponent("Dockerfile"),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
+        let mock = MockProcessRunner()
+        mock.handlers = CloneRuntimeMock.handlers()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(gitURL: "https://github.com/org/df-escape.git", skipPull: true),
+                runtime: runtime,
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:]
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.property, "build")
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+    }),
+    ("cloneNestedDevcontainerDockerfileBuilds", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.fetchConfigHandler = { _, dir in
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let dc = (dir as NSString).appendingPathComponent(".devcontainer")
+            try FileManager.default.createDirectory(atPath: dc, withIntermediateDirectories: true)
+            let json = #"{ "build": { "dockerfile": "Dockerfile", "context": "." }, "remoteUser": "root" }"#
+            try json.write(
+                toFile: (dc as NSString).appendingPathComponent("devcontainer.json"),
+                atomically: true,
+                encoding: .utf8
+            )
+            try "FROM alpine:3.20\n".write(
+                toFile: (dc as NSString).appendingPathComponent("Dockerfile"),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
+        let dfMock = DockerfileUpMock()
+        let mock = MockProcessRunner()
+        mock.handlers = [dfMock.handler, CloneRuntimeMock.handlers()[1]]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try CloneCommand.run(
+            options: CloneOptions(gitURL: "https://github.com/org/df-nested.git", skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "build" })
+    }),
 ]
 
 // MARK: - List / start / stop / purge

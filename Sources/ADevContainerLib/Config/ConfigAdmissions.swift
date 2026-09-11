@@ -34,7 +34,8 @@ public enum ConfigAdmissions {
         "secrets",
         "privileged",
         "overrideCommand",
-        "capAdd"
+        "capAdd",
+        "build"
     ]
 
     private static let blockedWorkspaceOrProcessKeys: [String: String] = [
@@ -43,10 +44,16 @@ public enum ConfigAdmissions {
     ]
 
     private static let blockedSourceKeys: [String: String] = [
-        "build": "Dockerfile build is not supported",
-        "dockerFile": "Dockerfile build is not supported",
-        "dockerfile": "Dockerfile build is not supported",
-        "context": "Dockerfile build is not supported"
+        "dockerFile": "Top-level dockerFile is not supported; use nested build.dockerfile",
+        "dockerfile": "Top-level dockerfile is not supported; use nested build.dockerfile",
+        "context": "Top-level context is not supported; use nested build.context"
+    ]
+
+    private static let nestedBuildKeys: Set<String> = [
+        "dockerfile",
+        "context",
+        "args",
+        "target"
     ]
 
     private static let composeKeys: Set<String> = [
@@ -64,7 +71,7 @@ public enum ConfigAdmissions {
                 code: CLIErrorCode.unsupportedProperty,
                 property: key,
                 message: "Docker Compose configuration is not supported",
-                hint: "Remove '\(key)' and use a single image-based devcontainer.json"
+                hint: "Remove '\(key)' and use a single image or nested build"
             )
         }
 
@@ -73,7 +80,7 @@ public enum ConfigAdmissions {
                 code: CLIErrorCode.unsupportedProperty,
                 property: key,
                 message: message,
-                hint: "Remove '\(key)' and use a single image-based devcontainer.json"
+                hint: "Remove '\(key)' and use nested build.dockerfile / build.context"
             )
         }
 
@@ -227,16 +234,30 @@ public enum ConfigAdmissions {
             )
         }
 
-        // image required
-        guard let image = raw["image"] as? String, !image.isEmpty else {
+        let hasImage: Bool = {
+            guard let image = raw["image"] as? String else { return false }
+            return !image.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }()
+        let hasBuild = raw["build"] != nil
+        if hasImage && hasBuild {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: "build",
+                message: "Cannot set both 'image' and nested 'build'",
+                hint: "Use either \"image\" or \"build\", not both"
+            )
+        }
+        if !hasImage && !hasBuild {
             throw CLIError(
                 code: CLIErrorCode.unsupportedProperty,
                 property: "image",
-                message: "Property 'image' is required for MVP image-based dev containers",
-                hint: "Set \"image\": \"your-image:tag\""
+                message: "Property 'image' or nested 'build' is required",
+                hint: "Set \"image\": \"your-image:tag\" or \"build\": { \"dockerfile\": \"Dockerfile\" }"
             )
         }
-        _ = image
+        if hasBuild {
+            try admitNestedBuild(raw["build"]!)
+        }
 
         // customizations must be an object when present. Nested customizations.vscode is admitted
         // without hard-fail on nested shape: well-formed extensions/settings are retained for
@@ -249,6 +270,69 @@ public enum ConfigAdmissions {
                     property: "customizations",
                     message: "customizations must be an object"
                 )
+            }
+        }
+    }
+
+    private static func admitNestedBuild(_ raw: Any) throws {
+        guard let obj = raw as? [String: Any] else {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: "build",
+                message: "build must be an object",
+                hint: "Use \"build\": { \"dockerfile\": \"Dockerfile\" }"
+            )
+        }
+        for key in obj.keys where !nestedBuildKeys.contains(key) {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: "build",
+                message: "Unsupported build key '\(key)'",
+                hint: "Supported nested build keys: dockerfile, context, args, target"
+            )
+        }
+        guard let dockerfile = obj["dockerfile"] as? String,
+              !dockerfile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: "build",
+                message: "build.dockerfile must be a non-empty string",
+                hint: "Set \"build\": { \"dockerfile\": \"Dockerfile\" }"
+            )
+        }
+        _ = dockerfile
+        if let context = obj["context"], !(context is String) {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: "build",
+                message: "build.context must be a string"
+            )
+        }
+        if let target = obj["target"], !(target is String) {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: "build",
+                message: "build.target must be a string"
+            )
+        }
+        if let args = obj["args"] {
+            guard let map = args as? [String: Any] else {
+                throw CLIError(
+                    code: CLIErrorCode.unsupportedProperty,
+                    property: "build",
+                    message: "build.args must be an object of string values"
+                )
+            }
+            for (key, value) in map {
+                guard value is String else {
+                    throw CLIError(
+                        code: CLIErrorCode.unsupportedProperty,
+                        property: "build",
+                        message: "build.args values must be strings",
+                        hint: "build.args.\(key) is not a string"
+                    )
+                }
             }
         }
     }

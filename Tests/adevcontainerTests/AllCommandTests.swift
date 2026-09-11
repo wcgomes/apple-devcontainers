@@ -3905,6 +3905,70 @@ private enum FeaturesUpTestSupport {
     }
 }
 
+/// Mock plumbing for nested-build up tests (product `-df:` tags exist only after build or when listed).
+final class DockerfileUpMock: @unchecked Sendable {
+    var existingProductTags: Set<String>
+    var builtTags: Set<String> = []
+    var onBuild: (([String]) -> ProcessResult)?
+    var createId: String
+
+    init(existingProductTags: Set<String> = [], createId: String = "ctr", onBuild: (([String]) -> ProcessResult)? = nil) {
+        self.existingProductTags = existingProductTags
+        self.createId = createId
+        self.onBuild = onBuild
+    }
+
+    func handler(_ args: [String]) -> ProcessResult? {
+        if args.starts(with: ["list"]) {
+            let data = try! JSONSerialization.data(withJSONObject: [] as [Any])
+            return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+        }
+        if args.starts(with: ["image", "inspect"]), let ref = args.last {
+            let isProduct = ref.contains("-df:") || ref.hasPrefix("adevcontainer-df:")
+            let isDerived = ref.hasPrefix("adev-") || ref.hasPrefix("adevcontainer:")
+            if isProduct {
+                if existingProductTags.contains(ref) || builtTags.contains(ref) {
+                    return MockProcessRunner.imageInspectHandler(baseUser: "root")(["image", "inspect", "alpine:3.20"])
+                }
+                return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+            }
+            if isDerived {
+                if builtTags.contains(ref) {
+                    return MockProcessRunner.imageInspectHandler(baseUser: "root")(["image", "inspect", "alpine:3.20"])
+                }
+                return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+            }
+            return MockProcessRunner.imageInspectHandler(baseUser: "root")(args)
+        }
+        if args.starts(with: ["image", "list"]) {
+            return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+        }
+        if args.first == "build" {
+            if args.contains("--rosetta") {
+                return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("unexpected rosetta".utf8))
+            }
+            if let tIdx = args.firstIndex(of: "-t"), tIdx + 1 < args.count {
+                builtTags.insert(args[tIdx + 1])
+            }
+            if let onBuild { return onBuild(args) }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        if args.first == "create" {
+            if args.contains("--rosetta") {
+                return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("unexpected rosetta".utf8))
+            }
+            return ProcessResult(exitCode: 0, stdout: Data("\(createId)\n".utf8), stderr: Data())
+        }
+        if args.first == "start" || args.first == "delete" {
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        if args.first == "exec" {
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        return nil
+    }
+}
+
 nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
     ("upWithFeaturesBuildsThenHooks", {
         let ref = "ghcr.io/adevcontainer/features/sample-a:1"
@@ -4657,5 +4721,406 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
         try MiniTest.expect(!writes.lines.joined().contains(BringUpRecovery.changeNamePromptText))
+    }),
+    ("freshUpBuildsAndCreatesFromProductDockerfileTag", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "build": { "dockerfile": "Dockerfile" }, "remoteUser": "root" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        let previousEnsure = UpCommand.ensureNativeArmBuildOverride
+        UpCommand.ensureNativeArmBuildOverride = { }
+        defer { UpCommand.ensureNativeArmBuildOverride = previousEnsure }
+        let dfMock = DockerfileUpMock()
+        let mock = MockProcessRunner()
+        mock.handlers = [dfMock.handler]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        guard let build = mock.calls.first(where: { $0.arguments.first == "build" })?.arguments else {
+            throw MiniTest.Failure(message: "expected dockerfile build")
+        }
+        try MiniTest.expect(build.contains("--platform"))
+        try MiniTest.expect(build.contains("linux/arm64"))
+        try MiniTest.expect(!build.contains("--rosetta"))
+        try MiniTest.expect(build.contains("-f"))
+        let expectedBase = ContainerIdentity.humanBase(workspacePath: ws.path)
+        try MiniTest.expect(build.contains { $0.hasPrefix("adev-\(expectedBase)-df:") })
+        guard let create = mock.calls.first(where: { $0.arguments.first == "create" })?.arguments else {
+            throw MiniTest.Failure(message: "expected create")
+        }
+        try MiniTest.expect(create.contains { $0.hasPrefix("adev-\(expectedBase)-df:") })
+        try MiniTest.expect(!create.contains { $0.hasPrefix("adev-\(expectedBase):") && !$0.contains("-df:") })
+    }),
+    ("existingProductDockerfileTagIsReusedOnUp", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "build": { "dockerfile": "Dockerfile" }, "remoteUser": "root" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let build = resolved.config.dockerfileBuild!
+        let tag = DockerfileImageTag.compute(
+            dockerfileBytes: build.dockerfileBytes,
+            context: build.context,
+            args: build.args,
+            target: build.target,
+            nameBase: ContainerIdentity.humanBase(workspacePath: ws.path)
+        )
+        let previousEnsure = UpCommand.ensureNativeArmBuildOverride
+        let previousEnabled = StatusPrinter.enabled
+        let previousWrite = StatusPrinter.writeStderr
+        let previousPhase = StatusPrinter.hasEmittedPhase
+        UpCommand.ensureNativeArmBuildOverride = { }
+        StatusPrinter.enabled = true
+        StatusPrinter.resetSectionState()
+        var captured = ""
+        StatusPrinter.writeStderr = { captured += String(data: $0, encoding: .utf8) ?? "" }
+        defer {
+            UpCommand.ensureNativeArmBuildOverride = previousEnsure
+            StatusPrinter.enabled = previousEnabled
+            StatusPrinter.writeStderr = previousWrite
+            StatusPrinter.hasEmittedPhase = previousPhase
+        }
+        let dfMock = DockerfileUpMock(existingProductTags: [tag])
+        let mock = MockProcessRunner()
+        mock.handlers = [dfMock.handler]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "build" })
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "create" && $0.arguments.contains(tag) })
+        try MiniTest.expect(captured.contains("==> Reusing image"))
+    }),
+    ("skipPullDoesNotSkipLocalDockerfileBuild", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "build": { "dockerfile": "Dockerfile" }, "remoteUser": "root" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        let previousEnsure = UpCommand.ensureNativeArmBuildOverride
+        UpCommand.ensureNativeArmBuildOverride = { }
+        defer { UpCommand.ensureNativeArmBuildOverride = previousEnsure }
+        let dfMock = DockerfileUpMock()
+        let mock = MockProcessRunner()
+        mock.handlers = [dfMock.handler]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "build" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "image" && $0.arguments.contains("pull") })
+    }),
+    ("missingDockerfileFileFailsStructured", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "build": { "dockerfile": "Dockerfile" }, "remoteUser": "root" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let previousEnsure = UpCommand.ensureNativeArmBuildOverride
+        UpCommand.ensureNativeArmBuildOverride = { }
+        defer { UpCommand.ensureNativeArmBuildOverride = previousEnsure }
+        let mock = MockProcessRunner()
+        mock.handlers = [DockerfileUpMock().handler]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: ws.path, skipPull: true),
+                runtime: runtime,
+                localEnv: [:]
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.dockerfileBuild)
+            try MiniTest.expectEqual(err.property, "build")
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+    }),
+    ("missingContextDirectoryFailsStructured", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "build": { "dockerfile": "Dockerfile", "context": "missing-ctx" }, "remoteUser": "root" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        let previousEnsure = UpCommand.ensureNativeArmBuildOverride
+        UpCommand.ensureNativeArmBuildOverride = { }
+        defer { UpCommand.ensureNativeArmBuildOverride = previousEnsure }
+        let mock = MockProcessRunner()
+        mock.handlers = [DockerfileUpMock().handler]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: ws.path, skipPull: true),
+                runtime: runtime,
+                localEnv: [:]
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.dockerfileBuild)
+            try MiniTest.expectEqual(err.property, "build")
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+    }),
+    ("bindUpMayUseContextParent", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "build": { "dockerfile": "../Dockerfile", "context": ".." },
+          "remoteUser": "root"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: "Dockerfile", in: ws)
+        let previousEnsure = UpCommand.ensureNativeArmBuildOverride
+        UpCommand.ensureNativeArmBuildOverride = { }
+        defer { UpCommand.ensureNativeArmBuildOverride = previousEnsure }
+        let dfMock = DockerfileUpMock()
+        let mock = MockProcessRunner()
+        mock.handlers = [dfMock.handler]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        guard let build = mock.calls.first(where: { $0.arguments.first == "build" })?.arguments else {
+            throw MiniTest.Failure(message: "expected build with parent context")
+        }
+        try MiniTest.expectEqual(build.last, ws.path)
+        try MiniTest.expect(build.contains { $0.hasSuffix("/Dockerfile") && !$0.contains(".devcontainer") })
+    }),
+    ("dockerfileOnlyCreateDoesNotRequireFeaturesBuild", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "build": { "dockerfile": "Dockerfile" }, "remoteUser": "root" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        let previousEnsure = UpCommand.ensureNativeArmBuildOverride
+        UpCommand.ensureNativeArmBuildOverride = { }
+        defer { UpCommand.ensureNativeArmBuildOverride = previousEnsure }
+        let dfMock = DockerfileUpMock()
+        let mock = MockProcessRunner()
+        mock.handlers = [dfMock.handler]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        let builds = mock.calls.filter { $0.arguments.first == "build" }
+        try MiniTest.expectEqual(builds.count, 1)
+        let tag = builds[0].arguments[builds[0].arguments.firstIndex(of: "-t")! + 1]
+        try MiniTest.expect(tag.contains("-df:"))
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "create" && $0.arguments.contains(tag) })
+    }),
+    ("buildRosettaGateRunsBeforeDockerfileBuild", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "build": { "dockerfile": "Dockerfile" }, "remoteUser": "root" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        var gateCount = 0
+        var gateBeforeBuild = false
+        let previousEnsure = UpCommand.ensureNativeArmBuildOverride
+        UpCommand.ensureNativeArmBuildOverride = { gateCount += 1 }
+        defer { UpCommand.ensureNativeArmBuildOverride = previousEnsure }
+        let dfMock = DockerfileUpMock(onBuild: { args in
+            gateBeforeBuild = gateCount == 1
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        })
+        let mock = MockProcessRunner()
+        mock.handlers = [dfMock.handler]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(gateCount, 1)
+        try MiniTest.expect(gateBeforeBuild)
+    }),
+    ("reuseRunningDoesNotRebuildDockerfile", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "build": { "dockerfile": "Dockerfile" }, "remoteUser": "root" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName, state: "running", labels: resolved.labels
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "build" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+    }),
+    ("featuresFromDockerfileTagWhenBothPresent", {
+        let ref = "ghcr.io/adevcontainer/features/sample-a:1"
+        let fixture = TestRepo.root()
+            .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("df-feat-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "build": { "dockerfile": "Dockerfile" },
+          "features": { "\(ref)": {} },
+          "remoteUser": "root"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        var gateCount = 0
+        let previousFetcher = UpCommand.featuresFetcherOverride
+        let previousCache = UpCommand.featuresCacheRootOverride
+        let previousEnsure = UpCommand.ensureNativeArmBuildOverride
+        UpCommand.featuresFetcherOverride = MockFeatureFetcher(packagesByRef: [ref: fixture])
+        UpCommand.featuresCacheRootOverride = cache
+        UpCommand.ensureNativeArmBuildOverride = { gateCount += 1 }
+        defer {
+            UpCommand.featuresFetcherOverride = previousFetcher
+            UpCommand.featuresCacheRootOverride = previousCache
+            UpCommand.ensureNativeArmBuildOverride = previousEnsure
+        }
+        let dfMock = DockerfileUpMock()
+        let mock = MockProcessRunner()
+        mock.handlers = [dfMock.handler]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(gateCount, 1)
+        let builds = mock.calls.filter { $0.arguments.first == "build" }
+        try MiniTest.expectEqual(builds.count, 2)
+        let dfTag = builds[0].arguments[builds[0].arguments.firstIndex(of: "-t")! + 1]
+        try MiniTest.expect(dfTag.contains("-df:"))
+        let featDockerfile: String? = {
+            let args = builds[1].arguments
+            guard let fIdx = args.firstIndex(of: "-f"), fIdx + 1 < args.count else { return nil }
+            return args[fIdx + 1]
+        }()
+        if let featDockerfile {
+            let contents = try String(contentsOfFile: featDockerfile, encoding: .utf8)
+            try MiniTest.expect(contents.contains("FROM \(dfTag)"))
+        }
+        let featTag = builds[1].arguments[builds[1].arguments.firstIndex(of: "-t")! + 1]
+        try MiniTest.expect(!featTag.contains("-df:"))
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "create" && $0.arguments.contains(featTag) })
+    }),
+    ("purgeDockerfileOnlyDeletesProductDockerfileTag", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "build": { "dockerfile": "Dockerfile" }, "remoteUser": "root" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let tag = DockerfileImageTag.compute(
+            dockerfileBytes: resolved.config.dockerfileBuild!.dockerfileBytes,
+            context: resolved.config.dockerfileBuild!.context,
+            args: resolved.config.dockerfileBuild!.args,
+            target: resolved.config.dockerfileBuild!.target,
+            nameBase: ContainerIdentity.humanBase(workspacePath: ws.path)
+        )
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName, state: "stopped", labels: resolved.labels, image: tag
+        )
+        var containerDeleted = false
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let payload: [Any] = containerDeleted ? [] : [entry]
+                    let data = try! JSONSerialization.data(withJSONObject: payload)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "delete" {
+                    containerDeleted = true
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.starts(with: ["image", "delete"]) || args.starts(with: ["image", "rm"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let code = try PurgeCommand.run(name: resolved.containerName, runtime: runtime)
+        try MiniTest.expect(code == 0)
+        try MiniTest.expect(mock.calls.contains {
+            $0.arguments == ["image", "delete", tag] || $0.arguments == ["image", "rm", tag]
+        })
+    }),
+    ("purgeDoesNotDeleteFeaturesDerivedTagsSolelyBecauseDockerfileWasUsed", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "build": { "dockerfile": "Dockerfile" },
+          "features": { "ghcr.io/adevcontainer/features/sample-a:1": {} },
+          "remoteUser": "root"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let dfTag = DockerfileImageTag.compute(
+            dockerfileBytes: resolved.config.dockerfileBuild!.dockerfileBytes,
+            context: resolved.config.dockerfileBuild!.context,
+            args: resolved.config.dockerfileBuild!.args,
+            target: resolved.config.dockerfileBuild!.target,
+            nameBase: ContainerIdentity.humanBase(workspacePath: ws.path)
+        )
+        let featuresTag = "adev-\(ContainerIdentity.humanBase(workspacePath: ws.path)):aaaaaaaaaaaa"
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName, state: "stopped", labels: resolved.labels, image: featuresTag
+        )
+        var containerDeleted = false
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let payload: [Any] = containerDeleted ? [] : [entry]
+                    let data = try! JSONSerialization.data(withJSONObject: payload)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "delete" {
+                    containerDeleted = true
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.starts(with: ["image", "delete"]) || args.starts(with: ["image", "rm"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try PurgeCommand.run(name: resolved.containerName, runtime: runtime)
+        try MiniTest.expect(!mock.calls.contains {
+            $0.arguments.contains(dfTag)
+        })
     })
 ]

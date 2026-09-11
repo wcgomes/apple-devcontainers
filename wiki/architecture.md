@@ -14,6 +14,8 @@ Greenfield native Swift executable (arm64). Reads `devcontainer.json`, drives Ap
 | GitHub repo | [wcgomes/apple-devcontainers](https://github.com/wcgomes/apple-devcontainers) (ex-`apple-dev-containers`, ex-`dev-containerization`) |
 | Release / install | CI + GitHub Release tarball; Homebrew primary — [release-distribution.md](conventions/release-distribution.md) |
 
+Swift/`ld` injects Xcode-shaped `CommandLineTools/Developer/...` paths that CLT lacks. The warning `ld: warning: search path '...CommandLineTools/Developer/usr/lib' not found` appears when `adevcontainerTests-product` relinks; ignore it, or host mkdir / install Xcode — not a package linker setting.
+
 ## Package layout
 
 | Path | Role |
@@ -31,13 +33,14 @@ swift run adevcontainerTests
 ## Pipeline
 
 ```
-devcontainer.json → Config resolver → [Features runner] → AppleContainerRuntime → /usr/local/bin/container
+devcontainer.json → Config resolver → [Dockerfile image] → [Features runner] → AppleContainerRuntime → /usr/local/bin/container
 ```
 
-1. **Config resolver** — JSONC parse; variable substitution (`${localEnv:*}`, `${localWorkspaceFolderBasename}`, `${containerWorkspaceFolder}`, `${devcontainerId}` — latter may stay literal until the resource stem is known); validate supported props; hard-error unsupported (never silent ignore).
-2. **Features runner** (when `features` non-empty) — load local path and/or fetch OCI features; order; ensure `build.rosetta=false`; derived image build; swaps effective image before create. Then expand deferred `${devcontainerId}` in mounts/`containerEnv` to the resource stem before volume ensure + create. Detail: [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md) (`${devcontainerId}` deferred expand).
-3. **AppleContainerRuntime** — sole boundary to the external `container` CLI; subprocess invoke; parse machine-readable JSON only. Features OCI fetch is separate (embedded HTTPS); local path is disk copy.
-  4. **Apple container** — create/run/exec/stop/delete/prune/inspect/build of the managed dev container and related config volumes/image.
+1. **Config resolver** — JSONC parse; variable substitution (`${localEnv:*}`, `${localWorkspaceFolderBasename}`, `${containerWorkspaceFolder}`, `${devcontainerId}` — latter may stay literal until the resource stem is known); validate supported props; hard-error unsupported (never silent ignore). Nested `build` xor `image` is representable; Compose and top-level `dockerFile`/`dockerfile`/`context` stay blocked. Contract: [`specs/core.md`](../specs/core.md).
+2. **Dockerfile image** (when nested `build`) — product tag via `container build` **before** Features and create. Detail: [cli-runtime-boundary — Dockerfile image](conventions/cli-runtime-boundary.md#dockerfile-image-nested-build).
+3. **Features runner** (when `features` non-empty) — load local path and/or fetch OCI features; order; ensure `build.rosetta=false`; derived image build (`FROM` product Dockerfile tag when nested `build`, else config `image`); swaps effective image before create. Then expand deferred `${devcontainerId}` in mounts/`containerEnv` to the resource stem before volume ensure + create. Detail: [cli-runtime-boundary.md](conventions/cli-runtime-boundary.md) (`${devcontainerId}` deferred expand).
+4. **AppleContainerRuntime** — sole boundary to the external `container` CLI; subprocess invoke; parse machine-readable JSON only. Features OCI fetch is separate (embedded HTTPS); local path is disk copy.
+5. **Apple container** — create/run/exec/stop/delete/prune/inspect/build of the managed dev container and related config volumes/image.
 
 ## Workspace modes
 
@@ -81,7 +84,7 @@ Shared primitive `BringUpRecovery`. Rebuild hard post-delete recovery is separat
 | No offer | Config missing; clone fetch fails before any config exists. |
 | Prompt | TTY (no `--json`): `Open the recovery editor now? [Y/n]` default **Y**. Decline/EOF → original error. Non-TTY/`--json` never prompt. |
 
-**delete vs purge:** `delete` drops the managed dev container only (no volumes). `purge` also removes the config `image` and **unreferenced** candidate named volumes: labels `config_volumes` / `workspace_volume` are the **candidate set only**; after the target container is gone, real mounts on all remaining containers (running/stopped, managed or not — `containersAttached` / `list --all`) decide delete vs preserve. Shared/referenced volumes stay with a StatusPrinter warning listing referencers (share-only → exit 0). Container delete fail → no volume deletes; attachment inspect fail → preserve affected volume(s) + non-zero. Same volume name = shared Docker-like resource (labels on containers, not volumes). Neither deletes bind-mount host paths or runs global `volume`/`image` prune. Derived Features tags (`adev-{base}:{hash12}` / `adevcontainer:{hash12}`) are not removed by `purge` unless they equal the config `image` field. Recovery-helper purge skip unchanged. Contract: [`specs/managed-lifecycle.md`](../specs/managed-lifecycle.md); archive [`20260812-prune-shared-volume-safety`](../specs/changes/archive/20260812-prune-shared-volume-safety/).
+**delete vs purge:** `delete` drops the managed dev container only (no volumes). `purge` also removes the config `image` or stamped product Dockerfile tag and **unreferenced** candidate named volumes: labels `config_volumes` / `workspace_volume` are the **candidate set only**; after the target container is gone, real mounts on all remaining containers (running/stopped, managed or not — `containersAttached` / `list --all`) decide delete vs preserve. Shared/referenced volumes stay with a StatusPrinter warning listing referencers (share-only → exit 0). Container delete fail → no volume deletes; attachment inspect fail → preserve affected volume(s) + non-zero. Same volume name = shared Docker-like resource (labels on containers, not volumes). Neither deletes bind-mount host paths or runs global `volume`/`image` prune. Derived Features tags (`adev-{base}:{hash12}` / `adevcontainer:{hash12}`) are not removed by `purge` unless they equal the config `image` field. Recovery-helper purge skip unchanged. Contract: [`specs/managed-lifecycle.md`](../specs/managed-lifecycle.md); archive [`20260812-prune-shared-volume-safety`](../specs/changes/archive/20260812-prune-shared-volume-safety/).
 
 **Progress:** StatusPrinter phases on stderr (`==> …`); internal tool tees framed `    | ` (hooks, Features build, clone populate `streamOutput`); connection hints are **info** (not `==> `) after successful `up`/`clone`/`start`/`rebuild` unless originating `--vscode`. User `exec` unframed; interactive TTY unchanged. QUIET silences phase/info only; warn/error/tool body emit. `--json` stdout pure. Full stack: [terminal-output.md](conventions/terminal-output.md); runtime tee notes: [cli-runtime-boundary — Progress/tee](conventions/cli-runtime-boundary.md#progress--tee).
 
@@ -96,7 +99,7 @@ Apple `create --name` is the container **id** and a DNS hostname (official CLI c
   - **Bind-mode `hash12`:** workspace path + config path. Reuse/occupancy key off labels (`local_folder` + `config_file`), not this hash in the create name. Same material as the bind stem.
   - **Volume-mode `hash12`:** normalized git URL + config relpath (not a temp host path). Stable across reclones. Same material as the volume stem and `*-ws`.
   - **Workspace volume (volume-mode):** `{stem}-ws` = `adev-{base}-{hash12}-ws`.
-  - **Features derived tag** (when Features build runs): `adev-{base}:{hash12}` — `{base}` is the workspace/repo human base, **never** config `name`; `{hash12}` is the content hash of base image + features + `recipeVersion` epoch in `DerivedImageTag` (bump epoch on install-Dockerfile semantic changes — current **`"7"`** because COPY/RUN/`/tmp` identity paths changed; see [cli-runtime-boundary](conventions/cli-runtime-boundary.md)); empty base → `adevcontainer:{hash12}`. No `adevcontainer/features:` prefix. Plain config `image` (no Features) is unchanged. User-literal volume `source` strings are not rewritten. Rebuild rename keeps the same tag.
+  - **Features derived tag** (when Features build runs): `adev-{base}:{hash12}` — `{base}` is the workspace/repo human base, **never** config `name`; `{hash12}` is the content hash of base image + features + `recipeVersion` epoch in `DerivedImageTag` (bump epoch on install-Dockerfile semantic changes — current **`"7"`** because COPY/RUN/`/tmp` identity paths changed; see [cli-runtime-boundary](conventions/cli-runtime-boundary.md)); empty base → `adevcontainer:{hash12}`. No `adevcontainer/features:` prefix. Plain config `image` (no nested `build`, no Features) is unchanged. Nested `build` uses a distinct product Dockerfile tag; Features `FROM` that tag when both are present. User-literal volume `source` strings are not rewritten. Rebuild rename keeps the same tag.
 - **Occupancy:**
   - **`up`/`clone`:** leftover same-workspace different-name (incl. old `adev-*`) → fail + delete-hint. Foreign occupant of the desired name → TTY Y/n + new name (persist into config `name`; clone overlay after populate); never delete the occupant. Same-workspace same-name: `up` reuse / `clone` fail-closed.
   - **`rebuild`:** applies the live computed create name (user `name` change and old `adev-*` migrate). Selected leftover is not a delete-hint. Foreign occupant of the new name: do not delete selected; TTY Y/n + new name (persist into live config). Reuse stem-keyed `*-ws` and `${devcontainerId}` volumes.
@@ -149,12 +152,12 @@ Effective user for `exec`, lifecycle hooks, and VS Code attach defaults (not alw
 
 ## Features
 
-Shipped under `Sources/ADevContainerLib/Features/`. On `up`/`clone`/`rebuild` when `features` is non-empty (after clone git-ensure). Relative local refs resolve from config-dir / `.devcontainer` / workspace root. Volume `rebuild` stages guest `.devcontainer` when any admitted ref is local-path: [Features runner](conventions/cli-runtime-boundary.md#features-runner).
+Shipped under `Sources/ADevContainerLib/Features/`. On `up`/`clone`/`rebuild` when `features` is non-empty (after clone git-ensure). When nested `build`, Features `FROM` the product Dockerfile tag. Relative local refs resolve from config-dir / `.devcontainer` / workspace root. Volume `rebuild` stages guest `.devcontainer` when any admitted ref is local-path: [Features runner](conventions/cli-runtime-boundary.md#features-runner).
 
 1. Admit **OCI** and **local path** refs; **warn-skip** docker-* markers (omit from admitted list) and warn-strip metadata `privileged` / `securityOpt` (not applied).
 2. One-time consent for `build.rosetta=false` when needed (CI: `ADEVCONTAINER_ALLOW_BUILD_ROSETTA_DISABLE=1`).
 3. Load local packages or fetch OCI over HTTPS (embedded client).
-4. Order via `dependsOn` / `installsAfter`; build derived image via `container build --platform linux/arm64` — metadata `containerEnv` as Dockerfile **`ENV` before** install `RUN` (`$PATH`/`$VAR` expand); `install.sh` runs **as root** after `chmod -R 0755` `/tmp/adev-feature-<slug>` with options + `_REMOTE_USER`/`_CONTAINER_USER` on RUN prefix (base USER when local config has no remote/container user); Dockerfile then **restores base image USER**; derived LABEL unions base-image + feature lifecycle; `recipeVersion` **`"7"`**. Reuse tag when unchanged. If BuildKit was stopped before the build, restore-after-build stops it again (best-effort); already-running / undetermined status → leave alone.
+4. Order via `dependsOn` / `installsAfter`; build derived image via `container build --platform linux/arm64` — metadata `containerEnv` as Dockerfile **`ENV` before** install `RUN` (`$PATH`/`$VAR` expand); `install.sh` runs **as root** after `chmod -R 0755` `/tmp/adev-feature-<slug>` with options + `_REMOTE_USER`/`_CONTAINER_USER` on RUN prefix (base USER when local config has no remote/container user); Dockerfile then **restores base image USER**; derived LABEL unions base-image + feature lifecycle; `recipeVersion` **`"7"`**. Reuse tag when unchanged except nested-`build` `rebuild` (also rebuilds Features). If BuildKit was stopped before the build, restore-after-build stops it again (best-effort); already-running / undetermined status → leave alone.
 5. Create from derived image; merge contributions (runtime env **config wins**, `${PATH}` expansion on create and later exec). Create `-u`: explicit `containerUser`, else non-root connection user, else omit when root.
 
 **Clone-only:** if no admitted feature id is `git` or `common-utils`, inject `ghcr.io/devcontainers/features/git:1` (Features path, not apt) so populate can run **in-container full `git clone`** and in-container git works. `up` does not inject. Host git is required only for config-only sparse/shallow fetch and HTTPS `git credential fill`.
@@ -217,10 +220,12 @@ Not full Dev Containers up/rebuild or IDE-owned customizations parity; volume-mo
 - **Workspace self-devcontainer:** `.devcontainer/devcontainer.json` — `swift:6.3.3-noble` plus OCI Features (`opencode`, `agents-workspace`) for Linux Swift tooling + product fixture; not full macOS product build/test. Detail: [workspace-devcontainer.md](conventions/workspace-devcontainer.md).
 - **Team sample (warn-skip surface):** `reference/devcontainer.json` — features (incl. docker-ood), privileged+tun `runArgs`, mounts, `postCreateCommand`, `forwardPorts`, VS Code customizations. Docker-oriented bits warn-skip; Compose/unknown still fail-closed; see [0003](decisions/0003-warn-skip-apple-incompatibles.md) and [gaps](domain/devcontainer-apple-gaps.md).
 - **Language / multi-feature sample:** `references/multiplatform` — `base:ubuntu` + OCI Features `dotnet:2` + `node:1` (install-time feature `containerEnv` path; no privileged/DinD surface).
+- **Dockerfile sample:** `references/dockerfile/` — nested `build` (no top-level `image`) plus sibling `Dockerfile`.
 
 
 ## Out of scope (product shape)
 
 - Not a fork of https://github.com/devcontainers/cli
 - No Docker Compose driver
+- Top-level `dockerFile`/`dockerfile`/`context` remain blocked (nested `build` xor `image` is representable — [`specs/core.md`](../specs/core.md))
 - No docker-outside-of-docker / docker-in-docker / docker-from-docker / privileged / tun device **emulation** (warn-skip optional bits; do not implement DinD/device paths)

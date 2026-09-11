@@ -204,7 +204,12 @@ Fetch/load failures (missing local dir, missing install.sh/metadata, network, 40
 
 ### Requirement: Derived image build (native arm64; no Rosetta)
 
-When `features` is non-empty after admission, on a fresh create path the product MUST:
+When `features` is non-empty after admission, on a fresh create path the product MUST use as Features `FROM` base:
+
+- the product Dockerfile tag when nested `build` was admitted and built or reused, otherwise
+- the config `image` reference as written
+
+The product MUST then:
 
 1. **Ensure native arm64 BuildKit** (see **build.rosetta consent** requirement) before fetch/build.
 2. **Resolve + fetch** OCI feature artifacts (embedded client), compute install order, and collect runtime contributions (see other requirements).
@@ -229,7 +234,9 @@ When `features` is non-empty after admission, on a fresh create path the product
 6. **Create** the managed dev container **from the derived image** (not the raw config `image`) with the same **`--platform`**. Contributions that affect create flags (`init`, `capAdd`, env, mounts) MUST be merged **before** create.
 7. **Start** the container, then run lifecycle hooks (onCreate → …) as today.
 
-When `features` is absent or empty, create MUST continue to use the config `image` reference as written (no derived tag).
+When nested `build` is admitted, `rebuild` MUST invoke Features `container build` even when the Features derived tag already exists (the same tag name is allowed). `up` and `clone` still reuse that derived tag when it exists. Image-based Features (no nested `build`) keep the **Rebuild reuse clause**.
+
+When `features` is absent or empty, create MUST use the product Dockerfile tag when nested `build` was admitted, otherwise the config `image` reference as written (no Features derived tag).
 
 **MUST NOT** pass `--rosetta` on Features pull/build/create unless the user opted in via `runArgs`.
 
@@ -239,12 +246,22 @@ Reuse running / start stopped: MUST NOT re-fetch/rebuild features (already baked
 
 **Rebuild reuse clause**
 
-On `rebuild`, the same derived-tag identity material applies: when the rebuilt config's base image + features + `recipeVersion` material is **unchanged**, the existing derived tag `adev-{base}:{hash12}` MUST be reused (no `container build`), making the unchanged config cheap; when the material **changed**, the derived image MUST be built before the old container is deleted (pre-delete ordering gate). Feature option changes and product `recipeVersion` bumps alter the material and MUST produce a different derived tag, engaging the build path.
+On `rebuild` without nested `build`, the same derived-tag identity material applies: when the rebuilt config's base image + features + `recipeVersion` material is **unchanged**, the existing derived tag `adev-{base}:{hash12}` MUST be reused (no `container build`), making the unchanged config cheap; when the material **changed**, the derived image MUST be built before the old container is deleted (pre-delete ordering gate). Feature option changes and product `recipeVersion` bumps alter the material and MUST produce a different derived tag, engaging the build path. This clause MUST NOT apply when nested `build` is admitted.
 
 #### Scenario: Create uses derived image after build
 - Given a config with `image` and one OCI feature
 - When the user runs `up` on a fresh create path (fetch/build available or mocked success)
 - Then `container build` runs with `--platform linux/arm64` on arm64 hosts, create uses the derived tag `adev-{base}:{hash12}` (or `adevcontainer:{hash12}` when base is empty), and lifecycle hooks run after start
+
+#### Scenario: Features FROM dockerfile tag when nested build is present
+- Given a config with nested `build` and one OCI feature (no top-level `image`)
+- When Features build runs on a fresh create path
+- Then the Features generated Dockerfile `FROM`s the product Dockerfile tag `adev-{base}-df:{hash12}` (or `adevcontainer-df:{hash12}` when base is empty), not a config `image`
+
+#### Scenario: Rebuild with nested build does not reuse Features derived tag
+- Given a managed container created from nested `build` plus Features, and the Features derived tag already exists locally for the same Features material
+- When the user runs `adevcontainer rebuild --name <that-name>`
+- Then Features `container build` is invoked (the same tag name is allowed) and create uses that Features derived tag after the build
 
 #### Scenario: Derived tag has no features path prefix
 - Given a Features build with a non-empty human base
@@ -287,7 +304,7 @@ On `rebuild`, the same derived-tag identity material applies: when the rebuilt c
 - Then the tags are identical
 
 #### Scenario: rebuild with unchanged features material reuses derived tag
-- Given a managed container created from a config with OCI features and an existing derived tag `adev-{base}:{hash12}` for the same material
+- Given a managed container created from a config with OCI features and an existing derived tag `adev-{base}:{hash12}` for the same material, and no nested `build`
 - When the user runs `adevcontainer rebuild --name <that-name>` without changing feature material
 - Then no `container build` is invoked and the new container is created from the existing derived tag
 

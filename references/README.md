@@ -10,3 +10,7 @@ plus OCI Features `dotnet:2` and `node:1` (exercises install-time feature
 
 `nodejs` demonstrates a non-root `remoteUser` with a writable
 named volume while the main container drops all capabilities.
+
+`dockerfile` is the nested `build` sample: a root `.devcontainer.json` with
+`build.dockerfile` and a sibling `FROM`-only `Dockerfile` (no privileged
+access or Docker-in-Docker).

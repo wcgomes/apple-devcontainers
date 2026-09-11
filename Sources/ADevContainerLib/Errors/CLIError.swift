@@ -229,6 +229,8 @@ public enum CLIErrorCode {
     public static let featureDependencyCycle = "feature_dependency_cycle"
     /// Legacy derived-image build failure (BuildKit path retained for optional future use).
     public static let featureBuild = "feature_build"
+    /// User Dockerfile (`nested build`) `container build` failure. Distinct from `feature_build`.
+    public static let dockerfileBuild = "dockerfile_build"
     /// In-container feature install failure (`cp` / `exec install.sh`) — retained helper path.
     public static let featureInstall = "feature_install"
     /// User declined or non-interactive failure configuring `build.rosetta=false` for Features builds.

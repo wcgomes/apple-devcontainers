@@ -440,5 +440,488 @@ nonisolated(unsafe) let rebuildCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(help.contains("Force-rebuild"), "help describes forced rebuild")
         try MiniTest.expect(help.contains("volume"), "help describes volume preservation")
         try MiniTest.expect(!usage.contains("preflight"), "main usage stays the overview, not rebuild specifics")
+    }),
+
+    ("rebuildTakesTheDockerfilePath", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "build": { "dockerfile": "Dockerfile" }, "remoteUser": "vscode" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let tag = DockerfileImageTag.compute(
+            dockerfileBytes: resolved.config.dockerfileBuild!.dockerfileBytes,
+            context: resolved.config.dockerfileBuild!.context,
+            args: resolved.config.dockerfileBuild!.args,
+            target: resolved.config.dockerfileBuild!.target,
+            nameBase: ContainerIdentity.humanBase(workspacePath: ws.path)
+        )
+        let s = RebuildScenario()
+        let selected = RebuildScenario.container(
+            id: "df-app",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [selected]
+        s.existingImages = [tag]
+        s.newContainerId = "df-app"
+        var gateCount = 0
+        let prevEnsure = RebuildCommand.ensureNativeArmBuildOverride
+        RebuildCommand.ensureNativeArmBuildOverride = { gateCount += 1 }
+        defer { RebuildCommand.ensureNativeArmBuildOverride = prevEnsure }
+        let previousEnabled = StatusPrinter.enabled
+        let previousWrite = StatusPrinter.writeStderr
+        let previousPhase = StatusPrinter.hasEmittedPhase
+        defer {
+            StatusPrinter.enabled = previousEnabled
+            StatusPrinter.writeStderr = previousWrite
+            StatusPrinter.hasEmittedPhase = previousPhase
+        }
+        StatusPrinter.enabled = true
+        StatusPrinter.resetSectionState()
+        var captured = ""
+        StatusPrinter.writeStderr = { captured += String(data: $0, encoding: .utf8) ?? "" }
+        s.install()
+        let result = try RebuildCommand.run(
+            options: RebuildOptions(name: "df-app", skipPull: true),
+            runtime: s.runtime
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(gateCount, 1)
+        let builds = s.mock.calls.filter { $0.arguments.first == "build" }
+        try MiniTest.expectEqual(builds.count, 1, "rebuild must invoke container build even when the product tag exists")
+        try MiniTest.expect(builds[0].arguments.contains(tag))
+        try MiniTest.expect(builds[0].arguments.contains("--platform"))
+        try MiniTest.expect(builds[0].arguments.contains("linux/arm64"))
+        try MiniTest.expect(captured.contains("Building image"))
+        try MiniTest.expect(!captured.contains("Reusing image"))
+        let create = s.mock.calls.first { $0.arguments.first == "create" }?.arguments ?? []
+        try MiniTest.expect(create.contains(tag))
+        let deleteIdx = s.mock.calls.firstIndex { $0.arguments.first == "delete" }
+        let buildIdx = s.mock.calls.firstIndex { $0.arguments.first == "build" }
+        try MiniTest.expect(deleteIdx != nil && buildIdx != nil && buildIdx! < deleteIdx!)
+    }),
+
+    ("volumeModeRebuildUsesRealDockerfileBytes", {
+        let dockerfileContents = "FROM alpine:3.20\n"
+        let realBytes = Data(dockerfileContents.utf8)
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: "https://github.com/example/repo.git",
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: nil
+        )
+        let realTag = DockerfileImageTag.compute(
+            dockerfileBytes: realBytes,
+            context: ".",
+            args: [:],
+            target: nil,
+            nameBase: identity.base
+        )
+        let emptyTag = DockerfileImageTag.compute(
+            dockerfileBytes: Data(),
+            context: ".",
+            args: [:],
+            target: nil,
+            nameBase: identity.base
+        )
+        try MiniTest.expect(realTag != emptyTag, "empty dockerfileBytes must not produce the product tag")
+        let s = RebuildScenario()
+        var labels = s.volumeLabels()
+        labels[ContainerIdentity.labelLocalFolder] = "volume://adev-repo-ws"
+        let info = RebuildScenario.container(id: "vol-old", labels: labels)
+        s.containers = [info]
+        s.volumes = ["adev-repo-ws"]
+        s.existingImages = [emptyTag]
+        s.volumeConfigText = """
+        { "build": { "dockerfile": "Dockerfile" }, "remoteUser": "vscode" }
+        """
+        s.guestDevcontainerTar = try makeGuestDevcontainerArchive(files: [
+            "devcontainer.json": s.volumeConfigText,
+            "Dockerfile": dockerfileContents
+        ])
+        s.install()
+        try withRebuildVolumeOverrides {
+            let result = try RebuildCommand.run(
+                options: RebuildOptions(name: "vol-old", skipPull: true),
+                runtime: s.runtime
+            )
+            try MiniTest.expectEqual(result.outcome, "success")
+        }
+        try MiniTest.expect(
+            s.mock.calls.contains { $0.arguments.contains("tar") && $0.arguments.contains("cf") },
+            "volume rebuild must stage guest dockerfile/context via exec tar"
+        )
+        let dfBuilds = s.mock.calls.filter {
+            $0.arguments.first == "build" && $0.arguments.contains(realTag)
+        }
+        try MiniTest.expectEqual(dfBuilds.count, 1, "container build must use the tag hashed from real Dockerfile bytes")
+        try MiniTest.expect(!s.mock.calls.contains {
+            $0.arguments.first == "build" && $0.arguments.contains(emptyTag)
+        }, "must not hash empty dockerfileBytes")
+        try MiniTest.expect(dfBuilds[0].arguments.contains("-f"))
+        let create = s.mock.calls.first { $0.arguments.first == "create" }?.arguments ?? []
+        try MiniTest.expect(!create.contains(emptyTag))
+        let tarIdx = s.mock.calls.firstIndex { $0.arguments.contains("tar") && $0.arguments.contains("cf") }
+        let deleteIdx = s.mock.calls.firstIndex { $0.arguments.first == "delete" && $0.arguments.last == "vol-old" }
+        let buildIdx = s.mock.calls.firstIndex { $0.arguments.first == "build" && $0.arguments.contains(realTag) }
+        try MiniTest.expect(tarIdx != nil && deleteIdx != nil && tarIdx! < deleteIdx!)
+        try MiniTest.expect(buildIdx != nil && deleteIdx != nil && buildIdx! < deleteIdx!)
+    }),
+
+    ("volumeModeRebuildRootSiblingDockerfileUsesRealBytes", {
+        let dockerfileContents = "FROM alpine:3.20\n"
+        let realBytes = Data(dockerfileContents.utf8)
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: "https://github.com/example/repo.git",
+            configRelativePath: ".devcontainer.json",
+            configName: nil
+        )
+        let realTag = DockerfileImageTag.compute(
+            dockerfileBytes: realBytes,
+            context: ".",
+            args: [:],
+            target: nil,
+            nameBase: identity.base
+        )
+        let emptyTag = DockerfileImageTag.compute(
+            dockerfileBytes: Data(),
+            context: ".",
+            args: [:],
+            target: nil,
+            nameBase: identity.base
+        )
+        try MiniTest.expect(realTag != emptyTag, "empty dockerfileBytes must not produce the product tag")
+        let s = RebuildScenario()
+        var labels = s.volumeLabels(configFile: ".devcontainer.json")
+        labels[ContainerIdentity.labelLocalFolder] = "volume://adev-repo-ws"
+        let info = RebuildScenario.container(id: "vol-old", labels: labels)
+        s.containers = [info]
+        s.volumes = ["adev-repo-ws"]
+        s.existingImages = [emptyTag]
+        s.guestDevcontainerExists = false
+        s.volumeConfigText = """
+        { "build": { "dockerfile": "Dockerfile" }, "remoteUser": "vscode" }
+        """
+        s.guestDevcontainerTar = try makeGuestWorkspaceArchive(files: [
+            "Dockerfile": dockerfileContents
+        ])
+        s.install()
+        try withRebuildVolumeOverrides {
+            let result = try RebuildCommand.run(
+                options: RebuildOptions(name: "vol-old", skipPull: true),
+                runtime: s.runtime
+            )
+            try MiniTest.expectEqual(result.outcome, "success")
+        }
+        try MiniTest.expect(
+            s.mock.calls.contains {
+                $0.arguments.contains("tar") && $0.arguments.contains("cf") && $0.arguments.contains("Dockerfile")
+            },
+            "volume rebuild must stage guest sibling Dockerfile via exec tar"
+        )
+        try MiniTest.expect(
+            !s.mock.calls.contains {
+                $0.arguments.contains("tar") && $0.arguments.contains(".devcontainer")
+            },
+            "root-sibling rebuild must not require guest .devcontainer/"
+        )
+        let dfBuilds = s.mock.calls.filter {
+            $0.arguments.first == "build" && $0.arguments.contains(realTag)
+        }
+        try MiniTest.expectEqual(dfBuilds.count, 1, "container build must use the tag hashed from real Dockerfile bytes")
+        try MiniTest.expect(!s.mock.calls.contains {
+            $0.arguments.first == "build" && $0.arguments.contains(emptyTag)
+        }, "must not hash empty dockerfileBytes")
+        try MiniTest.expect(dfBuilds[0].arguments.contains("-f"))
+        let create = s.mock.calls.first { $0.arguments.first == "create" }?.arguments ?? []
+        try MiniTest.expect(!create.contains(emptyTag))
+        let tarIdx = s.mock.calls.firstIndex {
+            $0.arguments.contains("tar") && $0.arguments.contains("cf") && $0.arguments.contains("Dockerfile")
+        }
+        let deleteIdx = s.mock.calls.firstIndex { $0.arguments.first == "delete" && $0.arguments.last == "vol-old" }
+        let buildIdx = s.mock.calls.firstIndex { $0.arguments.first == "build" && $0.arguments.contains(realTag) }
+        try MiniTest.expect(tarIdx != nil && deleteIdx != nil && tarIdx! < deleteIdx!)
+        try MiniTest.expect(buildIdx != nil && deleteIdx != nil && buildIdx! < deleteIdx!)
+    }),
+
+    ("volumeModeRebuildRootSiblingContextStagesConfigDirSiblings", {
+        let dockerfileContents = "FROM alpine:3.20\nCOPY package.json /tmp/package.json\n"
+        let realBytes = Data(dockerfileContents.utf8)
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: "https://github.com/example/repo.git",
+            configRelativePath: ".devcontainer.json",
+            configName: nil
+        )
+        let realTag = DockerfileImageTag.compute(
+            dockerfileBytes: realBytes,
+            context: ".",
+            args: [:],
+            target: nil,
+            nameBase: identity.base
+        )
+        let s = RebuildScenario()
+        var labels = s.volumeLabels(configFile: ".devcontainer.json")
+        labels[ContainerIdentity.labelLocalFolder] = "volume://adev-repo-ws"
+        let info = RebuildScenario.container(id: "vol-old", labels: labels)
+        s.containers = [info]
+        s.volumes = ["adev-repo-ws"]
+        s.guestDevcontainerExists = false
+        s.guestRootFiles = ["Dockerfile", "package.json", ".devcontainer.json"]
+        s.volumeConfigText = """
+        { "build": { "dockerfile": "Dockerfile", "context": "." }, "remoteUser": "vscode" }
+        """
+        s.guestDevcontainerTar = try makeGuestWorkspaceArchive(files: [
+            "Dockerfile": dockerfileContents,
+            "package.json": "{}\n"
+        ])
+        s.install()
+        try withRebuildVolumeOverrides {
+            let result = try RebuildCommand.run(
+                options: RebuildOptions(name: "vol-old", skipPull: true),
+                runtime: s.runtime
+            )
+            try MiniTest.expectEqual(result.outcome, "success")
+        }
+        try MiniTest.expect(
+            s.mock.calls.contains {
+                $0.arguments.contains("tar") && $0.arguments.contains("cf") && $0.arguments.contains("Dockerfile")
+            },
+            "volume rebuild must stage the sibling Dockerfile"
+        )
+        try MiniTest.expect(
+            s.mock.calls.contains {
+                $0.arguments.contains("tar") && $0.arguments.contains("cf") && $0.arguments.contains("package.json")
+            },
+            "context \".\" must stage config-dir siblings, not only the Dockerfile file"
+        )
+        try MiniTest.expect(
+            !s.mock.calls.contains {
+                $0.arguments.contains("tar") && $0.arguments.contains("cf") && $0.arguments.contains(".")
+            },
+            "must not tar the whole workspace as context \".\""
+        )
+        try MiniTest.expect(
+            !s.mock.calls.contains {
+                $0.arguments.contains("tar") && $0.arguments.contains("cf") && $0.arguments.contains("src")
+            },
+            "must not tar src/ as context"
+        )
+        try MiniTest.expect(
+            !s.mock.calls.contains {
+                $0.arguments.contains("tar") && $0.arguments.contains(".devcontainer")
+            },
+            "root-sibling rebuild must not require guest .devcontainer/"
+        )
+        let dfBuilds = s.mock.calls.filter {
+            $0.arguments.first == "build" && $0.arguments.contains(realTag)
+        }
+        try MiniTest.expectEqual(dfBuilds.count, 1, "container build must use the tag hashed from real Dockerfile bytes")
+        let deleteIdx = s.mock.calls.firstIndex { $0.arguments.first == "delete" && $0.arguments.last == "vol-old" }
+        let siblingTarIdx = s.mock.calls.firstIndex {
+            $0.arguments.contains("tar") && $0.arguments.contains("cf") && $0.arguments.contains("package.json")
+        }
+        try MiniTest.expect(siblingTarIdx != nil && deleteIdx != nil && siblingTarIdx! < deleteIdx!)
+    }),
+
+    ("volumeModeRebuildMissingDockerfileMaterialFailsBeforeDelete", {
+        let s = RebuildScenario()
+        var labels = s.volumeLabels()
+        labels[ContainerIdentity.labelLocalFolder] = "volume://adev-repo-ws"
+        let info = RebuildScenario.container(id: "vol-old", labels: labels)
+        s.containers = [info]
+        s.volumes = ["adev-repo-ws"]
+        s.volumeConfigText = """
+        { "build": { "dockerfile": "Dockerfile" }, "remoteUser": "vscode" }
+        """
+        s.guestDevcontainerTar = try makeGuestDevcontainerArchive(files: [
+            "devcontainer.json": s.volumeConfigText
+        ])
+        s.install()
+        try MiniTest.expectThrows({
+            try withRebuildVolumeOverrides {
+                _ = try RebuildCommand.run(
+                    options: RebuildOptions(name: "vol-old", skipPull: true),
+                    runtime: s.runtime
+                )
+            }
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.dockerfileBuild)
+            try MiniTest.expectEqual(err.property, "build")
+        }
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "delete" }, "old container kept")
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "create" })
+    }),
+
+    ("rebuildSkipPullStillBuildsDockerfile", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "build": { "dockerfile": "Dockerfile" }, "remoteUser": "vscode" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        let s = RebuildScenario()
+        let selected = RebuildScenario.container(
+            id: "df-app",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [selected]
+        s.newContainerId = "df-app"
+        let prevEnsure = RebuildCommand.ensureNativeArmBuildOverride
+        RebuildCommand.ensureNativeArmBuildOverride = { }
+        defer { RebuildCommand.ensureNativeArmBuildOverride = prevEnsure }
+        s.install()
+        _ = try RebuildCommand.run(
+            options: RebuildOptions(name: "df-app", skipPull: true),
+            runtime: s.runtime
+        )
+        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "build" })
+        try MiniTest.expect(!s.mock.calls.contains {
+            $0.arguments.starts(with: ["image", "pull"]) || $0.arguments.starts(with: ["images", "pull"])
+        })
+    }),
+
+    ("rebuildDockerfilePlusFeaturesRosettaOnce", {
+        let ref = "ghcr.io/adevcontainer/features/sample-a:1"
+        let fixture = TestRepo.root()
+            .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("df-rebuild-feat-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "build": { "dockerfile": "Dockerfile" },
+          "features": { "\(ref)": {} },
+          "remoteUser": "vscode"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let existingDfTag = DockerfileImageTag.compute(
+            dockerfileBytes: resolved.config.dockerfileBuild!.dockerfileBytes,
+            context: resolved.config.dockerfileBuild!.context,
+            args: resolved.config.dockerfileBuild!.args,
+            target: resolved.config.dockerfileBuild!.target,
+            nameBase: ContainerIdentity.humanBase(workspacePath: ws.path)
+        )
+        var gateCount = 0
+        try withRebuildFeatureOverrides(
+            fetcher: MockFeatureFetcher(packagesByRef: [ref: fixture]),
+            cache: cache
+        ) {
+            let prevEnsure = RebuildCommand.ensureNativeArmBuildOverride
+            RebuildCommand.ensureNativeArmBuildOverride = { gateCount += 1 }
+            defer { RebuildCommand.ensureNativeArmBuildOverride = prevEnsure }
+            let s = RebuildScenario()
+            let selected = RebuildScenario.container(
+                id: "df-feat",
+                labels: s.bindLabels(
+                    localFolder: ws.path,
+                    configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+                )
+            )
+            s.containers = [selected]
+            s.existingImages = [existingDfTag]
+            s.newContainerId = "df-feat"
+            s.install()
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(name: "df-feat", skipPull: true),
+                runtime: s.runtime
+            )
+            try MiniTest.expectEqual(gateCount, 1)
+            let builds = s.mock.calls.filter { $0.arguments.first == "build" }
+            try MiniTest.expectEqual(builds.count, 2, "rebuild must container-build the user Dockerfile even when the tag exists, then Features")
+            let dfTag = builds[0].arguments[builds[0].arguments.firstIndex(of: "-t")! + 1]
+            try MiniTest.expectEqual(dfTag, existingDfTag)
+            if let fIdx = builds[1].arguments.firstIndex(of: "-f"), fIdx + 1 < builds[1].arguments.count {
+                let contents = try String(contentsOfFile: builds[1].arguments[fIdx + 1], encoding: .utf8)
+                try MiniTest.expect(contents.contains("FROM \(dfTag)"))
+            }
+            let featTag = builds[1].arguments[builds[1].arguments.firstIndex(of: "-t")! + 1]
+            try MiniTest.expect(!featTag.contains("-df:"))
+            try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "create" && $0.arguments.contains(featTag) })
+        }
+    }),
+
+    ("rebuildNestedBuildRebuildsFeaturesEvenWhenDerivedTagExists", {
+        let ref = "ghcr.io/adevcontainer/features/sample-a:1"
+        let fixture = TestRepo.root()
+            .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("df-rebuild-feat-force-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "build": { "dockerfile": "Dockerfile" },
+          "features": { "\(ref)": {} },
+          "remoteUser": "vscode"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let nameBase = ContainerIdentity.humanBase(workspacePath: ws.path)
+        let existingDfTag = DockerfileImageTag.compute(
+            dockerfileBytes: resolved.config.dockerfileBuild!.dockerfileBytes,
+            context: resolved.config.dockerfileBuild!.context,
+            args: resolved.config.dockerfileBuild!.args,
+            target: resolved.config.dockerfileBuild!.target,
+            nameBase: nameBase
+        )
+        let existingFeatTag = DerivedImageTag.compute(
+            baseImage: existingDfTag,
+            ordered: [try rebuildOrderedFeature(ref: ref, fixture: fixture)],
+            nameBase: nameBase
+        )
+        try withRebuildFeatureOverrides(
+            fetcher: MockFeatureFetcher(packagesByRef: [ref: fixture]),
+            cache: cache
+        ) {
+            let s = RebuildScenario()
+            let selected = RebuildScenario.container(
+                id: "df-feat-force",
+                labels: s.bindLabels(
+                    localFolder: ws.path,
+                    configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+                )
+            )
+            s.containers = [selected]
+            s.existingImages = [existingDfTag, existingFeatTag]
+            s.newContainerId = "df-feat-force"
+            s.install()
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(name: "df-feat-force", skipPull: true),
+                runtime: s.runtime
+            )
+            let builds = s.mock.calls.filter { $0.arguments.first == "build" }
+            try MiniTest.expectEqual(
+                builds.count,
+                2,
+                "rebuild with nested build must container-build Features even when the derived tag exists"
+            )
+            let dfTag = builds[0].arguments[builds[0].arguments.firstIndex(of: "-t")! + 1]
+            try MiniTest.expectEqual(dfTag, existingDfTag)
+            let featTag = builds[1].arguments[builds[1].arguments.firstIndex(of: "-t")! + 1]
+            try MiniTest.expectEqual(featTag, existingFeatTag, "same Features tag name is allowed")
+            try MiniTest.expect(!featTag.contains("-df:"))
+            if let fIdx = builds[1].arguments.firstIndex(of: "-f"), fIdx + 1 < builds[1].arguments.count {
+                let contents = try String(contentsOfFile: builds[1].arguments[fIdx + 1], encoding: .utf8)
+                try MiniTest.expect(contents.contains("FROM \(dfTag)"))
+            }
+            for build in builds {
+                try MiniTest.expect(!build.arguments.contains("--no-cache"), "must not add --no-cache")
+            }
+            try MiniTest.expect(!s.mock.calls.contains {
+                $0.arguments.starts(with: ["image", "delete"])
+                    || $0.arguments.starts(with: ["image", "rm"])
+                    || $0.arguments.contains("rmi")
+            }, "operator is not required to delete images")
+            try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "create" && $0.arguments.contains(featTag) })
+        }
     })
 ]

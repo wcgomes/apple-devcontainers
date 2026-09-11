@@ -28,6 +28,15 @@ enum TestRepo {
         return ws
     }
 
+    static func writeFile(_ contents: String, relativePath: String, in workspace: URL) throws {
+        let url = workspace.appendingPathComponent(relativePath)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+    }
+
     static func resolveConfig(_ json: String) throws -> ResolvedDevContainerConfig {
         let ws = try makeTempWorkspace(configJSON: json)
         defer { try? FileManager.default.removeItem(at: ws) }
@@ -5353,6 +5362,51 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(result.reusedExistingImage)
         try MiniTest.expect(!mockProc.calls.contains { $0.arguments.first == "build" })
     }),
+    ("featuresRunnerForceBuildRebuildsExistingTag", {
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-force-tag-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+        let mockFetch = MockFeatureFetcher(packagesByRef: [
+            FeaturesTestSupport.refA: FeaturesTestSupport.fixtureFeatureDir("sample-a")
+        ])
+        let mockProc = MockProcessRunner()
+        mockProc.handlers = [
+            { args in
+                if args.starts(with: ["image", "inspect"]) {
+                    let ref = args.last ?? ""
+                    let payload = MockProcessRunner.imageInspectJSON(reference: ref, user: "root")
+                    return ProcessResult(
+                        exitCode: 0,
+                        stdout: try! JSONSerialization.data(withJSONObject: [payload]),
+                        stderr: Data()
+                    )
+                }
+                if args.first == "build" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mockProc)
+        let result = try FeaturesRunner.run(
+            features: [
+                AdmittedFeature(reference: FeaturesTestSupport.refA, options: [:])
+            ],
+            baseImage: "alpine:3.20",
+            deps: FeaturesRunner.Dependencies(
+                fetcher: mockFetch,
+                runtime: runtime,
+                cacheRoot: cache,
+                platform: "linux/arm64"
+            ),
+            forceBuild: true
+        )
+        try MiniTest.expect(!result.reusedExistingImage)
+        let builds = mockProc.calls.filter { $0.arguments.first == "build" }
+        try MiniTest.expectEqual(builds.count, 1, "forceBuild must invoke container build even when the derived tag exists")
+        try MiniTest.expect(builds[0].arguments.contains(result.derivedImage))
+        try MiniTest.expect(!builds[0].arguments.contains("--no-cache"))
+    }),
     ("featuresRunnerBakesUnionedBaseImageMetadataLabel", {
         let cache = FileManager.default.temporaryDirectory
             .appendingPathComponent("feat-bake-union-\(UUID().uuidString)", isDirectory: true).path
@@ -5474,6 +5528,346 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             try MiniTest.expectEqual(pull[i + 1], "linux/arm64")
         }
         try MiniTest.expect(!pull.contains("--rosetta"))
+    }),
+    ("dockerfileBytesAndBuildFieldsChangeConfigHash", {
+        func hashFor(context: String, argsJSON: String, targetLine: String, bytes: String) throws -> String {
+            let ws = try TestRepo.makeTempWorkspace(configJSON: """
+            {
+              "build": {
+                "dockerfile": "Dockerfile",
+                "context": "\(context)",
+                "args": \(argsJSON)\(targetLine)
+              }
+            }
+            """)
+            defer { try? FileManager.default.removeItem(at: ws) }
+            try TestRepo.writeFile(bytes, relativePath: ".devcontainer/Dockerfile", in: ws)
+            let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+            return resolved.configHash
+        }
+        let base = try hashFor(context: ".", argsJSON: "{}", targetLine: "", bytes: "FROM alpine:3.20\n")
+        let otherBytes = try hashFor(context: ".", argsJSON: "{}", targetLine: "", bytes: "FROM alpine:3.19\n")
+        try MiniTest.expect(base != otherBytes, "Dockerfile bytes must change config hash")
+        let otherCtx = try hashFor(context: "ctx", argsJSON: "{}", targetLine: "", bytes: "FROM alpine:3.20\n")
+        try MiniTest.expect(base != otherCtx, "context must change config hash")
+        let otherArgs = try hashFor(context: ".", argsJSON: #"{"A":"1"}"#, targetLine: "", bytes: "FROM alpine:3.20\n")
+        try MiniTest.expect(base != otherArgs, "args must change config hash")
+        let otherTarget = try hashFor(context: ".", argsJSON: "{}", targetLine: #", "target": "dev""#, bytes: "FROM alpine:3.20\n")
+        try MiniTest.expect(base != otherTarget, "target must change config hash")
+    }),
+    ("contextTreeIsNotHashed", {
+        let json = #"{ "build": { "dockerfile": "Dockerfile", "context": "." } }"#
+        let ws1 = try TestRepo.makeTempWorkspace(configJSON: json, prefix: "df-tree-a")
+        defer { try? FileManager.default.removeItem(at: ws1) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws1)
+        try TestRepo.writeFile("one", relativePath: ".devcontainer/src/a.txt", in: ws1)
+        let ws2 = try TestRepo.makeTempWorkspace(configJSON: json, prefix: "df-tree-b")
+        defer { try? FileManager.default.removeItem(at: ws2) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws2)
+        try TestRepo.writeFile("two", relativePath: ".devcontainer/src/a.txt", in: ws2)
+        try TestRepo.writeFile("extra", relativePath: ".devcontainer/other.txt", in: ws2)
+        let a = try ConfigResolver.resolve(workspacePath: ws1.path, localEnv: [:])
+        let b = try ConfigResolver.resolve(workspacePath: ws2.path, localEnv: [:])
+        func buildIdentityHash(_ config: ResolvedDevContainerConfig) -> String {
+            var material = config.hashMaterial()
+            material.removeValue(forKey: "workspaceFolder")
+            return ContainerIdentity.configHash(from: material)
+        }
+        try MiniTest.expectEqual(buildIdentityHash(a.config), buildIdentityHash(b.config))
+        let tagA = DockerfileImageTag.compute(
+            dockerfileBytes: a.config.dockerfileBuild!.dockerfileBytes,
+            context: a.config.dockerfileBuild!.context,
+            args: a.config.dockerfileBuild!.args,
+            target: a.config.dockerfileBuild!.target,
+            nameBase: "app"
+        )
+        let tagB = DockerfileImageTag.compute(
+            dockerfileBytes: b.config.dockerfileBuild!.dockerfileBytes,
+            context: b.config.dockerfileBuild!.context,
+            args: b.config.dockerfileBuild!.args,
+            target: b.config.dockerfileBuild!.target,
+            nameBase: "app"
+        )
+        try MiniTest.expectEqual(tagA, tagB)
+    }),
+    ("productDockerfileTagIsDistinctFromFeaturesTag", {
+        let tag = DockerfileImageTag.compute(
+            dockerfileBytes: Data("FROM alpine:3.20\n".utf8),
+            context: ".",
+            args: [:],
+            target: nil,
+            nameBase: "my-app"
+        )
+        try MiniTest.expect(tag.hasPrefix("adev-my-app-df:"))
+        try MiniTest.expect(!tag.hasPrefix("adev-my-app:"))
+        try MiniTest.expect(!tag.contains("/features"))
+        let hashPart = String(tag.split(separator: ":").last ?? "")
+        try MiniTest.expectEqual(hashPart.count, 12)
+        let features = DerivedImageTag.compute(baseImage: "alpine:3.20", ordered: [], nameBase: "my-app")
+        try MiniTest.expect(tag != features)
+        let empty = DockerfileImageTag.compute(
+            dockerfileBytes: Data("FROM alpine:3.20\n".utf8),
+            context: ".",
+            args: [:],
+            target: nil,
+            nameBase: ""
+        )
+        try MiniTest.expect(empty.hasPrefix("adevcontainer-df:"))
+        try MiniTest.expect(!empty.hasPrefix("adevcontainer:"))
+    }),
+    ("runtimeBuildPassesBuildArgAndTarget", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["builder", "status", "--format", "json"] {
+                    let json = #"[{"id":"buildkit","status":{"state":"running"}}]"#
+                    return ProcessResult(exitCode: 0, stdout: Data(json.utf8), stderr: Data())
+                }
+                if args.first == "build" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("unexpected".utf8))
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try runtime.build(
+            contextDirectory: "/ctx",
+            dockerfilePath: "/ctx/Dockerfile",
+            tag: "adev-app-df:abc123def456",
+            platform: "linux/arm64",
+            buildArgs: ["FOO": "bar", "BAZ": "1"],
+            target: "dev",
+            errorCode: CLIErrorCode.dockerfileBuild,
+            errorProperty: "build"
+        )
+        guard let build = mock.calls.first(where: { $0.arguments.first == "build" })?.arguments else {
+            throw MiniTest.Failure(message: "expected container build")
+        }
+        try MiniTest.expect(build.contains("-f"))
+        try MiniTest.expect(build.contains("/ctx/Dockerfile"))
+        try MiniTest.expect(build.contains("-t"))
+        try MiniTest.expect(build.contains("adev-app-df:abc123def456"))
+        try MiniTest.expect(build.contains("--platform"))
+        try MiniTest.expect(build.contains("linux/arm64"))
+        try MiniTest.expect(build.contains("--build-arg"))
+        try MiniTest.expect(build.contains("BAZ=1"))
+        try MiniTest.expect(build.contains("FOO=bar"))
+        try MiniTest.expect(build.contains("--target"))
+        try MiniTest.expect(build.contains("dev"))
+        try MiniTest.expectEqual(build.last, "/ctx")
+        try MiniTest.expect(!build.contains("--rosetta"))
+    }),
+    ("runtimeBuildUnknownBuildArgFailsNamingArgs", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["builder", "status", "--format", "json"] {
+                    let json = #"[{"id":"buildkit","status":{"state":"running"}}]"#
+                    return ProcessResult(exitCode: 0, stdout: Data(json.utf8), stderr: Data())
+                }
+                if args.first == "build" {
+                    return ProcessResult(
+                        exitCode: 1,
+                        stdout: Data(),
+                        stderr: Data("unknown flag: --build-arg".utf8)
+                    )
+                }
+                return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("unexpected".utf8))
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            try runtime.build(
+                contextDirectory: "/ctx",
+                dockerfilePath: "/ctx/Dockerfile",
+                tag: "adev-app-df:deadbeefcafe",
+                platform: "linux/arm64",
+                buildArgs: ["FOO": "bar"],
+                errorCode: CLIErrorCode.dockerfileBuild,
+                errorProperty: "build"
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.dockerfileBuild)
+            try MiniTest.expectEqual(err.property, "args")
+            try MiniTest.expect(!err.message.lowercased().contains("workaround"))
+        }
+    }),
+    ("runtimeBuildUnknownTargetFailsNamingTarget", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["builder", "status", "--format", "json"] {
+                    let json = #"[{"id":"buildkit","status":{"state":"running"}}]"#
+                    return ProcessResult(exitCode: 0, stdout: Data(json.utf8), stderr: Data())
+                }
+                if args.first == "build" {
+                    return ProcessResult(
+                        exitCode: 1,
+                        stdout: Data(),
+                        stderr: Data("unrecognized option --target".utf8)
+                    )
+                }
+                return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("unexpected".utf8))
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            try runtime.build(
+                contextDirectory: "/ctx",
+                dockerfilePath: "/ctx/Dockerfile",
+                tag: "adev-app-df:deadbeefcafe",
+                platform: "linux/arm64",
+                target: "dev",
+                errorCode: CLIErrorCode.dockerfileBuild,
+                errorProperty: "build"
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.dockerfileBuild)
+            try MiniTest.expectEqual(err.property, "target")
+        }
+    }),
+    ("userDockerfileBuildFailureIsNotFeaturesBranded", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["builder", "status", "--format", "json"] {
+                    let json = #"[{"id":"buildkit","status":{"state":"running"}}]"#
+                    return ProcessResult(exitCode: 0, stdout: Data(json.utf8), stderr: Data())
+                }
+                if args.first == "build" {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("build failed".utf8))
+                }
+                return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("unexpected".utf8))
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            try runtime.build(
+                contextDirectory: "/ctx",
+                dockerfilePath: "/ctx/Dockerfile",
+                tag: "adev-app-df:deadbeefcafe",
+                platform: "linux/arm64",
+                errorCode: CLIErrorCode.dockerfileBuild,
+                errorProperty: "build"
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.dockerfileBuild)
+            try MiniTest.expectEqual(err.property, "build")
+            try MiniTest.expect(err.code != CLIErrorCode.featureBuild)
+            try MiniTest.expect(err.property != "features")
+        }
+        try MiniTest.expectThrows({
+            try runtime.build(
+                contextDirectory: "/ctx",
+                dockerfilePath: "/ctx/Dockerfile",
+                tag: "adev:test",
+                platform: "linux/arm64"
+            )
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.featureBuild)
+            try MiniTest.expectEqual(err.property, "features")
+        }
+    }),
+    ("dockerfileBuilderProgressBuildingAndReusingImage", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "build": { "dockerfile": "Dockerfile" } }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let build = resolved.config.dockerfileBuild!
+        let configDir = (resolved.configPath as NSString).deletingLastPathComponent
+        let tag = DockerfileImageTag.compute(
+            dockerfileBytes: build.dockerfileBytes,
+            context: build.context,
+            args: build.args,
+            target: build.target,
+            nameBase: "app"
+        )
+
+        let previousEnabled = StatusPrinter.enabled
+        let previousWrite = StatusPrinter.writeStderr
+        let previousPhase = StatusPrinter.hasEmittedPhase
+        defer {
+            StatusPrinter.enabled = previousEnabled
+            StatusPrinter.writeStderr = previousWrite
+            StatusPrinter.hasEmittedPhase = previousPhase
+        }
+        StatusPrinter.enabled = true
+        StatusPrinter.resetSectionState()
+        var captured = ""
+        StatusPrinter.writeStderr = { captured += String(data: $0, encoding: .utf8) ?? "" }
+
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["image", "inspect"]) {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+                }
+                if args.starts(with: ["image", "list"]) {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("missing".utf8))
+                }
+                if args == ["builder", "status", "--format", "json"] {
+                    let json = #"[{"id":"buildkit","status":{"state":"running"}}]"#
+                    return ProcessResult(exitCode: 0, stdout: Data(json.utf8), stderr: Data())
+                }
+                if args.first == "build" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        _ = try DockerfileImageBuilder.buildOrReuse(
+            build: build,
+            configDirectory: configDir,
+            nameBase: "app",
+            runtime: runtime,
+            platform: "linux/arm64"
+        )
+        try MiniTest.expect(captured.contains("==> Building image"))
+        try MiniTest.expect(captured.contains(tag) || captured.contains("Building image"))
+
+        captured = ""
+        StatusPrinter.resetSectionState()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["image", "inspect"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data(#"[{"id":"img"}]"#.utf8), stderr: Data())
+                }
+                if args.first == "build" {
+                    return ProcessResult(exitCode: 99, stdout: Data(), stderr: Data("should not build".utf8))
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        _ = try DockerfileImageBuilder.buildOrReuse(
+            build: build,
+            configDirectory: configDir,
+            nameBase: "app",
+            runtime: runtime,
+            platform: "linux/arm64"
+        )
+        try MiniTest.expect(captured.contains("==> Reusing image"))
+        try MiniTest.expectEqual(mock.calls.filter { $0.arguments.first == "build" }.count, 1)
+    }),
+    ("featureDockerfileGeneratorFromsSuppliedBaseImage", {
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("df-from-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+        try FileManager.default.createDirectory(atPath: cache, withIntermediateDirectories: true)
+        let ctx = try FeatureDockerfileGenerator.write(
+            baseImage: "adev-app-df:abc123def456",
+            ordered: [],
+            packages: [],
+            contextDirectory: (cache as NSString).appendingPathComponent("ctx")
+        )
+        try MiniTest.expect(ctx.dockerfileContents.contains("FROM adev-app-df:abc123def456"))
+        try MiniTest.expect(!ctx.dockerfileContents.contains("FROM alpine"))
     })
 ]
 

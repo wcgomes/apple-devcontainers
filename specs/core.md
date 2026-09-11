@@ -100,7 +100,8 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 **Image & workspace**
 - `$schema` — optional string parser/editor metadata; silent and hash-neutral
 - `name` (optional; when non-empty after trim, drives the DNS-friendly create name and does not drive the resource base, per the live Deterministic identity and labels contract)
-- `image` (required for image-based dev containers)
+- `image` **xor** nested `build` — exactly one source selector is required
+- nested `build` — object with required `dockerfile` (string); optional `context` (string, default `"."`); optional `args` (string map, substitution applied); optional `target` (string); other `build.*` keys fail closed. Behavior per **Nested build xor image admission** and **Dockerfile image build on create paths**
 - `overrideCommand` — Boolean; true is a silent restatement of the existing keep-alive override and false is blocked
 - Implicit workspace bind: host workspace root → container workspace folder
 
@@ -201,6 +202,11 @@ The CLI MUST accept and honor the property surface below. Properties outside thi
 - Given a valid image config containing `$schema`, `otherPortsAttributes`, `secrets`, Boolean `privileged`, `overrideCommand: true`, and valid top-level `capAdd`
 - When config is admitted and resolved
 - Then no key fails as unknown, each follows its exact/silent/degraded behavior, and only effective capability behavior reaches create/hash material
+
+#### Scenario: nested build is on the supported surface
+- Given a config that includes nested `build` with required `dockerfile` and no top-level `image`, plus only otherwise supported keys
+- When config is validated
+- Then validation does not fail with unsupported-property for `build` and does not require `image`
 
 See also: [lifecycle-hooks.md](lifecycle-hooks.md), [runargs-host.md](runargs-host.md), [features.md](features.md), [vscode.md](vscode.md) for detailed property behavior; **Remote connection user resolution** and **Create process user** for the user chain and create `-u`.
 
@@ -349,7 +355,7 @@ Every top-level Dev Container input MUST be classified by known semantics:
 | Known optional unsupported | Emit one ignored issue, strip from effective behavior, and continue | Hash-neutral |
 | Blocked | Structured actionable error | No effective hash/result |
 
-Hard rejection MUST be limited to malformed input or semantics whose omission would make execution incoherent, unsafe, destructive, or materially misleading. This includes unrepresentable configuration-source selectors (`build`/legacy Dockerfile and Compose until separately supported), custom workspace/process semantics that would run different content or commands, required host capabilities that are unmet or unverifiable, data/security-sensitive protections that cannot be preserved, unsupported substitutions, invalid Feature option/package requirements, and first-class runArg collisions. A recognized property MUST NOT be rejected merely because it lacks an implementation when its omission is registered as harmless or optional and reported as required.
+Hard rejection MUST be limited to malformed input or semantics whose omission would make execution incoherent, unsafe, destructive, or materially misleading. This includes unrepresentable configuration-source selectors (legacy top-level `dockerFile` / `dockerfile` / `context`, and Compose), nested `build` keys outside the v1 translation, custom workspace/process semantics that would run different content or commands, required host capabilities that are unmet or unverifiable, data/security-sensitive protections that cannot be preserved, unsupported substitutions, invalid Feature option/package requirements, and first-class runArg collisions. Nested `build` with the translation in **Nested build xor image admission** is representable and MUST NOT be rejected as an unrepresentable source selector. A recognized property MUST NOT be rejected merely because it lacks an implementation when its omission is registered as harmless or optional and reported as required.
 
 Truly unknown non-metadata top-level keys MUST remain blocked because their semantic consequence cannot be classified. Object-shaped registered tool namespaces under `customizations` are metadata, not a precedent for arbitrary top-level acceptance. Unknown runArgs and raw Apple CLI passthrough remain blocked; only the typed runtime model and explicit runArgs allowlist may produce Apple arguments.
 
@@ -366,7 +372,8 @@ The existing known optional families remain warn-and-ignore in default mode: doc
 - `runArgs` entries not on the runArgs allowlist and not in the registered warn-and-ignore family
 - First-class smuggling via runArgs (`-e`, `-u`, `-w`, `-p`, `-v`, …)
 - Docker Compose keys / compose-file driven multi-service config
-- Unknown top-level dangerous properties; missing `image`; invalid Feature option shapes; hostRequirements shortfalls; unsupported substitutions
+- Unknown top-level dangerous properties; neither `image` nor nested `build`, or both together; invalid Feature option shapes; hostRequirements shortfalls; unsupported substitutions
+- Top-level `dockerFile` / `dockerfile` / `context`
 
 **Admitted behavior retained from the realized policy**
 
@@ -395,7 +402,7 @@ The existing known optional families remain warn-and-ignore in default mode: doc
 
 #### Scenario: Unrepresentable source selector remains blocked
 
-- Given a config selects Dockerfile build or Docker Compose without a separately supported translation
+- Given a config selects Docker Compose, or top-level `dockerFile` / `dockerfile` / `context`, without a separately supported translation
 - When admission runs
 - Then the CLI fails before choosing another image or creating a semantically unrelated container
 
@@ -620,14 +627,16 @@ Additional helpful fields (e.g. `containerName`) MAY be included.
 
 `up` reuses a running or stopped container with matching identity. When the config/features hash drifts (stamped `devcontainer.config_hash` ≠ resolved hash), `up` MUST fail closed with structured `config_hash_mismatch` and MUST NOT delete or replace; the error hint MUST point to `adevcontainer rebuild` (managed selection: `--name` or auto when applicable). Equal-hash forced rebuild and volume-preserving forced rebuild are **only** via `rebuild`: it MUST NOT require hash drift and MUST preserve volumes — it reads the current config, completes resolution/preflight/Features work first, deletes the old container **only** (container-only delete), and creates the new container reusing the existing workspace volume and config named volumes. Hard post-delete create/start/create-path failures offer mode-split recovery (bind host-editor; clone-origin volume helper); see change archive and product docs for recovery detail.
 
-**Create image selection (Features-aware)**
+**Create image selection (Features-aware and Dockerfile-aware)**
 
 On paths that create a new container (fresh create or `rebuild`):
 
-- **Before create**, if resolved `features` is non-empty: ensure **build.rosetta=false** (consent), then **resolve → fetch → order → contribution merge → Dockerfile generate → `container build`** (or reuse derived tag). Create uses the **derived image** with contributions merged and **`--platform`** host-native.
+- **Before create**, if nested `build` is admitted: ensure **build.rosetta=false** (same consent as Features; at most once per create path), then obtain the product Dockerfile tag per **Dockerfile image build on create paths** (`up`/`clone` build or reuse; `rebuild` always `container build`).
+- **Before create**, if resolved `features` is non-empty: ensure **build.rosetta=false** (consent; skipped if already ensured for nested `build`), then **resolve → fetch → order → contribution merge → Dockerfile generate → `container build`** (reuse derived tag on `up`/`clone` when it exists; on `rebuild` with nested `build`, always `container build` even when that tag exists; image-based `rebuild` keeps the realized reuse clause) with `FROM` equal to the product Dockerfile tag when nested `build` was used, otherwise config `image`. Create uses the **derived image** with contributions merged and **`--platform`** host-native.
 - Then start and lifecycle hooks (onCreate → updateContent → postCreate → postStart, etc.); feature-contributed hooks merge per the merge-feature-metadata requirement (installs are already in the derived image).
-- If `features` is absent or empty: create uses config `image` as today (still with default platform); Features build path is not required.
-- Reuse running / start stopped paths MUST NOT re-fetch/rebuild features. Config hash (including features) still drives `config_hash_mismatch` on `up` when features change; forced rebuild is available via `rebuild` only.
+- If `features` is absent or empty and nested `build` is admitted: create uses the product Dockerfile tag; Features build path is not required.
+- If `features` is absent or empty and nested `build` is not admitted: create uses config `image` as today (still with default platform); Features build path is not required.
+- Reuse running / start stopped paths MUST NOT re-fetch/rebuild features or rebuild the user Dockerfile. Config hash (including features and Dockerfile hash material) still drives `config_hash_mismatch` on `up` when those inputs change; forced rebuild is available via `rebuild` only.
 
 **Lifecycle hook matrix by path**
 
@@ -699,9 +708,9 @@ Create-path cleanup is unchanged: if any create-path hook fails before the comma
 - Then resolve/fetch/build run before create, create uses the derived image, then lifecycle hooks
 
 #### Scenario: Up without features unchanged image path
-- Given a config with no `features` key
+- Given a config with no `features` key and no nested `build`
 - When the user runs `up` fresh create
-- Then create uses config `image` and the Features build path is not required
+- Then create uses config `image` and neither the Features nor Dockerfile build path is required
 
 #### Scenario: Reuse running does not re-fetch features
 - Given a matching container already running with features identity satisfied
@@ -1641,3 +1650,265 @@ Failure of the parent fix-up MUST follow the per-command create-path ownership s
 - Given a volume-mode `clone` whose workspace-folder chown fails
 - When clone runs
 - Then clone fails with a structured error, deletes the managed container and the `*-ws` workspace volume, and remains eligible for bring-up recovery (unchanged)
+
+---
+
+### Requirement: Nested build xor image admission
+
+The CLI MUST admit exactly one configuration source selector: top-level `image` **or** nested `build`, never both and never neither. Nested `build` MUST be an object. `build.dockerfile` MUST be a non-empty string. `build.context` MAY be omitted and MUST then default to `"."`. `build.args` MAY be omitted; when present it MUST be a map of string keys to string values, and those values MUST receive the existing substitution subset. `build.target` MAY be omitted; when present it MUST be a string.
+
+Any other nested `build.*` key, including `options`, `cacheFrom`, and `cacheTo`, MUST fail closed with a structured error naming property `build` and the unknown key. Top-level `dockerFile`, `dockerfile`, and `context` MUST remain blocked even when nested `build` is present. Docker Compose keys remain blocked.
+
+A config that sets both `image` and nested `build`, or that sets neither, MUST fail closed before create. Invalid shapes (non-object `build`, non-string `dockerfile` / `context` / `target`, non-string `args` values) MUST fail closed with a structured error naming property `build`.
+
+#### Scenario: Nested build without image admits
+
+- Given a config whose only source selector is nested `build` with `dockerfile` set and no top-level `image`
+- When config is admitted and resolved
+- Then admission succeeds and the resolved model carries dockerfile, context (default `"."` when omitted), optional args, and optional target
+
+#### Scenario: Image and nested build together fail
+
+- Given a config that sets both top-level `image` and nested `build`
+- When admission runs
+- Then the CLI fails with a structured error naming property `build` and creates no container
+
+#### Scenario: Neither image nor nested build fails
+
+- Given a config that sets neither top-level `image` nor nested `build`
+- When admission runs
+- Then the CLI fails with a structured error and creates no container
+
+#### Scenario: Top-level dockerfile selectors remain blocked
+
+- Given an otherwise valid config that sets top-level `dockerFile`, `dockerfile`, or `context`
+- When admission runs
+- Then the CLI fails with a structured unsupported-property error naming that top-level key
+
+#### Scenario: Unknown nested build key fails closed
+
+- Given nested `build` that includes `options`, `cacheFrom`, `cacheTo`, or another key other than `dockerfile`, `context`, `args`, and `target`
+- When admission runs
+- Then the CLI fails with a structured error naming property `build` and the unknown key
+
+#### Scenario: Missing build.dockerfile fails
+
+- Given nested `build` without a non-empty `dockerfile` string
+- When admission runs
+- Then the CLI fails with a structured error naming property `build`
+
+#### Scenario: Omitted build.context defaults to dot
+
+- Given nested `build` with `dockerfile` set and `context` omitted
+- When config is resolved
+- Then the effective context is `"."`
+
+#### Scenario: Non-string build.args or target fails closed
+
+- Given nested `build` whose `args` is not a string map or whose `target` is not a string
+- When admission runs
+- Then the CLI fails with a structured error naming property `build`
+
+#### Scenario: build.args receive substitution
+
+- Given nested `build.args` whose values contain `${localWorkspaceFolder}` or `${localEnv:VAR}`
+- When config is resolved
+- Then those tokens are replaced per the existing substitution subset
+
+---
+
+### Requirement: Dockerfile image build on create paths
+
+On `up` fresh create and `clone` create, when nested `build` is admitted, the product MUST build or reuse a local image from the user Dockerfile **before** Features work and **before** create. On `rebuild` replacement, when nested `build` is admitted, the product MUST invoke `container build` for that image **before** Features work and **before** create.
+
+Dockerfile and context paths MUST be resolved against the config-file directory. On `clone`, both paths MUST resolve inside the config-file directory; a `..` segment that escapes that directory MUST fail closed. Root `.devcontainer.json` with a sibling `Dockerfile` and context `"."` MUST be allowed. Bind-mode `up` and `rebuild` MAY use `context: ".."`. Clone's config-only fetch MUST materialize the admitted dockerfile and context paths when they resolve inside the config-file directory.
+
+Missing dockerfile file or missing context directory MUST fail with a structured error naming property `build` before create. The product MUST NOT substitute a different image.
+
+On clone-origin / volume-mode `rebuild`, the product MUST stage the **config-file directory** (not the whole workspace) so the product tag hash uses **real Dockerfile file bytes** (not empty) and `container build` can run. Typical `.devcontainer/devcontainer.json` plus a sibling Dockerfile with context `"."` uses that directory. Root `.devcontainer.json` plus a sibling `Dockerfile` with context `"."` MUST stage files at that config-file directory level (root files and same-level siblings), MUST NOT skip `context: "."`, and MUST NOT require `src/` or other unfetched workspace trees as context. Clone still forbids `..`. Bind-mode `up` and `rebuild` keep the host workspace as context. If that dockerfile or context material is missing, the product MUST fail with a structured error code `dockerfile_build` naming property `build` **before** deleting the old container.
+
+The build MUST use Apple `container build` with `--platform linux/arm64` on Apple Silicon (same host-native platform as Features). The product MUST apply the same `build.rosetta=false` consent gate as Features before this build, and MUST NOT pass `--rosetta` unless the user opted in via `runArgs`. When both nested `build` and Features run on one create path, the consent gate MUST run at most once.
+
+When `build.args` is present, the product MUST pass each pair to `container build` as `--build-arg`. When `build.target` is present, the product MUST pass it as `--target`. If Apple `container build` does not accept `--build-arg` or `--target`, the product MUST fail closed with a structured error naming that key (`args` or `target`) and MUST NOT invent a workaround.
+
+The product-built tag MUST be `adev-{base}-df:{hash12}` (empty resource base → `adevcontainer-df:{hash12}`), distinct from Features `adev-{base}:{hash12}`. Tag hash material MUST be Dockerfile file bytes + context path + args + target. When that tag already exists locally, `up` and `clone` MUST reuse it and MUST NOT invoke `container build`. `rebuild` MUST invoke `container build` even when that tag already exists (the same tag name is allowed) so unhashed COPY sources are picked up. `--skip-pull` MUST NOT skip this local Dockerfile build or that `up`/`clone` reuse; it remains a skip of the product's explicit image-pull step only.
+
+Progress MUST emit `==> Building image` when `container build` runs and `==> Reusing image` when the product tag is reused (StatusPrinter family; `ADEVCONTAINER_QUIET=1` silences these as other phase lines). Build and dockerfile-path failures MUST use error code `dockerfile_build` and property `build`, and MUST NOT use Features-branded codes or properties.
+
+When Features are also admitted, the product MUST obtain the user Dockerfile tag first (`up`/`clone` build or reuse; `rebuild` always `container build`), then run Features with that tag as the `FROM` base (same effective-image swap as today). On `rebuild` with nested `build` and Features, the product MUST invoke Features `container build` even when the Features derived tag already exists (the same tag name is allowed), so the force-rebuilt product Dockerfile tag becomes the Features `FROM` base. `up` and `clone` MUST still reuse an existing Features derived tag. The operator MUST NOT be required to delete images for that Features rebuild. When Features are absent, create MUST use the product Dockerfile tag. Reuse-running and start-stopped paths MUST NOT rebuild the Dockerfile.
+
+#### Scenario: Fresh up builds and creates from the product Dockerfile tag
+
+- Given a bind-mode workspace whose config has nested `build` and no `features`, and the product tag does not exist locally
+- When the user runs `adevcontainer up` on a fresh create path
+- Then `container build` runs with `--platform linux/arm64` and no `--rosetta` unless opted in via `runArgs`
+- And create uses tag `adev-{base}-df:{hash12}` (or `adevcontainer-df:{hash12}` when base is empty)
+
+#### Scenario: Existing product Dockerfile tag is reused
+
+- Given the deterministic product Dockerfile tag already exists locally for the same Dockerfile bytes, context path, args, and target
+- When `up` or `clone` runs the Dockerfile path
+- Then no `container build` is invoked and create uses the existing tag
+- And stderr includes `==> Reusing image` when quiet mode is unset
+
+#### Scenario: skip-pull does not skip local Dockerfile build
+
+- Given nested `build` and `--skip-pull`, and the product tag does not exist locally
+- When `up`, `clone`, or `rebuild` runs
+- Then the local Dockerfile build still runs (or fails as a dockerfile build), and `--skip-pull` does not skip it
+
+#### Scenario: build.args map to --build-arg or fail naming args
+
+- Given nested `build.args` as a string map
+- When the Dockerfile build runs
+- Then each pair is passed to `container build` as `--build-arg`
+- And if the runtime does not accept `--build-arg`, the command fails structured naming `args` and does not invent a workaround
+
+#### Scenario: build.target maps to --target or fail naming target
+
+- Given nested `build.target` as a string
+- When the Dockerfile build runs
+- Then `container build` includes `--target` with that value
+- And if the runtime does not accept `--target`, the command fails structured naming `target` and does not invent a workaround
+
+#### Scenario: Missing dockerfile file fails structured
+
+- Given nested `build.dockerfile` that does not exist on disk after resolve
+- When a create path runs
+- Then the CLI fails with a structured `dockerfile_build` error naming property `build` and creates no container
+
+#### Scenario: Missing context directory fails structured
+
+- Given nested `build.context` that does not exist as a directory after resolve
+- When a create path runs
+- Then the CLI fails with a structured `dockerfile_build` error naming property `build` and creates no container
+
+#### Scenario: Progress Building image during dockerfile build
+
+- Given nested `build`, quiet mode unset, and the product tag missing
+- When the Dockerfile build runs
+- Then stderr includes `==> Building image` in the StatusPrinter family
+
+#### Scenario: Dockerfile build failure is not Features-branded
+
+- Given `container build` of the user Dockerfile exits non-zero
+- When the Dockerfile path runs
+- Then the CLI fails with code `dockerfile_build` and property `build`
+- And the error is not Features-branded (`feature_build` / property `features`)
+- And no managed dev container is created
+
+#### Scenario: build.rosetta gate runs before dockerfile build
+
+- Given nested `build` on a create path and effective `build.rosetta` is not already `false`
+- When the Dockerfile path starts
+- Then the same `build.rosetta=false` consent gate as Features runs before `container build`
+- And when Features also run on that path, the gate runs at most once
+
+#### Scenario: Clone in-directory dockerfile builds
+
+- Given clone config `.devcontainer.json` at the repo root with sibling `Dockerfile` and `build.context` `"."` (or `.devcontainer/devcontainer.json` with dockerfile and context inside that directory)
+- When the user runs `adevcontainer clone <git-url>`
+- Then clone materializes those files, the Dockerfile path runs, and create uses the product Dockerfile tag (then Features when admitted)
+
+#### Scenario: Clone context parent is rejected
+
+- Given a clone config whose `build.context` or dockerfile path resolves outside the config-file directory via `..`
+- When clone resolve or the Dockerfile path runs
+- Then the CLI fails closed with a structured error naming property `build` and does not create a container
+
+#### Scenario: Bind up may use context parent
+
+- Given bind-mode `.devcontainer/devcontainer.json` with nested `build.context` `".."` whose resolved context is the workspace root
+- When the user runs `adevcontainer up`
+- Then admission does not fail solely because context is `".."`, and the Dockerfile path uses that context
+
+#### Scenario: Rebuild takes the dockerfile path
+
+- Given a managed container whose current config has nested `build`, and the deterministic product Dockerfile tag already exists locally
+- When the user runs `adevcontainer rebuild --name <that-name>`
+- Then `container build` is invoked (the same tag name is allowed) so unhashed COPY sources are picked up
+- And the replacement create path uses the product Dockerfile tag before create (and before old-container delete on the Features pre-delete gate when Features are also present)
+- And stderr includes `==> Building image` when quiet mode is unset
+
+#### Scenario: Volume-mode rebuild uses real Dockerfile bytes
+
+- Given a clone-origin / volume-mode managed container whose current config has nested `build`
+- When the user runs `adevcontainer rebuild --name <that-name>`
+- Then the product stages the config-file directory (not the whole workspace) so the tag hash uses real Dockerfile bytes (not empty) and `container build` can run
+
+#### Scenario: Volume-mode rebuild root-sibling context stages config-dir siblings
+
+- Given a clone-origin / volume-mode managed container whose config is root `.devcontainer.json` with a sibling `Dockerfile` and `build.context` `"."`
+- When the user runs `adevcontainer rebuild --name <that-name>`
+- Then staged context includes files at that config-file directory level (root files and same-level siblings), not only the Dockerfile file
+- And `src/` and other unfetched workspace trees are not required as context
+- And `context: "."` is not skipped
+
+#### Scenario: Volume-mode rebuild missing dockerfile material fails before delete
+
+- Given a clone-origin / volume-mode managed container whose current config has nested `build`, and the stamped guest dockerfile or context is missing
+- When the user runs `adevcontainer rebuild --name <that-name>`
+- Then the CLI fails with a structured `dockerfile_build` error naming property `build`
+- And the old container is not deleted
+
+#### Scenario: Features FROM the dockerfile tag when both are present
+
+- Given a config with nested `build` and a non-empty admitted `features` map
+- When `up`, `clone`, or `rebuild` runs a fresh create path
+- Then the user Dockerfile is built or reused first on `up`/`clone`, and `container build` runs first on `rebuild`
+- And Features `FROM`s that product Dockerfile tag (not a config `image`)
+- And create uses the Features derived tag
+
+#### Scenario: Rebuild with nested build rebuilds Features even when derived tag exists
+
+- Given a config with nested `build` and admitted Features, and the Features derived tag already exists locally
+- When the user runs `adevcontainer rebuild --name <that-name>`
+- Then Features `container build` is invoked even though that derived tag exists (the same tag name is allowed)
+- And Features `FROM`s the product Dockerfile tag
+- And the operator is not required to delete images
+
+#### Scenario: Dockerfile-only create does not require Features build
+
+- Given nested `build` and no `features` key (or empty features)
+- When a fresh create path runs
+- Then create uses the product Dockerfile tag and the Features build path is not required
+
+---
+
+### Requirement: Dockerfile hash material and product tag identity
+
+Config hash material MUST include the resolved dockerfile path, context, args, target, and the Dockerfile file bytes. Changing any of those MUST change the config hash so `up` drift detection (`config_hash_mismatch`) and rebuild identity remain correct.
+
+The build-context tree (COPY sources other than the Dockerfile file itself) MUST NOT be hashed. Changing only those files MUST NOT by itself change the config hash or the product tag; the operator runs `rebuild` to pick up those changes.
+
+The product Dockerfile tag hash12 MUST be computed from Dockerfile file bytes + context path + args + target only, and MUST NOT use the Features derived-tag format `adev-{base}:{hash12}` or Features `recipeVersion` material.
+
+#### Scenario: Dockerfile bytes and build fields change config hash
+
+- Given two configs that differ only in dockerfile path, context, args, target, or Dockerfile file bytes
+- When config hashes are computed
+- Then the hashes differ
+
+#### Scenario: Context tree is not hashed
+
+- Given two workspaces with identical dockerfile path, context path, args, target, and Dockerfile file bytes, but different other files under the context directory
+- When config hashes and product Dockerfile tags are computed
+- Then the hashes and tags are equal
+
+#### Scenario: Product Dockerfile tag is distinct from Features tag
+
+- Given a dockerfile-only build with a non-empty human base
+- When the product Dockerfile tag is computed
+- Then the tag is `adev-{base}-df:{hash12}` and MUST NOT equal Features `adev-{base}:{hash12}` or contain a `/features` path segment
+
+---
+
+### Requirement: Dockerfile reference example
+
+The repository MUST provide `references/dockerfile/` containing `.devcontainer.json` (nested `build`, no top-level `image`) and a sibling `Dockerfile` whose `FROM` is a small image and which does not require privileged or Docker-in-Docker. `references/README.md` MUST mention this example. The example MUST admit under this change.
+
+#### Scenario: dockerfile reference admits
+
+- Given `references/dockerfile/.devcontainer.json` and its sibling `Dockerfile`
+- When the example is admitted and resolved
+- Then nested `build` admits, no Compose or privileged/DinD requirement is present, and validation does not fail solely because `image` is omitted

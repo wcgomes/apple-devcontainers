@@ -348,13 +348,72 @@ public enum RebuildCommand {
         // reuse; any failure fails before delete).
         var knownOCIUser: String?? = nil
         var knownMetadataUsers: DevContainerMetadataLabel.ImageMetadataUsers? = nil
-        if !effectiveConfig.features.isEmpty {
+        var didEnsureRosetta = false
+        if let dfBuild = effectiveConfig.dockerfileBuild {
             if let ensureNativeArmBuildOverride {
                 try ensureNativeArmBuildOverride()
             } else {
                 try AppleContainerConfig.ensureNativeArmBuild(runtime: runtime)
             }
-            if !options.skipPull {
+            didEnsureRosetta = true
+            var stagedDockerfileRoot: URL?
+            defer {
+                if let stagedDockerfileRoot {
+                    removeStagedInitializeRoot(stagedDockerfileRoot, fileManager: fileManager)
+                }
+            }
+            let configDir: String
+            if isVolumeMode {
+                guard let volumeRead else {
+                    throw CLIError(
+                        code: CLIErrorCode.dockerfileBuild,
+                        property: "build",
+                        message: "Volume-mode rebuild cannot load the Dockerfile without a readable guest config",
+                        hint: "The old container was not deleted"
+                    )
+                }
+                let staged = try stageGuestInitializeWorkspace(
+                    containerId: selected.id,
+                    raw: volumeRead.raw,
+                    runtime: runtime,
+                    fileManager: fileManager,
+                    errorCode: CLIErrorCode.dockerfileBuild,
+                    property: "build",
+                    purpose: "dockerfile build",
+                    tempPrefix: "adev-df",
+                    dockerfileBuild: dfBuild
+                )
+                stagedDockerfileRoot = staged
+                configDir = stagedFeatureConfigDirectory(staged: staged, raw: volumeRead.raw)
+            } else {
+                let configFile = labels[ContainerIdentity.labelConfigFile] ?? ""
+                configDir = (configFile as NSString).deletingLastPathComponent
+            }
+            let nameBase = derivedNameBase(
+                labels: labels,
+                config: resolvedConfig,
+                isVolumeMode: isVolumeMode
+            )
+            let built = try DockerfileImageBuilder.buildOrReuse(
+                build: dfBuild,
+                configDirectory: configDir,
+                nameBase: nameBase,
+                runtime: runtime,
+                platform: platform,
+                requireInsideConfigDirectory: isVolumeMode,
+                forceBuild: true
+            )
+            effectiveConfig.image = built.tag
+        }
+        if !effectiveConfig.features.isEmpty {
+            if !didEnsureRosetta {
+                if let ensureNativeArmBuildOverride {
+                    try ensureNativeArmBuildOverride()
+                } else {
+                    try AppleContainerConfig.ensureNativeArmBuild(runtime: runtime)
+                }
+            }
+            if !options.skipPull, effectiveConfig.dockerfileBuild == nil {
                 StatusPrinter.status("Pulling image", item: effectiveConfig.image)
                 try? runtime.pullImage(effectiveConfig.image, platform: platform)
             }
@@ -425,7 +484,8 @@ public enum RebuildCommand {
                 remoteUser: effectiveConfig.remoteUser,
                 containerUser: effectiveConfig.containerUser,
                 nameBase: nameBase,
-                compatibilityMode: compatibilityMode
+                compatibilityMode: compatibilityMode,
+                forceBuild: effectiveConfig.dockerfileBuild != nil
             )
             let beforeFeatures = effectiveConfig.compatibilityReport
             effectiveConfig = try FeatureContributionMerge.apply(
@@ -441,7 +501,7 @@ public enum RebuildCommand {
             }
             knownMetadataUsers = featuresResult.metadataUsers
         } else {
-            if !options.skipPull {
+            if !options.skipPull, effectiveConfig.dockerfileBuild == nil {
                 StatusPrinter.status("Pulling image", item: effectiveConfig.image)
                 try? runtime.pullImage(effectiveConfig.image, platform: platform)
             }
@@ -1276,6 +1336,7 @@ public enum RebuildCommand {
 
     /// Place the current guest `.devcontainer/` (when present) and/or root
     /// `.devcontainer.json` onto a host temp workspace root. Not a full checkout.
+    /// Root-sibling dockerfile/context members are staged when `dockerfileBuild` is set.
     private static func stageGuestInitializeWorkspace(
         containerId: String,
         raw: RawVolumeConfig,
@@ -1284,7 +1345,8 @@ public enum RebuildCommand {
         errorCode: String = CLIErrorCode.lifecycleFailed,
         property: String = "initializeCommand",
         purpose: String = "initializeCommand",
-        tempPrefix: String = "adev-init"
+        tempPrefix: String = "adev-init",
+        dockerfileBuild: DockerfileBuild? = nil
     ) throws -> URL {
         let tempDir = fileManager.temporaryDirectory
             .appendingPathComponent("\(tempPrefix)-\(UUID().uuidString)", isDirectory: true)
@@ -1338,6 +1400,39 @@ public enum RebuildCommand {
                 try raw.bytes.write(
                     to: tempDir.appendingPathComponent(ConfigDiscovery.rootRelativePath)
                 )
+                if let build = dockerfileBuild {
+                    for relative in [build.dockerfile, build.context] {
+                        let trimmed = relative.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.isEmpty { continue }
+                        if (trimmed as NSString).pathComponents.contains("..") { continue }
+                        if trimmed == "." {
+                            try extractGuestConfigDirSiblings(
+                                containerId: containerId,
+                                workspaceFolder: raw.workspaceFolder,
+                                dest: tempDir,
+                                runtime: runtime,
+                                fileManager: fileManager,
+                                errorCode: errorCode,
+                                property: property,
+                                purpose: purpose,
+                                archivePrefix: tempPrefix
+                            )
+                            continue
+                        }
+                        try extractGuestDevcontainerArchive(
+                            containerId: containerId,
+                            workspaceFolder: raw.workspaceFolder,
+                            dest: tempDir,
+                            runtime: runtime,
+                            fileManager: fileManager,
+                            errorCode: errorCode,
+                            property: property,
+                            purpose: purpose,
+                            archivePrefix: tempPrefix,
+                            member: trimmed
+                        )
+                    }
+                }
             }
             return tempDir
         } catch {
@@ -1358,7 +1453,65 @@ public enum RebuildCommand {
         return (staged.path as NSString).appendingPathComponent(".devcontainer")
     }
 
-    /// `exec tar cf -` of guest `.devcontainer/` then host `tar xf`. Not `container cp`.
+    /// Same-level files in the guest config-file directory (workspace root for root-sibling).
+    /// Used when `build.context` is `"."` so COPY sources are staged without tarring member `"."`.
+    private static func extractGuestConfigDirSiblings(
+        containerId: String,
+        workspaceFolder: String,
+        dest: URL,
+        runtime: AppleContainerRuntime,
+        fileManager: FileManager,
+        errorCode: String,
+        property: String,
+        purpose: String,
+        archivePrefix: String
+    ) throws {
+        let listing: ProcessResult
+        do {
+            listing = try runtime.exec(
+                nameOrId: containerId,
+                command: ["find", workspaceFolder, "-maxdepth", "1", "-type", "f"]
+            )
+        } catch {
+            throw CLIError(
+                code: errorCode,
+                property: property,
+                message: "Failed to list guest config-dir files for \(purpose)",
+                hint: "The container must be running so rebuild can stage the guest config directory"
+            )
+        }
+        guard listing.succeeded else {
+            throw CLIError(
+                code: errorCode,
+                property: property,
+                message: "Failed to list guest config-dir files for \(purpose)",
+                hint: "The container must be running so rebuild can stage the guest config directory"
+            )
+        }
+        var seen: Set<String> = []
+        for line in listing.stdoutString.split(whereSeparator: \.isNewline) {
+            let name = (String(line) as NSString).lastPathComponent
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.isEmpty || name == "." || name == ".." { continue }
+            if (name as NSString).pathComponents.contains("..") { continue }
+            if seen.contains(name) { continue }
+            seen.insert(name)
+            try extractGuestDevcontainerArchive(
+                containerId: containerId,
+                workspaceFolder: workspaceFolder,
+                dest: dest,
+                runtime: runtime,
+                fileManager: fileManager,
+                errorCode: errorCode,
+                property: property,
+                purpose: purpose,
+                archivePrefix: archivePrefix,
+                member: name
+            )
+        }
+    }
+
+    /// `exec tar cf -` of a guest workspace member then host `tar xf`. Not `container cp`.
     private static func extractGuestDevcontainerArchive(
         containerId: String,
         workspaceFolder: String,
@@ -1368,19 +1521,20 @@ public enum RebuildCommand {
         errorCode: String = CLIErrorCode.lifecycleFailed,
         property: String = "initializeCommand",
         purpose: String = "initializeCommand",
-        archivePrefix: String = "adev-init"
+        archivePrefix: String = "adev-init",
+        member: String = ".devcontainer"
     ) throws {
         let archive: ProcessResult
         do {
             archive = try runtime.exec(
                 nameOrId: containerId,
-                command: ["tar", "cf", "-", "-C", workspaceFolder, ".devcontainer"]
+                command: ["tar", "cf", "-", "-C", workspaceFolder, member]
             )
         } catch {
             throw CLIError(
                 code: errorCode,
                 property: property,
-                message: "Failed to archive guest .devcontainer for \(purpose)",
+                message: "Failed to archive guest \(member) for \(purpose)",
                 hint: "The container must be running and tar must be available in the image"
             )
         }
@@ -1388,7 +1542,7 @@ public enum RebuildCommand {
             throw CLIError(
                 code: errorCode,
                 property: property,
-                message: "Failed to archive guest .devcontainer for \(purpose)",
+                message: "Failed to archive guest \(member) for \(purpose)",
                 hint: "The container must be running and tar must be available in the image"
             )
         }
@@ -1401,7 +1555,7 @@ public enum RebuildCommand {
             throw CLIError(
                 code: errorCode,
                 property: property,
-                message: "Failed to stage guest .devcontainer archive for \(purpose)",
+                message: "Failed to stage guest \(member) archive for \(purpose)",
                 hint: "Ensure the invoking user can write its temporary directory"
             )
         }
@@ -1417,7 +1571,7 @@ public enum RebuildCommand {
             throw CLIError(
                 code: errorCode,
                 property: property,
-                message: "Failed to extract guest .devcontainer for \(purpose)",
+                message: "Failed to extract guest \(member) for \(purpose)",
                 hint: "Ensure /usr/bin/tar is available"
             )
         }
