@@ -98,10 +98,13 @@ If no container exists, inspect MUST fail structurally or report not-found consi
 | Workspace container | Yes |
 | Named volumes from config `mounts` (`type=volume`) via `devcontainer.config_volumes` label | Yes, **only when unreferenced** after target container delete (see volume attachment gate) |
 | Config `image` reference (from runtime inspect) | Yes |
+| Product-built Dockerfile tag for dockerfile-only creates | Yes — stamped identity includes that tag so dockerfile-only purge can delete it |
 | **Workspace volume for volume-mode** (`devcontainer.workspace_volume` / deterministic `*-ws` name) | **Yes, only when unreferenced** after target container delete |
 | Derived Features tags | No (unless equal to config `image`) |
 | Bind-mount host paths | No |
 | Global volume/image prune | No |
+
+Features-derived tags keep that existing purge policy. Dockerfile-only creates MUST stamp the product Dockerfile tag so purge can treat it as the config image to delete.
 
 **Identity and candidates (unchanged intent):**
 
@@ -223,6 +226,18 @@ For each existing candidate volume name:
 - Given any managed container
 - When the user runs ordinary `adevcontainer delete --name <that-name>`
 - Then only the container is removed; named volumes are not deleted by `delete`, and no force-volumes flag is required or introduced by this change
+
+#### Scenario: Purge dockerfile-only deletes the product Dockerfile tag
+
+- Given a dockerfile-only managed container whose create image is the product Dockerfile tag `adev-{base}-df:{hash12}` (or `adevcontainer-df:{hash12}`)
+- When the user runs `adevcontainer purge --name <that-name>`
+- Then the container is gone and that product Dockerfile tag is removed as the config image
+
+#### Scenario: Purge does not delete Features-derived tags solely because dockerfile was used
+
+- Given a managed container created from nested `build` plus Features, whose running image is a Features derived tag
+- When the user runs `adevcontainer purge --name <that-name>`
+- Then Features-derived tags are not removed unless they equal the config `image` under the existing purge policy
 
 ---
 

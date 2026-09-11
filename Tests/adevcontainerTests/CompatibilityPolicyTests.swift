@@ -168,7 +168,7 @@ nonisolated(unsafe) let compatibilityPolicyTests: [(String, () throws -> Void)] 
         }
     }),
     ("unrepresentableSourceSelectorRemainsBlocked", {
-        for key in ["build", "dockerFile", "dockerComposeFile"] {
+        for key in ["dockerFile", "dockerfile", "context", "dockerComposeFile"] {
             try MiniTest.expectThrows({
                 try ConfigAdmissions.admit(["image": "alpine:3.20", key: ["context": "."] as [String: Any]])
             }) { error in
@@ -177,6 +177,186 @@ nonisolated(unsafe) let compatibilityPolicyTests: [(String, () throws -> Void)] 
                 try MiniTest.expectEqual(err.property, key)
             }
         }
+        try MiniTest.expectThrows({
+            try ConfigAdmissions.admit([
+                "dockerComposeFile": "compose.yaml",
+                "build": ["dockerfile": "Dockerfile"] as [String: Any]
+            ])
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).property, "dockerComposeFile")
+        }
+    }),
+    ("nestedBuildWithoutImageAdmits", {
+        try ConfigAdmissions.admit([
+            "build": ["dockerfile": "Dockerfile"] as [String: Any]
+        ])
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "build": { "dockerfile": "Dockerfile", "target": "dev" } }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        let build = resolved.config.dockerfileBuild
+        try MiniTest.expect(build != nil, "resolved model must carry nested build")
+        try MiniTest.expectEqual(build?.dockerfile, "Dockerfile")
+        try MiniTest.expectEqual(build?.context, ".")
+        try MiniTest.expectEqual(build?.target, "dev")
+        try MiniTest.expectEqual(build?.args ?? [:], [:])
+        try MiniTest.expect(resolved.config.image.isEmpty)
+    }),
+    ("imageAndNestedBuildTogetherFail", {
+        try MiniTest.expectThrows({
+            try ConfigAdmissions.admit([
+                "image": "alpine:3.20",
+                "build": ["dockerfile": "Dockerfile"] as [String: Any]
+            ])
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.property, "build")
+            try MiniTest.expect(err.message.lowercased().contains("image") || err.message.contains("both"))
+        }
+    }),
+    ("neitherImageNorNestedBuildFails", {
+        try MiniTest.expectThrows({
+            try ConfigAdmissions.admit(["name": "empty"] as [String: Any])
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(err.property == "image" || err.property == "build")
+        }
+    }),
+    ("topLevelDockerfileSelectorsRemainBlocked", {
+        for key in ["dockerFile", "dockerfile", "context"] {
+            try MiniTest.expectThrows({
+                try ConfigAdmissions.admit([
+                    "build": ["dockerfile": "Dockerfile"] as [String: Any],
+                    key: key == "context" ? "." : "Dockerfile"
+                ])
+            }) { error in
+                let err = error as! CLIError
+                try MiniTest.expectEqual(err.code, CLIErrorCode.unsupportedProperty)
+                try MiniTest.expectEqual(err.property, key)
+            }
+        }
+    }),
+    ("unknownNestedBuildKeyFailsClosed", {
+        for key in ["options", "cacheFrom", "cacheTo", "argsFrom"] {
+            try MiniTest.expectThrows({
+                try ConfigAdmissions.admit([
+                    "build": [
+                        "dockerfile": "Dockerfile",
+                        key: "nope"
+                    ] as [String: Any]
+                ])
+            }) { error in
+                let err = error as! CLIError
+                try MiniTest.expectEqual(err.property, "build")
+                try MiniTest.expect(err.message.contains(key), "unknown key \(key) must be named")
+            }
+        }
+    }),
+    ("missingBuildDockerfileFails", {
+        try MiniTest.expectThrows({
+            try ConfigAdmissions.admit(["build": ["context": "."] as [String: Any]])
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).property, "build")
+        }
+        try MiniTest.expectThrows({
+            try ConfigAdmissions.admit(["build": ["dockerfile": ""] as [String: Any]])
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).property, "build")
+        }
+        try MiniTest.expectThrows({
+            try ConfigAdmissions.admit(["build": "Dockerfile"])
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).property, "build")
+        }
+    }),
+    ("omittedBuildContextDefaultsToDot", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "build": { "dockerfile": "Dockerfile" } }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        try MiniTest.expectEqual(resolved.config.dockerfileBuild?.context, ".")
+    }),
+    ("nonStringBuildArgsOrTargetFailsClosed", {
+        try MiniTest.expectThrows({
+            try ConfigAdmissions.admit([
+                "build": [
+                    "dockerfile": "Dockerfile",
+                    "args": ["FOO": 1] as [String: Any]
+                ] as [String: Any]
+            ])
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).property, "build")
+        }
+        try MiniTest.expectThrows({
+            try ConfigAdmissions.admit([
+                "build": [
+                    "dockerfile": "Dockerfile",
+                    "target": 1
+                ] as [String: Any]
+            ])
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).property, "build")
+        }
+        try MiniTest.expectThrows({
+            try ConfigAdmissions.admit([
+                "build": [
+                    "dockerfile": "Dockerfile",
+                    "args": ["a", "b"] as [Any]
+                ] as [String: Any]
+            ])
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).property, "build")
+        }
+    }),
+    ("buildArgsReceiveSubstitution", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "build": {
+            "dockerfile": "Dockerfile",
+            "args": {
+              "WS": "${localWorkspaceFolder}",
+              "ENV": "${localEnv:HELLO}"
+            }
+          }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        try TestRepo.writeFile("FROM alpine:3.20\n", relativePath: ".devcontainer/Dockerfile", in: ws)
+        let resolved = try ConfigResolver.resolve(
+            workspacePath: ws.path,
+            localEnv: ["HELLO": "world"]
+        )
+        try MiniTest.expectEqual(resolved.config.dockerfileBuild?.args["WS"], ws.path)
+        try MiniTest.expectEqual(resolved.config.dockerfileBuild?.args["ENV"], "world")
+    }),
+    ("nestedBuildIsOnTheSupportedSurface", {
+        try ConfigAdmissions.admit([
+            "name": "df",
+            "build": [
+                "dockerfile": "Dockerfile",
+                "context": ".",
+                "args": ["A": "b"] as [String: Any],
+                "target": "dev"
+            ] as [String: Any],
+            "remoteUser": "root"
+        ])
+    }),
+    ("dockerfileReferenceAdmits", {
+        let root = TestRepo.root().appendingPathComponent("references/dockerfile")
+        let configPath = root.appendingPathComponent(".devcontainer.json").path
+        let raw = try JSONCParser.loadFile(at: configPath)
+        try MiniTest.expect(raw["image"] == nil)
+        try MiniTest.expect(raw["dockerComposeFile"] == nil)
+        try MiniTest.expect(raw["privileged"] == nil)
+        try ConfigAdmissions.admit(raw)
+        let resolved = try ConfigResolver.resolve(workspacePath: root.path, localEnv: [:])
+        try MiniTest.expect(resolved.config.dockerfileBuild != nil)
+        try MiniTest.expectEqual(resolved.config.dockerfileBuild?.dockerfile, "Dockerfile")
+        try MiniTest.expect(resolved.config.image.isEmpty)
     }),
     ("materialWorkspaceOrProcessMismatchRemainsBlocked", {
         try MiniTest.expectThrows({

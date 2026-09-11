@@ -345,14 +345,36 @@ public enum CloneCommand {
         }
         effectiveConfig.features = gitEnsure.features
 
-        // Features path (same as up create; list may include clone-injected git)
-        if !effectiveConfig.features.isEmpty {
+        var didEnsureRosetta = false
+        if let dfBuild = effectiveConfig.dockerfileBuild {
             if let override = ensureNativeArmBuildOverride {
                 try override()
             } else {
                 try AppleContainerConfig.ensureNativeArmBuild(runtime: runtime)
             }
-            if !options.skipPull {
+            didEnsureRosetta = true
+            let configDir = (resolved.configPath as NSString).deletingLastPathComponent
+            let built = try DockerfileImageBuilder.buildOrReuse(
+                build: dfBuild,
+                configDirectory: configDir,
+                nameBase: identity.base,
+                runtime: runtime,
+                platform: platform,
+                requireInsideConfigDirectory: true
+            )
+            effectiveConfig.image = built.tag
+        }
+
+        // Features path (same as up create; list may include clone-injected git)
+        if !effectiveConfig.features.isEmpty {
+            if !didEnsureRosetta {
+                if let override = ensureNativeArmBuildOverride {
+                    try override()
+                } else {
+                    try AppleContainerConfig.ensureNativeArmBuild(runtime: runtime)
+                }
+            }
+            if !options.skipPull, effectiveConfig.dockerfileBuild == nil {
                 StatusPrinter.status("Pulling image", item: resolved.config.image)
                 try? runtime.pullImage(resolved.config.image, platform: platform)
             }
@@ -370,7 +392,7 @@ public enum CloneCommand {
             )
             let featuresResult = try FeaturesRunner.run(
                 features: effectiveConfig.features,
-                baseImage: resolved.config.image,
+                baseImage: effectiveConfig.image,
                 deps: deps,
                 remoteUser: resolved.config.remoteUser,
                 containerUser: resolved.config.containerUser,
@@ -391,7 +413,7 @@ public enum CloneCommand {
             }
             knownMetadataUsers = featuresResult.metadataUsers
         } else {
-            if !options.skipPull {
+            if !options.skipPull, effectiveConfig.dockerfileBuild == nil {
                 StatusPrinter.status("Pulling image", item: effectiveConfig.image)
                 try? runtime.pullImage(effectiveConfig.image, platform: platform)
             }

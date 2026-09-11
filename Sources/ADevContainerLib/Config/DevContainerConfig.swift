@@ -242,10 +242,36 @@ public enum ShutdownAction: String, Equatable, Sendable {
     }
 }
 
+/// Admitted nested `build` (user Dockerfile). Paths are as written after substitution.
+public struct DockerfileBuild: Equatable, Sendable {
+    public var dockerfile: String
+    public var context: String
+    public var args: [String: String]
+    public var target: String?
+    /// Dockerfile file bytes when readable at resolve time (empty if missing).
+    public var dockerfileBytes: Data
+
+    public init(
+        dockerfile: String,
+        context: String = ".",
+        args: [String: String] = [:],
+        target: String? = nil,
+        dockerfileBytes: Data = Data()
+    ) {
+        self.dockerfile = dockerfile
+        self.context = context
+        self.args = args
+        self.target = target
+        self.dockerfileBytes = dockerfileBytes
+    }
+}
+
 /// Fully resolved devcontainer config ready for runtime mapping.
 public struct ResolvedDevContainerConfig: Equatable {
     public var name: String?
     public var image: String
+    /// Present when nested `build` was admitted (xor with a non-empty `image`).
+    public var dockerfileBuild: DockerfileBuild?
     public var containerEnv: [String: String]
     public var remoteUser: String?
     public var containerUser: String?
@@ -287,6 +313,7 @@ public struct ResolvedDevContainerConfig: Equatable {
     public init(
         name: String? = nil,
         image: String,
+        dockerfileBuild: DockerfileBuild? = nil,
         containerEnv: [String: String] = [:],
         remoteUser: String? = nil,
         containerUser: String? = nil,
@@ -318,6 +345,7 @@ public struct ResolvedDevContainerConfig: Equatable {
     ) {
         self.name = name
         self.image = image
+        self.dockerfileBuild = dockerfileBuild
         self.containerEnv = containerEnv
         self.remoteUser = remoteUser
         self.containerUser = containerUser
@@ -392,7 +420,6 @@ public struct ResolvedDevContainerConfig: Equatable {
     /// Fields used for config hash / drift detection.
     public func hashMaterial() -> [String: Any] {
         var m: [String: Any] = [
-            "image": image,
             "workspaceFolder": workspaceFolder,
             "containerEnv": containerEnv,
             "forwardPorts": forwardPorts.map { $0 as Any },
@@ -405,6 +432,14 @@ public struct ResolvedDevContainerConfig: Equatable {
                 ]
             }
         ]
+        if !image.isEmpty { m["image"] = image }
+        if let dockerfileBuild {
+            m["build.dockerfile"] = dockerfileBuild.dockerfile
+            m["build.context"] = dockerfileBuild.context
+            m["build.args"] = dockerfileBuild.args
+            if let target = dockerfileBuild.target { m["build.target"] = target }
+            m["build.dockerfileBytes"] = dockerfileBuild.dockerfileBytes.base64EncodedString()
+        }
         if let remoteUser { m["remoteUser"] = remoteUser }
         if let containerUser { m["containerUser"] = containerUser }
         if let onCreateCommand { m["onCreateCommand"] = onCreateCommand.hashEncoding }

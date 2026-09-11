@@ -313,9 +313,10 @@ public enum CommandSurface {
           - ADEVCONTAINER_STRICT_COMPATIBILITY=1 fails up/clone/rebuild/start/exec with
             compatibility_degraded before create/start/reuse/exec/build/delete when any
             ignored or emulated issue is present. Exact and harmless inputs still succeed.
-          - Docker Compose keys, Dockerfile build, workspaceMount, remoteEnv,
+          - Docker Compose keys, top-level dockerFile/dockerfile/context, workspaceMount, remoteEnv,
             overrideCommand: false, unknown top-level keys, unknown runArgs, and
-            first-class smuggling still hard-error.
+            first-class smuggling still hard-error. Nested build (dockerfile, context, args, target)
+            is supported; other nested build keys still hard-error.
 
         Exit codes: 0 success, non-zero failure
         """

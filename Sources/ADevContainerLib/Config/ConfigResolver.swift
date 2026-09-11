@@ -83,7 +83,12 @@ public enum ConfigResolver {
         // Re-admit post-substitution (structure unchanged but keeps single path).
         try ConfigAdmissions.admit(subDict)
 
-        var resolved = try buildResolved(subDict, defaultWorkspaceFolder: provisionalFolder)
+        var resolved = try buildResolved(
+            subDict,
+            defaultWorkspaceFolder: provisionalFolder,
+            configPath: path,
+            fileManager: fileManager
+        )
         let normalized = MountNormalizer.normalize(mounts: resolved.mounts, fileManager: fileManager)
         resolved.mounts = normalized.mounts
         for promotion in normalized.promotions {
@@ -123,14 +128,20 @@ public enum ConfigResolver {
 
     private static func buildResolved(
         _ raw: [String: Any],
-        defaultWorkspaceFolder: String
+        defaultWorkspaceFolder: String,
+        configPath: String,
+        fileManager: FileManager
     ) throws -> ResolvedDevContainerConfig {
-        guard let image = raw["image"] as? String, !image.isEmpty else {
-            throw CLIError(
-                code: CLIErrorCode.unsupportedProperty,
-                property: "image",
-                message: "Property 'image' is required"
-            )
+        let dockerfileBuild = try parseDockerfileBuild(
+            raw["build"],
+            configPath: configPath,
+            fileManager: fileManager
+        )
+        let image: String
+        if let img = raw["image"] as? String, !img.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            image = img
+        } else {
+            image = ""
         }
 
         var env: [String: String] = [:]
@@ -269,6 +280,7 @@ public enum ConfigResolver {
         return ResolvedDevContainerConfig(
             name: raw["name"] as? String,
             image: image,
+            dockerfileBuild: dockerfileBuild,
             containerEnv: env,
             remoteUser: remoteUser,
             containerUser: containerUser,
@@ -292,6 +304,86 @@ public enum ConfigResolver {
             vscodeSettingsJSON: vscode.settingsJSON,
             features: parsedFeatures.features,
             compatibilityReport: report
+        )
+    }
+
+    private static func parseDockerfileBuild(
+        _ raw: Any?,
+        configPath: String,
+        fileManager: FileManager
+    ) throws -> DockerfileBuild? {
+        guard let raw else { return nil }
+        guard let obj = raw as? [String: Any] else {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: "build",
+                message: "build must be an object"
+            )
+        }
+        guard let dockerfile = obj["dockerfile"] as? String,
+              !dockerfile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw CLIError(
+                code: CLIErrorCode.unsupportedProperty,
+                property: "build",
+                message: "build.dockerfile must be a non-empty string"
+            )
+        }
+        let context: String
+        if let rawContext = obj["context"] {
+            guard let s = rawContext as? String else {
+                throw CLIError(
+                    code: CLIErrorCode.unsupportedProperty,
+                    property: "build",
+                    message: "build.context must be a string"
+                )
+            }
+            context = s.isEmpty ? "." : s
+        } else {
+            context = "."
+        }
+        var args: [String: String] = [:]
+        if let rawArgs = obj["args"] {
+            guard let map = rawArgs as? [String: Any] else {
+                throw CLIError(
+                    code: CLIErrorCode.unsupportedProperty,
+                    property: "build",
+                    message: "build.args must be an object of string values"
+                )
+            }
+            for key in map.keys.sorted() {
+                guard let value = map[key] as? String else {
+                    throw CLIError(
+                        code: CLIErrorCode.unsupportedProperty,
+                        property: "build",
+                        message: "build.args values must be strings"
+                    )
+                }
+                args[key] = value
+            }
+        }
+        let target: String?
+        if let rawTarget = obj["target"] {
+            guard let s = rawTarget as? String else {
+                throw CLIError(
+                    code: CLIErrorCode.unsupportedProperty,
+                    property: "build",
+                    message: "build.target must be a string"
+                )
+            }
+            target = s
+        } else {
+            target = nil
+        }
+        let configDir = (configPath as NSString).deletingLastPathComponent
+        let dockerfilePath = (configDir as NSString).appendingPathComponent(dockerfile)
+        let bytes = fileManager.contents(atPath: dockerfilePath) ?? Data()
+        return DockerfileBuild(
+            dockerfile: dockerfile,
+            context: context,
+            args: args,
+            target: target,
+            dockerfileBytes: bytes
         )
     }
 

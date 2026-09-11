@@ -383,15 +383,23 @@ public struct AppleContainerRuntime: Sendable {
         }
     }
 
-    /// Build a local image via `container build` (Features derived image path).
+    /// Build a local image via `container build`.
     /// Always pass host-native `--platform` on arm64; never passes `--rosetta`.
     /// If the BuildKit builder was not running before the build, stops it again afterward
     /// (success or failure) so a side-effect start does not leave it running.
+    ///
+    /// Features callers keep `feature_build` / `features`. User-Dockerfile callers pass
+    /// `dockerfile_build` / `build`. If Apple rejects `--build-arg` or `--target`, fail
+    /// naming `args` or `target` — no workaround.
     public func build(
         contextDirectory: String,
         dockerfilePath: String,
         tag: String,
-        platform: String? = ContainerPlatform.defaultLinuxPlatform
+        platform: String? = ContainerPlatform.defaultLinuxPlatform,
+        buildArgs: [String: String] = [:],
+        target: String? = nil,
+        errorCode: String = CLIErrorCode.featureBuild,
+        errorProperty: String = "features"
     ) throws {
         let wasRunning = isBuilderRunning()
         defer {
@@ -403,16 +411,54 @@ public struct AppleContainerRuntime: Sendable {
         if let platform, !platform.isEmpty {
             args += ["--platform", platform]
         }
+        for key in buildArgs.keys.sorted() {
+            args += ["--build-arg", "\(key)=\(buildArgs[key] ?? "")"]
+        }
+        if let target, !target.isEmpty {
+            args += ["--target", target]
+        }
         args.append(contextDirectory)
         let result = try invoke(args, streamStderr: true)
         if result.succeeded { return }
+        if !buildArgs.isEmpty, stderrIndicatesUnknownFlag(result, flag: "--build-arg") {
+            throw CLIError(
+                code: errorCode,
+                property: "args",
+                message: "Apple container build does not accept --build-arg",
+                hint: "Remove build.args; this runtime does not support build-time arguments"
+            )
+        }
+        if let target, !target.isEmpty, stderrIndicatesUnknownFlag(result, flag: "--target") {
+            throw CLIError(
+                code: errorCode,
+                property: "target",
+                message: "Apple container build does not accept --target",
+                hint: "Remove build.target; this runtime does not support multi-stage targets"
+            )
+        }
         let err = mapFailure(result, action: "build -t \(tag)")
+        let hint: String
+        if errorProperty == "features" {
+            hint = "Inspect the generated Dockerfile and Apple container build logs; ensure build.rosetta=false for native arm64"
+        } else {
+            hint = "Inspect the Dockerfile and Apple container build logs; ensure build.rosetta=false for native arm64"
+        }
         throw CLIError(
-            code: CLIErrorCode.featureBuild,
-            property: "features",
+            code: errorCode,
+            property: errorProperty,
             message: err.message,
-            hint: "Inspect the generated Dockerfile and Apple container build logs; ensure build.rosetta=false for native arm64"
+            hint: hint
         )
+    }
+
+    private func stderrIndicatesUnknownFlag(_ result: ProcessResult, flag: String) -> Bool {
+        let text = (result.stderrString + "\n" + result.stdoutString).lowercased()
+        guard text.contains(flag.lowercased()) else { return false }
+        let markers = [
+            "unknown", "unrecognized", "invalid", "unexpected", "unsupported",
+            "not supported", "illegal", "unrecognised"
+        ]
+        return markers.contains { text.contains($0) }
     }
 
     /// True when a local image with the given reference/tag exists.

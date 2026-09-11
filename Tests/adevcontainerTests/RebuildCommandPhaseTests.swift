@@ -49,6 +49,8 @@ final class RebuildScenario {
     var guestDevcontainerExists = true
     /// `tar cf - -C <workspace> .devcontainer` stdout returned by the mock exec.
     var guestDevcontainerTar: Data?
+    /// Basenames returned by guest `find -maxdepth 1 -type f` (root-sibling context staging).
+    var guestRootFiles: [String] = []
 
     var runtime: AppleContainerRuntime {
         AppleContainerRuntime(executablePath: "container", runner: mock)
@@ -154,6 +156,12 @@ final class RebuildScenario {
             return deleteFails ? fail("delete failed") : ok(Data())
         }
         if args.first == "build" {
+            if !buildFails, let tIdx = args.firstIndex(of: "-t"), tIdx + 1 < args.count {
+                let tag = args[tIdx + 1]
+                if !existingImages.contains(tag) {
+                    existingImages.append(tag)
+                }
+            }
             return buildFails ? fail("build failed") : ok(Data())
         }
         if args.starts(with: ["image", "pull"]) {
@@ -177,6 +185,13 @@ final class RebuildScenario {
             if path.hasSuffix(".devcontainer") {
                 return guestDevcontainerExists ? ok(Data()) : fail("missing")
             }
+        }
+        if let findIdx = args.firstIndex(of: "find"), findIdx + 1 < args.count {
+            let root = args[findIdx + 1]
+            let listing = guestRootFiles.map { name in
+                name.contains("/") ? name : "\(root)/\(name)"
+            }.joined(separator: "\n")
+            return ok(Data(listing.utf8))
         }
         if args.contains("tar"), args.contains("cf") {
             return ProcessResult(exitCode: 0, stdout: guestDevcontainerTar ?? Data(), stderr: Data())
@@ -353,6 +368,36 @@ func makeGuestDevcontainerArchive(files: [String: String]) throws -> Data {
     )
     guard result.succeeded, !result.stdout.isEmpty else {
         throw MiniTest.Failure(message: "failed to build guest .devcontainer archive")
+    }
+    return result.stdout
+}
+
+/// Host-side `tar cf -` of workspace-root members (sibling Dockerfile, not `.devcontainer/`).
+func makeGuestWorkspaceArchive(files: [String: String]) throws -> Data {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("adev-ws-tar-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    for (relative, contents) in files {
+        let url = root.appendingPathComponent(relative)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+    }
+    let members = files.keys.sorted()
+    guard !members.isEmpty else {
+        throw MiniTest.Failure(message: "failed to build guest workspace archive")
+    }
+    let result = try FoundationProcessRunner().run(
+        executable: "/usr/bin/tar",
+        arguments: ["cf", "-", "-C", root.path] + members,
+        environment: nil,
+        currentDirectory: nil
+    )
+    guard result.succeeded, !result.stdout.isEmpty else {
+        throw MiniTest.Failure(message: "failed to build guest workspace archive")
     }
     return result.stdout
 }

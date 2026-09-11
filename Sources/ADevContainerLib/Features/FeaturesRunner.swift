@@ -68,6 +68,12 @@ public enum FeaturesRunner {
     }
 
     /// Resolve, fetch, order, merge contributions, and build (or reuse) a derived image.
+    ///
+    /// - Parameter forceBuild: When true (rebuild with nested `build`), always invoke
+    ///   `container build` even if the derived tag already exists so the force-rebuilt
+    ///   product Dockerfile tag becomes the Features `FROM` base. Same tag name is allowed;
+    ///   does not add `--no-cache` and does not require deleting images. `up`/`clone` omit
+    ///   this and still reuse.
     public static func run(
         features: [AdmittedFeature],
         baseImage: String,
@@ -75,7 +81,8 @@ public enum FeaturesRunner {
         remoteUser: String? = nil,
         containerUser: String? = nil,
         nameBase: String = "",
-        compatibilityMode: CompatibilityMode = .tolerant
+        compatibilityMode: CompatibilityMode = .tolerant,
+        forceBuild: Bool = false
     ) throws -> FeaturesRunnerResult {
         guard !features.isEmpty else {
             throw CLIError(
@@ -156,7 +163,7 @@ public enum FeaturesRunner {
         } catch let err as CLIError {
             // On pure reuse we can still proceed without base USER if derived exists —
             // connection resolution will inspect the derived image. On build, fail closed below.
-            if try deps.runtime.imageExists(ref: derivedImage) {
+            if !forceBuild, try deps.runtime.imageExists(ref: derivedImage) {
                 StatusPrinter.status("Reusing features image", item: derivedImage)
                 return FeaturesRunnerResult(
                     contributions: contributions,
@@ -177,7 +184,7 @@ public enum FeaturesRunner {
                 hint: err.hint ?? "Image inspect must succeed before building a features-derived image"
             )
         } catch {
-            if try deps.runtime.imageExists(ref: derivedImage) {
+            if !forceBuild, try deps.runtime.imageExists(ref: derivedImage) {
                 StatusPrinter.status("Reusing features image", item: derivedImage)
                 return FeaturesRunnerResult(
                     contributions: contributions,
@@ -199,7 +206,7 @@ public enum FeaturesRunner {
             )
         }
 
-        if try deps.runtime.imageExists(ref: derivedImage) {
+        if !forceBuild, try deps.runtime.imageExists(ref: derivedImage) {
             StatusPrinter.status("Reusing features image", item: derivedImage)
             return FeaturesRunnerResult(
                 contributions: contributions,
