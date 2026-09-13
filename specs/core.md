@@ -1557,7 +1557,13 @@ This change MUST NOT use config `name` as the **base** of product-generated Feat
 
 ### Requirement: Workspace parent directories writable on create paths
 
-On the managed create paths — `up` fresh create (bind mode), `clone` (volume mode), and `rebuild` replacement create (bind and volume mode) — the CLI MUST make the container-rootfs parent directories of the resolved container workspace folder writable by the resolved remote connection user before any create-path lifecycle hook (onCreateCommand, updateContentCommand, postCreateCommand, postStartCommand) runs: it MUST create the workspace folder path with `mkdir -p` as needed, then non-recursively `chown` each ancestor directory from the workspace folder's parent upward to the connection user (or `user:user` when a group of that name exists), stopping at the system-top break list — `/`, `/home`, `/Users`, `/var`, `/usr`, `/opt`, `/tmp`, `/root`, `/etc`, `/mnt`, `/media`, `/dev`, `/proc`, `/sys`, `/run`, `/boot`, `/lib`, `/lib64`, `/bin`, `/sbin` — and it MUST NOT chown any break-list entry.
+On the managed create paths — `up` fresh create (bind mode), `clone` (volume mode), and `rebuild` replacement create (bind and volume mode) — the CLI MUST prepare the container-rootfs parent directories of the resolved container workspace folder for the resolved remote connection user before any create-path lifecycle hook (onCreateCommand, updateContentCommand, postCreateCommand, postStartCommand) runs.
+
+When `CAP_CHOWN` is available and `runArgs` does not include `--read-only`, the CLI MUST create the workspace folder path with `mkdir -p` as needed, then non-recursively `chown` each ancestor directory from the workspace folder's parent upward to the connection user (or `user:user` when a group of that name exists), stopping at the system-top break list — `/`, `/home`, `/Users`, `/var`, `/usr`, `/opt`, `/tmp`, `/root`, `/etc`, `/mnt`, `/media`, `/dev`, `/proc`, `/sys`, `/run`, `/boot`, `/lib`, `/lib64`, `/bin`, `/sbin` — and it MUST NOT chown any break-list entry. That parent fix-up MUST be a single exec as `root` (`-u root`). Ancestor `chown` MUST NOT fail the fix-up when the ancestor remains traversable (`chown` of that path, or `[ -x ]` of that path, in the same root exec). Recursive `chown -R` of a volume-mode workspace folder or named-volume target MUST stay strict (no traversable fallback).
+
+When the scoped ownership helper is selected (`--read-only`, or `runArgs` that drop `CAP_CHOWN` without restoring it — see **Read-only rootfs uses the scoped ownership helper**), the CLI MUST NOT chown rootfs parents in the main container. After main start it MUST probe the workspace folder path as the connection user (`test -x`). Inaccessible parents MUST fail with a structured error that they cannot be repaired without `CAP_CHOWN` and a writable root filesystem on the main container.
+
+Create `-u` for a non-root connection user, including image metadata `remoteUser: vscode`, remains as **Create process user**. The normal-path parent fix-up MUST still exec as `root` and MUST NOT be skipped because create used `-u` for that user.
 
 The workspace folder itself MUST be chowned only in volume mode, under the existing recursive workspace-folder chown semantics (clone: always after start; rebuild: only when the resolved connection user differs from the stamped `devcontainer.remote_user`). In bind mode the workspace folder is the host bind target and MUST NEVER be chowned on any path, including by the parent fix-up. On `clone` the parent outcome is already achieved by the existing workspace-folder chown's parent walk, so the CLI MUST NOT add a second fix-up mechanism on `clone`; regression coverage MUST prove the parent outcome is delivered.
 
@@ -1579,7 +1585,7 @@ When the resolved connection user is empty or the literal `root`, the CLI MUST N
 
 - Given a volume-mode `clone` create with a non-root connection user and workspace folder `/workspaces/repo`
 - When the existing workspace-folder chown runs after start and before populate
-- Then its single script non-recursively chowns `/workspaces` as a parent of the recursively chowned `/workspaces/repo`, making parents writable before create-path hooks, and no second parent fix-up exec runs on `clone`
+- Then its single script recursively chowns `/workspaces/repo` (strict) and non-recursively chowns `/workspaces` as a parent, continuing the walk when that parent remains traversable, and no second parent fix-up exec runs on `clone`
 
 #### Scenario: rebuild bind fixes parents before hooks and never chowns the target
 
@@ -1623,6 +1629,27 @@ When the resolved connection user is empty or the literal `root`, the CLI MUST N
 - When `up` reuses the running container or starts the stopped one
 - Then no parent fix-up exec runs
 
+#### Scenario: unmodifiable traversable ancestor does not fail up
+
+- Given a bind-mode `up` fresh create with a non-root connection user and workspace folder `/workspaces/project`
+- And `/workspaces` cannot be chowned (EPERM or EROFS) but remains traversable
+- When the parent fix-up runs
+- Then the ancestor walk continues, the fix-up succeeds, and `up` MUST NOT fail solely because that ancestor could not be chowned
+
+#### Scenario: helper path probes parents as the connection user
+
+- Given a bind-mode `up` fresh create with a non-root connection user and `runArgs` that select the scoped ownership helper (`--read-only`, or dropped `CAP_CHOWN` without restore)
+- When the parent fix-up runs
+- Then the CLI MUST NOT chown rootfs parents in the main container
+- And it execs `test -x` of the workspace folder path as the connection user
+- And inaccessible parents fail per **Parent fix-up failure semantics**
+
+#### Scenario: ownership exec remains root when create -u is the connection user
+
+- Given create `-u vscode` from metadata `remoteUser` (or any non-root connection user) and `CAP_CHOWN` available without `--read-only`
+- When the parent fix-up runs
+- Then the ownership exec uses `-u root` and is not skipped
+
 ---
 
 ### Requirement: Parent fix-up failure semantics
@@ -1632,6 +1659,8 @@ Failure of the parent fix-up MUST follow the per-command create-path ownership s
 - `up` fresh create: fix-up failure MUST fail `up` with a structured error, MUST delete the created container, and MUST remain eligible for bring-up recovery (the realized `workspace-ownership` recovery trigger).
 - `rebuild` (both modes): fix-up failure MUST be a soft-fail — warn on stderr and continue the create path; it MUST NOT delete the new container and MUST NOT enter bring-up recovery.
 - `clone` (volume): no new mechanism; the existing workspace-folder chown failure semantics are unchanged.
+
+An ancestor `chown` that fails with EPERM or EROFS MUST NOT be treated as parent fix-up failure when that ancestor remains traversable. A helper-path `test -x` failure remains a parent fix-up failure and MUST follow the bullets above.
 
 #### Scenario: up parent fix-up failure deletes and stays recovery-eligible
 
@@ -1650,6 +1679,37 @@ Failure of the parent fix-up MUST follow the per-command create-path ownership s
 - Given a volume-mode `clone` whose workspace-folder chown fails
 - When clone runs
 - Then clone fails with a structured error, deletes the managed container and the `*-ws` workspace volume, and remains eligible for bring-up recovery (unchanged)
+
+#### Scenario: traversable unmodifiable ancestor is not a parent fix-up failure
+
+- Given a bind-mode `up` fresh create whose ancestor walk hits EPERM or EROFS on `/workspaces`
+- And `/workspaces` remains traversable
+- When the parent fix-up finishes
+- Then that ancestor is not a parent fix-up failure and `up` MUST NOT delete the container solely for that `chown` result
+
+---
+
+### Requirement: Read-only rootfs uses the scoped ownership helper
+
+`runArgs` `--read-only` is a container rootfs flag. It MUST NOT be treated as named-volume `:ro`. When `--read-only` is present, the CLI MUST select the existing scoped ownership helper even if `--cap-add=CHOWN` is also present: `CAP_CHOWN` does not make a read-only rootfs writable.
+
+The helper CreateRequest MUST NOT inherit `--read-only`. Writable named volumes (`type=volume` and not readonly) MUST still be chowned in the helper. The CLI MUST NOT chown those volumes in the main container on the helper path. Readonly named volumes and bind mounts MUST remain skipped.
+
+The helper path (also selected when `runArgs` drop `CAP_CHOWN` without `--cap-add=CHOWN`) MUST check rootfs parents as the connection user per **Workspace parent directories writable on create paths**. Helper create and helper volume-chown exec MUST use `-u root`. Main-container create `-u` for a non-root connection user remains as **Create process user**.
+
+#### Scenario: --read-only selects the helper even with cap-add CHOWN
+
+- Given `runArgs` including `--read-only`, with or without `--cap-add=CHOWN`
+- When named-volume or parent ownership runs on a create path with a non-root connection user
+- Then the CLI selects the scoped ownership helper
+
+#### Scenario: helper does not inherit --read-only and still chowns writable volumes
+
+- Given `runArgs` including `--read-only` and a writable `type=volume` mount
+- When named-volume ownership runs for a non-root connection user
+- Then the helper create argv MUST NOT include `--read-only`
+- And that writable volume is chowned in the helper
+- And the CLI MUST NOT chown that volume in the main container
 
 ---
 
