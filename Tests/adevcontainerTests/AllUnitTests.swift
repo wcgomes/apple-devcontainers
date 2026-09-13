@@ -3327,6 +3327,72 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!WorkspaceOwnership.requiresOwnershipHelper(
             runArgs: [.capDrop("ALL"), .capAdd("CHOWN")]
         ))
+        try MiniTest.expect(WorkspaceOwnership.requiresOwnershipHelper(runArgs: [.readOnly]))
+        try MiniTest.expect(
+            WorkspaceOwnership.requiresOwnershipHelper(runArgs: [.readOnly, .capAdd("CHOWN")]),
+            "--read-only is a rootfs flag; CAP_CHOWN does not make the rootfs writable"
+        )
+    }),
+    ("workspaceOwnershipReadOnlyUsesScopedHelperWithoutReadOnlyFlag", {
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.first == "create" {
+                let name = args[args.firstIndex(of: "--name")! + 1]
+                return ProcessResult(exitCode: 0, stdout: Data("\(name)\n".utf8), stderr: Data())
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let request = CreateRequest(
+            name: "main",
+            image: "ghcr.io/bare-devcontainer/node:26-trixie",
+            labels: [:],
+            workspaceBindHost: "/host",
+            workspaceBindTarget: "/workspaces/app",
+            user: "vscode",
+            mounts: [],
+            runArgs: [.readOnly],
+            configHash: "hash"
+        )
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "main-id",
+            mounts: [MountSpec(type: .volume, source: "usr-local", target: "/usr/local")],
+            remoteUser: "vscode",
+            runtime: runtime,
+            createRequest: request
+        )
+        let create = mock.calls.first { $0.arguments.first == "create" }!.arguments
+        try MiniTest.expect(create.contains("type=volume,source=usr-local,target=/mnt/adevcontainer-volume-0"))
+        try MiniTest.expect(!create.contains("--read-only"), "helper must not inherit the main container read-only rootfs")
+        try MiniTest.expect(create.contains("-u") && create.contains("root"), "helper runs as root")
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" })
+        let mainExecs = mock.calls.filter {
+            $0.arguments.first == "exec" && $0.arguments.contains("main-id")
+        }
+        try MiniTest.expectEqual(mainExecs.count, 0, "named volume chown must not run in the read-only main container")
+    }),
+    ("workspaceOwnershipReadOnlyParentsProbeWithoutChown", {
+        let mock = MockProcessRunner()
+        mock.defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let request = CreateRequest(
+            name: "main", image: "image", labels: [:], workspaceBindHost: "/host",
+            workspaceBindTarget: "/workspaces/app", user: "vscode",
+            runArgs: [.readOnly], configHash: "hash"
+        )
+        try WorkspaceOwnership.ensureWorkspaceParentsWritableByRemoteUser(
+            containerId: "main",
+            workspaceFolder: "/workspaces/app",
+            remoteUser: "vscode",
+            runtime: runtime,
+            createRequest: request
+        )
+        let execs = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execs.count, 1)
+        try MiniTest.expect(execs[0].arguments.contains("vscode"), "probe runs as remoteUser, not privileged root")
+        let script = execs[0].arguments.last ?? ""
+        try MiniTest.expect(script.contains("test -x"), "read-only rootfs cannot be chowned; probe accessibility only")
+        try MiniTest.expect(!script.contains("chown"), "must not chown parents on a read-only rootfs")
     }),
     ("workspaceOwnershipHelperFailureStillCleansUp", {
         let mock = MockProcessRunner()
@@ -3440,7 +3506,7 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
             )
         }) { error in
             let cli = error as! CLIError
-            try MiniTest.expect(cli.message.contains("CAP_CHOWN was removed"))
+            try MiniTest.expect(cli.message.contains("cannot be repaired in this container"))
             try MiniTest.expect(cli.hint?.contains("main container") == true)
         }
         let exec = mock.calls.first!.arguments
@@ -3465,7 +3531,7 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         let script = mock.calls.first(where: { $0.arguments.first == "exec" })?.arguments.last ?? ""
         try MiniTest.expect(script.contains("chown -R \"$OWN\" \"$T\""), "recursive chown target only")
         try MiniTest.expect(script.contains("dirname \"$T\""), "walk parents from target")
-        try MiniTest.expect(script.contains("chown \"$OWN\" \"$P\""), "non-recursive parent chown")
+        try MiniTest.expect(script.contains("chown \"$OWN\" \"$P\" || [ -x \"$P\" ]"), "non-recursive parent chown")
         try MiniTest.expect(
             script.contains("|/home|"),
             "parent walk denylist must include /home"
@@ -3573,6 +3639,35 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
             "break list must include /home"
         )
         try MiniTest.expect(!script.contains("chown \"$OWN\" \"/\""), "break-list entry / never chowned")
+        try MiniTest.expect(
+            script.contains("chown \"$OWN\" \"$P\" || [ -x \"$P\" ]"),
+            "unmodifiable ancestors (EPERM/EROFS) must not fail ownership when still traversable"
+        )
+    }),
+    ("workspaceOwnershipParentsExecAsRootWhenCreateUserIsNonRoot", {
+        let mock = MockProcessRunner()
+        mock.defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let request = CreateRequest(
+            name: "main", image: "image", labels: [:], workspaceBindHost: "/host",
+            workspaceBindTarget: "/workspaces/app", user: "vscode",
+            runArgs: [], configHash: "hash"
+        )
+        try WorkspaceOwnership.ensureWorkspaceParentsWritableByRemoteUser(
+            containerId: "ctr",
+            workspaceFolder: "/workspaces/app",
+            remoteUser: "vscode",
+            runtime: runtime,
+            createRequest: request
+        )
+        let execs = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execs.count, 1, "create -u vscode must not skip the root ownership exec")
+        try MiniTest.expect(execs[0].arguments.contains("-u"))
+        try MiniTest.expect(execs[0].arguments.contains("root"), "ownership exec is root, not the create user")
+        let script = execs[0].arguments.last ?? ""
+        try MiniTest.expect(script.contains("T='/workspaces/app'"))
+        try MiniTest.expect(script.contains("chown \"$OWN\" \"$P\" || [ -x \"$P\" ]"))
+        try MiniTest.expect(!script.contains("chown -R"), "parents-only must not chown -R")
     }),
     ("workspaceOwnershipParentsOnlyBreakListStop", {
         // /home/alice/ws: the walk chowns /home/alice ($P) then breaks at /home.

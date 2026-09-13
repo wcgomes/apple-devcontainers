@@ -120,6 +120,9 @@ public enum WorkspaceOwnership {
     }
 
     static func requiresOwnershipHelper(runArgs: [AllowlistedRunArg]) -> Bool {
+        if runArgs.contains(.readOnly) {
+            return true
+        }
         if runArgs.contains(where: {
             if case .capAdd(let name) = $0 { return name.uppercased() == "CHOWN" }
             return false
@@ -242,8 +245,8 @@ public enum WorkspaceOwnership {
         guard result.succeeded else {
             throw CLIError(
                 code: CLIErrorCode.populateFailed,
-                message: "Workspace rootfs parents are not accessible by remoteUser \(user) and CAP_CHOWN was removed",
-                hint: "The rootfs parents cannot be repaired without adding CAP_CHOWN to the main container"
+                message: "Workspace rootfs parents are not accessible by remoteUser \(user) and cannot be repaired in this container",
+                hint: "The rootfs parents cannot be repaired without CAP_CHOWN and a writable root filesystem on the main container"
             )
         }
     }
@@ -290,7 +293,7 @@ public enum WorkspaceOwnership {
               case "$P" in
                 /|/home|/Users|/var|/usr|/opt|/tmp|/root|/etc|/mnt|/media|/dev|/proc|/sys|/run|/boot|/lib|/lib64|/bin|/sbin) break ;;
               esac
-              chown "$OWN" "$P"
+              chown "$OWN" "$P" || [ -x "$P" ]
               N=$(dirname "$P")
               [ "$N" = "$P" ] && break
               P=$N
