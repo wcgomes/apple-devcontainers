@@ -1,0 +1,16 @@
+{
+  "name": "reference-readonly-metadata-remoteuser",
+  // Official Microsoft base: OCI USER root + image metadata remoteUser: vscode.
+  // Do not set local remoteUser or containerUser — that is the live metadata-user check.
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  // --read-only is a rootfs flag (not volume :ro). --tmpfs=/tmp keeps the
+  // container usable. Writable named volume is the ownership-helper check.
+  "runArgs": ["--read-only", "--tmpfs=/tmp"],
+  "mounts": [
+    {
+      "source": "${devcontainerId}-vscode-cache",
+      "target": "/home/vscode/.cache",
+      "type": "volume"
+    }
+  ]
+}
