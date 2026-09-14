@@ -453,7 +453,7 @@ public enum UpCommand {
         StatusPrinter.status("Creating container", item: resolved.containerName)
         let id: String
         do {
-            id = try runtime.create(request: request)
+            id = try runtime.create(request: request, initializeConfigVolumes: true)
         } catch {
             throw BringUpRecovery.eligible(error)
         }

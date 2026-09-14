@@ -187,9 +187,17 @@ Do not depend on Docker-style `ps --filter label=` as the primary discovery mech
 ## Named volumes (ensure / reuse / ownership)
 
 - Before create, **ensureVolume** for each config named volume: **list first**. Sources must already have `${devcontainerId}` expanded to the stem (see above) — e.g. folder `foo` → stem `adev-foo-abc123def456` → `adev-foo-abc123def456-shellhistory`, not a literal `${…}` token and not the create name (`my-app`). User-literal sources (no token) stay as written.
-- If the volume already exists → status “already exists — reusing” and mount it; **never fail `up`/`clone` only because a config volume exists**.
+- If the volume already exists → status `Reusing existing volume` and mount it; **never fail `up`/`clone` only because a config volume exists**.
 - If missing → create, then mount.
 - **Clone workspace volume:** if `adev-*-ws` already exists → **delete + create** (fresh tree), then mount as the workspace root (not a host bind).
+
+### Image copy-up for new config volumes
+
+Docker/Podman automatically seed a new empty named volume from content already present in the image at its mount target; Apple container currently hides that content behind an empty volume without copying it.
+
+**Product (`up` fresh create, bind mode):** only config volumes that `ensureVolume` created in that attempt enter initialization. Before the main container is created—and therefore before its in-container create-path hooks, including `postCreateCommand`—a root helper from the same image mounts each new volume at a private disjoint staging path and runs `sh -c` with `cp -a <image-target>/. <staging-target>/` when the image target is a directory. The image must provide `sh` and `cp -a`. Existing volumes skip the helper and are never overwritten. This opt-in is not used by `clone` or `rebuild`, whose existing ensure/reuse semantics remain unchanged.
+
+A newly created config volume targeting container root `/` is rejected as `populate_failed` because no disjoint helper staging path is safe; a preexisting root-target volume is reused without initialization. Initialization failure deletes the helper first, then only volumes created by that attempt. Cleanup failures retain the primary diagnostic and name the surviving helper/volumes plus exact `container delete --force` / `container volume delete` remediation; an attached volume is preserved when helper deletion fails.
 
 ### Ownership (`WorkspaceOwnership`)
 
@@ -211,7 +219,7 @@ Create `-u` for a non-root connection user (typical official image: OCI USER roo
 
 Contract: [`specs/core.md`](../../specs/core.md) (workspace parents + read-only helper).
 
-**Validation status:** command/unit coverage verifies the helper contract; validation against a real Apple container runtime is still pending.
+**Validation status:** command/unit coverage verifies both helper contracts. The image copy-up helper is also validated on macOS with a real Apple Container runtime: the issue #45 fixture ran `postCreateCommand` with a read-only rootfs and found executable offline Cargo 1.85.1 at `/usr/local/cargo/bin/cargo` (`PASS`). Real-runtime validation of the ownership helper remains pending.
 
 **Symptom without fix:** remoteUser EACCES writing home-dir named volumes; lifecycle `mkdir` fails under root-owned intermediate parents.
 

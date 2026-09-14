@@ -2337,6 +2337,266 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         try runtime.ensureVolume(name: "data-vol")
         try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "create", "data-vol"] })
     }),
+    ("createDoesNotInitializeExistingNamedVolume", {
+        let mock = MockProcessRunner()
+        let volumeJSON: [[String: Any]] = [
+            ["configuration": ["name": "cargo-data"] as [String: Any]]
+        ]
+        let listData = try JSONSerialization.data(withJSONObject: volumeJSON)
+        mock.handlers = [
+            { args in
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: listData, stderr: Data())
+                }
+                if args.first == "create" {
+                    return ProcessResult(exitCode: 0, stdout: Data("main-id\n".utf8), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let request = CreateRequest(
+            name: "main",
+            image: "example.test/image-with-cargo:latest",
+            labels: [:],
+            workspaceBindHost: "/workspace",
+            workspaceBindTarget: "/workspaces/project",
+            mounts: [MountSpec(type: .volume, source: "cargo-data", target: "/usr/local/cargo/")],
+            configHash: "hash"
+        )
+
+        let id = try runtime.create(request: request, initializeConfigVolumes: true)
+
+        try MiniTest.expectEqual(id, "main-id")
+        let createCalls = mock.calls.filter { $0.arguments.first == "create" }
+        try MiniTest.expectEqual(createCalls.count, 1, "populated volume must not get an initializer container")
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "exec" }, "existing content must not be overwritten")
+    }),
+    ("createStagesVolumeOutsideMntSource", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
+                }
+                if args == ["volume", "create", "mnt-data"] {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "create" {
+                    let name = args[args.firstIndex(of: "--name")! + 1]
+                    let id = name.hasPrefix("adev-volume-init-") ? "init-id" : "main-id"
+                    return ProcessResult(exitCode: 0, stdout: Data("\(id)\n".utf8), stderr: Data())
+                }
+                if args.first == "start" || args.first == "exec" || args.first == "delete" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let request = CreateRequest(
+            name: "main",
+            image: "alpine:3.20",
+            labels: [:],
+            workspaceBindHost: "/workspace",
+            workspaceBindTarget: "/workspaces/project",
+            mounts: [MountSpec(type: .volume, source: "mnt-data", target: "/mnt")],
+            configHash: "hash"
+        )
+
+        _ = try runtime.create(request: request, initializeConfigVolumes: true)
+
+        let helperCreate = mock.calls.first {
+            $0.arguments.first == "create"
+                && $0.arguments.contains(where: { $0.hasPrefix("adev-volume-init-") })
+        }!
+        let helperMount = helperCreate.arguments.first { $0.contains("source=mnt-data") } ?? ""
+        try MiniTest.expect(helperMount.contains("target=/.adevcontainer-volume-init-"))
+        try MiniTest.expect(!helperMount.contains("target=/mnt/"), "staging must not be inside /mnt")
+        let copyExec = mock.calls.first { $0.arguments.first == "exec" && $0.arguments.contains("/mnt") }!
+        let destination = copyExec.arguments.last ?? ""
+        try MiniTest.expect(destination.hasPrefix("/.adevcontainer-volume-init-"))
+    }),
+    ("createRejectsFreshRootVolumeWithoutLeavingItBehind", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
+                }
+                if args == ["volume", "create", "root-data"]
+                    || args == ["volume", "delete", "root-data"] {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let request = CreateRequest(
+            name: "main",
+            image: "alpine:3.20",
+            labels: [:],
+            workspaceBindHost: "/workspace",
+            workspaceBindTarget: "/workspaces/project",
+            mounts: [MountSpec(type: .volume, source: "root-data", target: "/")],
+            configHash: "hash"
+        )
+
+        try MiniTest.expectThrows({
+            _ = try runtime.create(request: request, initializeConfigVolumes: true)
+        }) { error in
+            let cli = error as! CLIError
+            try MiniTest.expectEqual(cli.code, CLIErrorCode.populateFailed)
+            try MiniTest.expect(cli.message.contains("container root '/'"))
+            try MiniTest.expect(cli.hint?.contains("pre-populate") == true)
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" }, "unsafe helper and main must not be created")
+        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "delete", "root-data"] })
+    }),
+    ("createCopyFailureCleansHelperThenFreshVolume", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
+                }
+                if args == ["volume", "create", "cargo-data"]
+                    || args == ["volume", "delete", "cargo-data"] {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "create" {
+                    return ProcessResult(exitCode: 0, stdout: Data("init-id\n".utf8), stderr: Data())
+                }
+                if args.first == "start" || args.first == "delete" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("cp: permission denied".utf8))
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let request = CreateRequest(
+            name: "main",
+            image: "example.test/image-with-cargo:latest",
+            labels: [:],
+            workspaceBindHost: "/workspace",
+            workspaceBindTarget: "/workspaces/project",
+            mounts: [MountSpec(type: .volume, source: "cargo-data", target: "/usr/local/cargo")],
+            configHash: "hash"
+        )
+
+        try MiniTest.expectThrows({
+            _ = try runtime.create(request: request, initializeConfigVolumes: true)
+        }) { error in
+            let cli = error as! CLIError
+            try MiniTest.expectEqual(cli.code, CLIErrorCode.populateFailed)
+            try MiniTest.expect(cli.message.contains("cp: permission denied"))
+            try MiniTest.expect(cli.hint?.contains("sh and cp") == true)
+        }
+        let helperDelete = mock.calls.firstIndex { $0.arguments == ["delete", "--force", "init-id"] }!
+        let volumeDelete = mock.calls.firstIndex { $0.arguments == ["volume", "delete", "cargo-data"] }!
+        try MiniTest.expect(helperDelete < volumeDelete, "detach helper before deleting the fresh volume")
+        try MiniTest.expectEqual(mock.calls.filter { $0.arguments.first == "create" }.count, 1, "main container must not be created")
+    }),
+    ("createVolumeCleanupFailureReportsOrphanAndFix", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
+                }
+                if args == ["volume", "create", "cargo-data"] {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args == ["volume", "delete", "cargo-data"] {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("volume cleanup failed".utf8))
+                }
+                if args.first == "create" {
+                    return ProcessResult(exitCode: 0, stdout: Data("init-id\n".utf8), stderr: Data())
+                }
+                if args.first == "start" || args.first == "delete" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("cp failed".utf8))
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let request = CreateRequest(
+            name: "main",
+            image: "example.test/image-with-cargo:latest",
+            labels: [:],
+            workspaceBindHost: "/workspace",
+            workspaceBindTarget: "/workspaces/project",
+            mounts: [MountSpec(type: .volume, source: "cargo-data", target: "/usr/local/cargo")],
+            configHash: "hash"
+        )
+
+        try MiniTest.expectThrows({
+            _ = try runtime.create(request: request, initializeConfigVolumes: true)
+        }) { error in
+            let cli = error as! CLIError
+            try MiniTest.expect(cli.message.contains("cp failed"), "primary failure is retained")
+            try MiniTest.expect(cli.message.contains("volume cleanup failed"), "orphan cleanup failure is retained")
+            try MiniTest.expect(cli.hint?.contains("container volume delete <name>") == true)
+            try MiniTest.expect(cli.hint?.contains("cargo-data") == true)
+        }
+    }),
+    ("createHelperCleanupFailurePreservesAttachedVolumeAndNamesFix", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
+                }
+                if args == ["volume", "create", "cargo-data"] {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "create" {
+                    return ProcessResult(exitCode: 0, stdout: Data("init-id\n".utf8), stderr: Data())
+                }
+                if args.first == "start" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("cp failed".utf8))
+                }
+                if args == ["delete", "--force", "init-id"] {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("helper busy".utf8))
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let request = CreateRequest(
+            name: "main",
+            image: "example.test/image-with-cargo:latest",
+            labels: [:],
+            workspaceBindHost: "/workspace",
+            workspaceBindTarget: "/workspaces/project",
+            mounts: [MountSpec(type: .volume, source: "cargo-data", target: "/usr/local/cargo")],
+            configHash: "hash"
+        )
+
+        try MiniTest.expectThrows({
+            _ = try runtime.create(request: request, initializeConfigVolumes: true)
+        }) { error in
+            let cli = error as! CLIError
+            try MiniTest.expect(cli.message.contains("cp failed"), "primary failure is retained")
+            try MiniTest.expect(cli.message.contains("helper busy"), "cleanup failure is retained")
+            try MiniTest.expect(cli.hint?.contains("container delete --force init-id") == true)
+            try MiniTest.expect(cli.hint?.contains("container volume delete <name>") == true)
+            try MiniTest.expect(cli.hint?.contains("cargo-data") == true)
+        }
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments == ["volume", "delete", "cargo-data"] },
+            "do not issue a doomed delete while the helper remains attached"
+        )
+    }),
     ("deleteVolumeAndImageArgv", {
         let mock = MockProcessRunner()
         mock.handlers = [
