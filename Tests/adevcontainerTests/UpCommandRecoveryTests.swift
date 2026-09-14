@@ -548,7 +548,11 @@ nonisolated(unsafe) let upCommandRecoveryTests: [(String, () throws -> Void)] = 
             openEditorPrompt: upRecoveryPrompt(answers: ["y"])
         )
         try MiniTest.expectEqual(result.outcome, "success")
-        try MiniTest.expectEqual(mock.calls.filter { $0.arguments.first == "create" }.count, 2)
+        try MiniTest.expectEqual(
+            mock.calls.filter { $0.arguments.first == "create" }.count,
+            3,
+            "volume initializer plus failed create path and retry"
+        )
         try MiniTest.expectEqual(editorRunner.launches, 1)
     }),
 

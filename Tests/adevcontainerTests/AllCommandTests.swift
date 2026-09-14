@@ -30,6 +30,80 @@ nonisolated(unsafe) let doctorTests: [(String, () throws -> Void)] = [
 ]
 
 nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
+    ("upInitializesNewNamedVolumeBeforePostCreate", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "example.test/image-with-cargo:latest",
+          "mounts": [
+            "source=calendars-cargo-data,target=/usr/local/cargo/,type=volume"
+          ],
+          "runArgs": ["--read-only"],
+          "postCreateCommand": "test -x /usr/local/cargo/bin/cargo && cargo fetch --locked"
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        let mock = MockProcessRunner()
+        var volumeInitialized = false
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
+                }
+                if args == ["volume", "list", "--format", "json"] {
+                    return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
+                }
+                if args == ["volume", "create", "calendars-cargo-data"] {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: nil),
+            { args in
+                if args.first == "create" {
+                    let nameIndex = args.firstIndex(of: "--name")!
+                    let name = args[nameIndex + 1]
+                    let id = name.hasPrefix("adev-volume-init-") ? "volume-init-id" : resolved.containerName
+                    return ProcessResult(exitCode: 0, stdout: Data("\(id)\n".utf8), stderr: Data())
+                }
+                if args.first == "start" || args.first == "delete" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.starts(with: ["exec", "-u", "root", "-w", "/", "volume-init-id"]) {
+                    volumeInitialized = args.contains("/usr/local/cargo/")
+                        && args.contains(where: { $0.contains("cp -a") })
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "exec",
+                   args.last?.contains("cargo fetch --locked") == true {
+                    return ProcessResult(
+                        exitCode: volumeInitialized ? 0 : 127,
+                        stdout: Data(),
+                        stderr: volumeInitialized ? Data() : Data("cargo: not found".utf8)
+                    )
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            credentials: SeedMockCredential()
+        )
+
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(volumeInitialized, "image content is copied into the fresh volume")
+        let createCalls = mock.calls.filter { $0.arguments.first == "create" }.map(\.arguments)
+        let initializerCreate = createCalls.first { $0.contains(where: { $0.hasPrefix("adev-volume-init-") }) }!
+        let mainCreate = createCalls.first { $0.contains(resolved.containerName) }!
+        try MiniTest.expect(!initializerCreate.contains("--read-only"), "initializer needs a writable rootfs and volume")
+        try MiniTest.expect(mainCreate.contains("--read-only"), "main container keeps the requested read-only rootfs")
+        let initExec = mock.calls.firstIndex { $0.arguments.contains("volume-init-id") && $0.arguments.first == "exec" }
+        let postCreateExec = mock.calls.firstIndex { $0.arguments.last?.contains("cargo fetch --locked") == true }
+        try MiniTest.expect(initExec != nil && postCreateExec != nil && initExec! < postCreateExec!, "volume initialization precedes postCreateCommand")
+    }),
     ("upFreshCreateDoesNotSynchronizeAuthorIdentity", {
         let workspace = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
         defer { try? FileManager.default.removeItem(at: workspace) }
@@ -329,9 +403,9 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expectEqual(result.remoteUser, "dev")
         let creates = mock.calls.filter { $0.arguments.first == "create" }.map(\.arguments)
-        try MiniTest.expectEqual(creates.count, 2, "main plus ephemeral ownership helper")
+        try MiniTest.expectEqual(creates.count, 3, "main plus volume initialization and ownership helpers")
         let main = creates.first { $0.contains(resolved.containerName) }!
-        let helper = creates.first { !$0.contains(resolved.containerName) }!
+        let helper = creates.first { $0.contains(where: { $0.hasPrefix("adev-ownership-") }) }!
         try MiniTest.expect(main.contains("--cap-drop") && main.contains("ALL"))
         try MiniTest.expect(!main.contains("--cap-add"), "main container receives no internal capability")
         try MiniTest.expect(helper.contains("CHOWN") && helper.contains("DAC_READ_SEARCH"))

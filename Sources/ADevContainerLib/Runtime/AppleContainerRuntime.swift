@@ -620,18 +620,20 @@ public struct AppleContainerRuntime: Sendable {
         return [:]
     }
 
-    public func ensureVolume(name: String) throws {
+    /// Ensure a named volume exists. Returns true only when this call created it.
+    @discardableResult
+    public func ensureVolume(name: String) throws -> Bool {
         if try volumeExists(name) {
             StatusPrinter.status("Reusing existing volume", item: name)
-            return
+            return false
         }
         let result = try invoke(["volume", "create", name], streamStderr: true)
-        if result.succeeded { return }
+        if result.succeeded { return true }
         // Belt and suspenders: treat race / already-exists create failure as reuse.
         let combined = (result.stdoutString + result.stderrString).lowercased()
         if combined.contains("already") || combined.contains("exists") {
             StatusPrinter.status("Reusing existing volume", item: name)
-            return
+            return false
         }
         throw mapFailure(result, action: "volume create \(name)")
     }
@@ -665,15 +667,25 @@ public struct AppleContainerRuntime: Sendable {
         throw mapFailure(result, action: "image delete \(reference)")
     }
 
-    public func create(request: CreateRequest, ensureVolumes: Bool = true) throws -> String {
+    public func create(
+        request: CreateRequest,
+        ensureVolumes: Bool = true,
+        initializeConfigVolumes: Bool = false
+    ) throws -> String {
         // Ensure workspace named volume (clone / volume-mode)
         if ensureVolumes, request.workspaceMountMode == .volume {
             try ensureVolume(name: request.workspaceBindHost)
         }
         // Ensure named volumes from config mounts
+        var newConfigVolumes: [MountSpec] = []
         if ensureVolumes {
             for mount in request.mounts where mount.type == .volume {
-                try ensureVolume(name: mount.source)
+                if try ensureVolume(name: mount.source), initializeConfigVolumes {
+                    newConfigVolumes.append(mount)
+                }
+            }
+            if initializeConfigVolumes {
+                try initializeNamedVolumesFromImage(newConfigVolumes, request: request)
             }
         }
 
@@ -682,6 +694,203 @@ public struct AppleContainerRuntime: Sendable {
         try ensureSuccess(result, action: "create")
         let id = result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
         return id.isEmpty ? request.name : id
+    }
+
+    /// Populate newly created config volumes with the image content hidden by their final mounts.
+    /// Docker and Podman do this automatically; Apple container currently mounts an empty volume.
+    private func initializeNamedVolumesFromImage(
+        _ mounts: [MountSpec],
+        request: CreateRequest
+    ) throws {
+        guard !mounts.isEmpty else { return }
+
+        let stagingRoot: String
+        do {
+            stagingRoot = try volumeInitializationStagingRoot(avoiding: mounts)
+        } catch {
+            try cleanupVolumesAfterInitializationFailure(mounts, primaryError: error)
+        }
+
+        let helperMounts = mounts.enumerated().map { index, mount in
+            MountSpec(
+                type: .volume,
+                source: mount.source,
+                target: "\(stagingRoot)/\(index)"
+            )
+        }
+        let helperName = "adev-volume-init-\(UUID().uuidString.prefix(12).lowercased())"
+        let helperRequest = CreateRequest(
+            name: helperName,
+            image: request.image,
+            labels: [:],
+            workspaceBindHost: helperMounts[0].source,
+            workspaceBindTarget: helperMounts[0].target,
+            workspaceMountMode: .volume,
+            user: "root",
+            workdir: "/",
+            mounts: Array(helperMounts.dropFirst()),
+            runArgs: request.runArgs.contains(.rosetta) ? [.rosetta] : [],
+            platform: request.platform,
+            configHash: ""
+        )
+
+        var helperID: String?
+        var operationError: Error?
+        do {
+            let createdID = try create(request: helperRequest, ensureVolumes: false)
+            helperID = createdID
+            try start(nameOrId: createdID)
+            for (mount, helperMount) in zip(mounts, helperMounts) {
+                StatusPrinter.status("Initializing volume", item: mount.source)
+                let result = try exec(
+                    nameOrId: createdID,
+                    command: [
+                        "sh", "-c",
+                        "set -e\nif [ -d \"$1\" ]; then cp -a \"$1\"/. \"$2\"/; fi",
+                        "adev-volume-init",
+                        mount.target,
+                        helperMount.target
+                    ],
+                    user: "root",
+                    workdir: "/"
+                )
+                guard result.succeeded else {
+                    let detail = [
+                        result.stderrString.trimmingCharacters(in: .whitespacesAndNewlines),
+                        result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
+                    ].filter { !$0.isEmpty }.joined(separator: " | ")
+                    throw CLIError(
+                        code: CLIErrorCode.populateFailed,
+                        property: "mounts",
+                        message: "Failed to initialize named volume '\(mount.source)' from image path '\(mount.target)'"
+                            + (detail.isEmpty ? "" : ": \(detail)"),
+                        hint: "Ensure the image provides sh and cp, then retry"
+                    )
+                }
+            }
+        } catch {
+            operationError = error
+        }
+
+        if let helperID {
+            do {
+                try delete(nameOrId: helperID, force: true)
+            } catch {
+                throw volumeInitializationCleanupError(
+                    primaryError: operationError,
+                    helperID: helperID,
+                    helperError: error,
+                    mounts: mounts
+                )
+            }
+        }
+        if let operationError {
+            try cleanupVolumesAfterInitializationFailure(
+                mounts,
+                primaryError: operationError
+            )
+        }
+    }
+
+    /// Pick a top-level staging directory disjoint from every image source path. A volume at `/`
+    /// cannot be staged safely because every possible helper mount would be inside its source.
+    private func volumeInitializationStagingRoot(avoiding mounts: [MountSpec]) throws -> String {
+        let targets = try mounts.map { mount -> String in
+            let trimmed = mount.target.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("/") else {
+                throw CLIError(
+                    code: CLIErrorCode.populateFailed,
+                    property: "mounts",
+                    message: "Cannot initialize named volume '\(mount.source)' at non-absolute target '\(mount.target)'",
+                    hint: "Use an absolute container target path such as /usr/local/cargo"
+                )
+            }
+            let normalized = (trimmed as NSString).standardizingPath
+            guard normalized != "/" else {
+                throw CLIError(
+                    code: CLIErrorCode.populateFailed,
+                    property: "mounts",
+                    message: "Cannot safely initialize new named volume '\(mount.source)' mounted at container root '/'",
+                    hint: "Mount it below '/', or create and pre-populate the named volume before running adevcontainer up"
+                )
+            }
+            return normalized
+        }
+
+        for _ in 0..<8 {
+            let candidate = "/.adevcontainer-volume-init-\(UUID().uuidString.lowercased())"
+            if targets.allSatisfy({ pathsAreDisjoint($0, candidate) }) {
+                return candidate
+            }
+        }
+        throw CLIError(
+            code: CLIErrorCode.populateFailed,
+            property: "mounts",
+            message: "Could not choose a safe staging path for named-volume initialization",
+            hint: "Use volume target paths below distinct top-level directories, then retry"
+        )
+    }
+
+    private func pathsAreDisjoint(_ first: String, _ second: String) -> Bool {
+        !isSameOrAncestor(first, of: second) && !isSameOrAncestor(second, of: first)
+    }
+
+    private func isSameOrAncestor(_ ancestor: String, of path: String) -> Bool {
+        ancestor == path || ancestor == "/" || path.hasPrefix(ancestor + "/")
+    }
+
+    /// Remove only volumes created by this initialization attempt. If cleanup itself fails,
+    /// report the surviving names and exact remediation instead of hiding the orphan.
+    private func cleanupVolumesAfterInitializationFailure(
+        _ mounts: [MountSpec],
+        primaryError: Error
+    ) throws -> Never {
+        var failures: [(String, Error)] = []
+        for mount in mounts.reversed() {
+            do {
+                try deleteVolume(name: mount.source)
+            } catch {
+                failures.append((mount.source, error))
+            }
+        }
+        guard !failures.isEmpty else { throw primaryError }
+
+        let names = failures.map(\.0).joined(separator: ", ")
+        let details = failures.map { "\($0.0): \(errorSummary($0.1))" }.joined(separator: " | ")
+        throw CLIError(
+            code: CLIErrorCode.populateFailed,
+            property: "mounts",
+            message: "\(errorSummary(primaryError)); cleanup also failed for newly created volume(s): \(details)",
+            hint: "Remove the orphaned volume(s) with 'container volume delete <name>' (\(names)), then retry"
+        )
+    }
+
+    /// A helper that could not be deleted may still hold every new volume attached. Do not issue
+    /// doomed volume deletes; preserve them and tell the user exactly which helper to remove.
+    private func volumeInitializationCleanupError(
+        primaryError: Error?,
+        helperID: String,
+        helperError: Error,
+        mounts: [MountSpec]
+    ) -> CLIError {
+        let prefix = primaryError.map { "\(errorSummary($0)); " } ?? ""
+        let volumeNames = mounts.map(\.source).joined(separator: ", ")
+        let hint: String
+        if primaryError == nil {
+            hint = "Run 'container delete --force \(helperID)', then retry adevcontainer up; initialized volume(s) were preserved: \(volumeNames)"
+        } else {
+            hint = "Run 'container delete --force \(helperID)', then remove the partial volume(s) with 'container volume delete <name>' (\(volumeNames)), and retry"
+        }
+        return CLIError(
+            code: CLIErrorCode.populateFailed,
+            property: "mounts",
+            message: "\(prefix)failed to remove named-volume initializer '\(helperID)': \(errorSummary(helperError))",
+            hint: hint
+        )
+    }
+
+    private func errorSummary(_ error: Error) -> String {
+        (error as? CLIError)?.message ?? error.localizedDescription
     }
 
     public func start(nameOrId: String) throws {

@@ -1,0 +1,15 @@
+{
+  "name": "reference-readonly-cargo-volume",
+  "image": "docker.io/library/rust:1.85.1-slim-bookworm@sha256:9f841bbe9e7d8e37ceb96ed907265a3a0df7f44e3737d0b100e7907a679acb36",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "mounts": [
+    {
+      "source": "${devcontainerId}-issue-45-cargo-v1",
+      "target": "/usr/local/cargo",
+      "type": "volume"
+    }
+  ],
+  "runArgs": ["--read-only", "--tmpfs=/tmp"],
+  "userEnvProbe": "none",
+  "postCreateCommand": ["sh", "./post-create.sh"]
+}
