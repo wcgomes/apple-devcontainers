@@ -77,6 +77,10 @@ TTY it offers to open and retry the config; in automation, edit the printed path
 
 ## Commands
 
+### Interactive picker
+
+The `start`, `exec`, `stop`, `delete`, `purge`, `rebuild`, and `inspect` commands open an interactive picker (picklist) in an interactive TTY when `--name` is not provided and multiple managed containers exist. In a non-interactive terminal, `--name <name>` is required in this case.
+
 | Command | Purpose |
 | --- | --- |
 | `adevcontainer doctor` | Check Apple `container` readiness |
