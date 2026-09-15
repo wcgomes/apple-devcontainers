@@ -53,7 +53,7 @@ From the project directory:
 
 ```bash
 adevcontainer up
-adevcontainer exec -it
+adevcontainer exec
 ```
 
 > **Tip:** Apple Containers works differently from other container runtimes: it uses a lightweight VM per container instead of sharing one super VM, but its default resources can be low or insufficient for dev containers; if a container is unresponsive, consider setting `hostRequirements` in `devcontainer.json`.
@@ -66,8 +66,7 @@ You do not need a local checkout. Use an HTTPS or SSH Git URL:
 
 ```bash
 adevcontainer clone https://github.com/org/repo.git
-adevcontainer list
-adevcontainer exec --name <name> -it
+adevcontainer exec
 ```
 
 The cloned source remains in a named volume. You can work, commit, and push from inside the container.
@@ -76,6 +75,10 @@ TTY it offers to open and retry the config; in automation, edit the printed path
 `adevcontainer clone <git-url> --resume <config-dir>` command.
 
 ## Commands
+
+### Interactive picker
+
+The `start`, `exec`, `stop`, `delete`, `purge`, `rebuild`, and `inspect` commands open an interactive picker (picklist) in an interactive TTY when `--name` is not provided and multiple managed containers exist. In a non-interactive terminal, `--name <name>` is required in this case.
 
 | Command | Purpose |
 | --- | --- |
