@@ -53,7 +53,7 @@ From the project directory:
 
 ```bash
 adevcontainer up
-adevcontainer exec -it
+adevcontainer exec
 ```
 
 > **Tip:** Apple Containers works differently from other container runtimes: it uses a lightweight VM per container instead of sharing one super VM, but its default resources can be low or insufficient for dev containers; if a container is unresponsive, consider setting `hostRequirements` in `devcontainer.json`.
@@ -66,8 +66,7 @@ You do not need a local checkout. Use an HTTPS or SSH Git URL:
 
 ```bash
 adevcontainer clone https://github.com/org/repo.git
-adevcontainer list
-adevcontainer exec --name <name> -it
+adevcontainer exec
 ```
 
 The cloned source remains in a named volume. You can work, commit, and push from inside the container.
