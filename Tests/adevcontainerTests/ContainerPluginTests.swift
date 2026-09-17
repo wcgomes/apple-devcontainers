@@ -130,11 +130,24 @@ nonisolated(unsafe) let containerPluginTests: [(String, () throws -> Void)] = [
             try MiniTest.expect(up.contains("container dev up"), "up help uses plugin prefix")
             let doctor = CommandSurface.commandHelpText("doctor") ?? ""
             try MiniTest.expect(doctor.contains("container dev doctor"), "doctor help uses plugin prefix")
-            try MiniTest.expect(doctor.contains("--repair"), "doctor help documents --repair")
+            try MiniTest.expect(!doctor.contains("--repair"), "doctor help does not document --repair")
+            try MiniTest.expect(
+                doctor.contains("adevcontainer install-plugin"),
+                "missing-plugin help names PATH adevcontainer install-plugin"
+            )
+            try MiniTest.expect(
+                !doctor.contains("container dev install-plugin"),
+                "missing-plugin help must not name container dev install-plugin"
+            )
+            try MiniTest.expect(usage.contains("install-plugin"), "usage lists install-plugin")
+            try MiniTest.expect(!usage.contains("--repair"), "usage does not document --repair")
+            let install = CommandSurface.commandHelpText("install-plugin") ?? ""
+            try MiniTest.expect(install.contains("install-plugin"), "install-plugin help is present")
+            try MiniTest.expect(!install.contains("--repair"), "install-plugin help does not document --repair")
             let hint = ContainerIdentity.nameInUseError(name: "ctr").hint ?? ""
             try MiniTest.expect(hint.contains("container dev delete --name ctr"), "retry hint uses plugin prefix")
             try MiniTest.expect(
-                !hint.contains("container dev doctor --repair"),
+                !hint.contains("install-plugin"),
                 "occupancy hint is not missing-plugin remediation"
             )
         }
@@ -148,7 +161,20 @@ nonisolated(unsafe) let containerPluginTests: [(String, () throws -> Void)] = [
             try MiniTest.expect(up.contains("adevcontainer up"), "up help uses PATH prefix")
             let doctor = CommandSurface.commandHelpText("doctor") ?? ""
             try MiniTest.expect(doctor.contains("adevcontainer doctor"), "doctor help uses PATH prefix")
-            try MiniTest.expect(doctor.contains("--repair"), "doctor help documents --repair")
+            try MiniTest.expect(!doctor.contains("--repair"), "doctor help does not document --repair")
+            try MiniTest.expect(
+                doctor.contains("adevcontainer install-plugin"),
+                "missing-plugin help names PATH adevcontainer install-plugin"
+            )
+            try MiniTest.expect(
+                !doctor.contains("container dev install-plugin"),
+                "missing-plugin help must not name container dev install-plugin"
+            )
+            try MiniTest.expect(usage.contains("install-plugin"), "usage lists install-plugin")
+            try MiniTest.expect(!usage.contains("--repair"), "usage does not document --repair")
+            let install = CommandSurface.commandHelpText("install-plugin") ?? ""
+            try MiniTest.expect(install.contains("adevcontainer install-plugin"), "install-plugin help uses PATH prefix")
+            try MiniTest.expect(!install.contains("--repair"), "install-plugin help does not document --repair")
             let hint = ContainerIdentity.nameInUseError(name: "ctr").hint ?? ""
             try MiniTest.expect(hint.contains("adevcontainer delete --name ctr"), "retry hint uses PATH prefix")
         }
@@ -163,25 +189,44 @@ nonisolated(unsafe) let containerPluginTests: [(String, () throws -> Void)] = [
         }
     }),
 
-    ("repairFlagParsesAndIsDoctorOnly", {
-        let parsed = try CommandSurface.parseArgs(["--repair"])
-        try MiniTest.expect(parsed.flags.contains("repair"))
-        try CommandSurface.enforceWorkspaceGate(subcommand: "doctor", parsed: parsed)
+    ("repairFlagFailsAsUsageAndHintsInstallPlugin", {
         try MiniTest.expectThrows({
-            try CommandSurface.enforceWorkspaceGate(subcommand: "up", parsed: parsed)
+            _ = try CommandSurface.parseArgs(["--repair"])
         }) { error in
             let err = error as! CLIError
             try MiniTest.expectEqual(err.code, CLIErrorCode.usage)
             try MiniTest.expectEqual(err.property, "--repair")
+            let hint = err.hint ?? ""
+            try MiniTest.expect(hint.contains("install-plugin"), "parse --repair hints install-plugin")
+            try MiniTest.expect(
+                !hint.contains("container dev install-plugin"),
+                "parse --repair must not suggest container dev install-plugin"
+            )
         }
-        try MiniTest.expectThrows({
-            try CommandSurface.enforceWorkspaceGate(subcommand: "clone", parsed: parsed)
-        }) { error in
-            try MiniTest.expectEqual((error as! CLIError).code, CLIErrorCode.usage)
+        for subcommand in ["doctor", "install-plugin", "up"] {
+            try MiniTest.expectThrows({
+                try CommandSurface.enforceWorkspaceGate(
+                    subcommand: subcommand,
+                    parsed: ParsedArgs(flags: ["repair"])
+                )
+            }) { error in
+                let err = error as! CLIError
+                try MiniTest.expectEqual(err.code, CLIErrorCode.usage)
+                try MiniTest.expectEqual(err.property, "--repair")
+                let hint = err.hint ?? ""
+                try MiniTest.expect(
+                    hint.contains("install-plugin"),
+                    "\(subcommand) --repair hints install-plugin"
+                )
+                try MiniTest.expect(
+                    !hint.contains("container dev install-plugin"),
+                    "\(subcommand) --repair must not suggest container dev install-plugin"
+                )
+            }
         }
     }),
 
-    ("doctorMissingPluginReportsPathRepairNotPluginRepair", {
+    ("doctorMissingPluginReportsPathInstallPluginNotPluginInstallPlugin", {
         let root = try PluginTestSupport.makeInstallRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let runtime = try PluginTestSupport.readyRuntime(
@@ -195,19 +240,20 @@ nonisolated(unsafe) let containerPluginTests: [(String, () throws -> Void)] = [
             let message = err.message
             try MiniTest.expect(message.lowercased().contains("plugin"), "names the missing plugin")
             try MiniTest.expect(
-                hint.contains("adevcontainer doctor --repair"),
+                hint.contains("adevcontainer install-plugin"),
                 "PATH remediation for a missing plugin"
             )
             try MiniTest.expect(
-                !hint.contains("container dev doctor --repair"),
+                !hint.contains("container dev install-plugin"),
                 "must not suggest plugin invocation when the plugin is missing"
             )
+            try MiniTest.expect(!hint.contains("doctor --repair"), "must not hint doctor --repair")
         }
         let pluginDir = ContainerPluginLayout.pluginDirectory(installRoot: root.path)
-        try MiniTest.expect(!FileManager.default.fileExists(atPath: pluginDir), "doctor without --repair does not restage")
+        try MiniTest.expect(!FileManager.default.fileExists(atPath: pluginDir), "doctor does not restage")
     }),
 
-    ("doctorRepairStagesPluginLayoutAndSameMachO", {
+    ("installPluginStagesPluginLayoutAndSameMachO", {
         let root = try PluginTestSupport.makeInstallRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let sourceBytes = Data("same-mach-o-\(UUID().uuidString)\n".utf8)
@@ -216,14 +262,10 @@ nonisolated(unsafe) let containerPluginTests: [(String, () throws -> Void)] = [
         let runtime = try PluginTestSupport.readyRuntime(
             executablePath: PluginTestSupport.containerBinary(in: root)
         )
-        let report = try DoctorCommand.run(
+        try InstallPluginCommand.run(
             runtime: runtime,
-            repair: true,
             currentExecutablePath: source.path
         )
-        try MiniTest.expect(report.ok)
-        try MiniTest.expectEqual(report.binaryPath, PluginTestSupport.containerBinary(in: root))
-        try MiniTest.expect(report.version?.contains("1.2.1") == true)
 
         let configPath = ContainerPluginLayout.configPath(installRoot: root.path)
         let binaryPath = ContainerPluginLayout.binaryPath(installRoot: root.path)
@@ -237,7 +279,98 @@ nonisolated(unsafe) let containerPluginTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(staged, sourceBytes)
     }),
 
-    ("doctorRepairDoesNotUnlinkSelfWhenSourceIsDest", {
+    ("installPluginBareArgv0RestagesFromRunningMachO", {
+        let root = try PluginTestSupport.makeInstallRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cwd = FileManager.default.temporaryDirectory
+            .appendingPathComponent("adev-bare-argv0-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cwd) }
+        let previousCwd = FileManager.default.currentDirectoryPath
+        try MiniTest.expect(
+            FileManager.default.changeCurrentDirectoryPath(cwd.path),
+            "switch to a cwd that does not contain adevcontainer"
+        )
+        defer { FileManager.default.changeCurrentDirectoryPath(previousCwd) }
+        try MiniTest.expect(
+            !FileManager.default.fileExists(atPath: cwd.appendingPathComponent("adevcontainer").path),
+            "argv0 basename is not a file in cwd"
+        )
+        let sourceBytes = Data("running-mach-o-\(UUID().uuidString)\n".utf8)
+        let running = root.appendingPathComponent("running/adevcontainer")
+        try PluginTestSupport.writeExecutable(at: running, contents: sourceBytes)
+        let runtime = try PluginTestSupport.readyRuntime(
+            executablePath: PluginTestSupport.containerBinary(in: root)
+        )
+        try InstallPluginCommand.run(
+            runtime: runtime,
+            currentExecutablePath: "adevcontainer",
+            runningExecutablePath: running.path,
+            pathEnvironment: ""
+        )
+        let binaryPath = ContainerPluginLayout.binaryPath(installRoot: root.path)
+        let staged = try Data(contentsOf: URL(fileURLWithPath: binaryPath))
+        try MiniTest.expectEqual(staged, sourceBytes)
+        let destLink = try URL(fileURLWithPath: binaryPath).resourceValues(forKeys: [.isSymbolicLinkKey])
+        try MiniTest.expect(destLink.isSymbolicLink != true, "staged plugin is the Mach-O, not a symlink")
+    }),
+
+    ("installPluginBareArgv0SearchesPATHWhenRunningMissing", {
+        let root = try PluginTestSupport.makeInstallRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cwd = FileManager.default.temporaryDirectory
+            .appendingPathComponent("adev-path-argv0-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cwd) }
+        let previousCwd = FileManager.default.currentDirectoryPath
+        try MiniTest.expect(FileManager.default.changeCurrentDirectoryPath(cwd.path))
+        defer { FileManager.default.changeCurrentDirectoryPath(previousCwd) }
+        let sourceBytes = Data("path-mach-o-\(UUID().uuidString)\n".utf8)
+        let pathDir = root.appendingPathComponent("path-bin", isDirectory: true)
+        let onPath = pathDir.appendingPathComponent("adevcontainer")
+        try PluginTestSupport.writeExecutable(at: onPath, contents: sourceBytes)
+        let runtime = try PluginTestSupport.readyRuntime(
+            executablePath: PluginTestSupport.containerBinary(in: root)
+        )
+        try InstallPluginCommand.run(
+            runtime: runtime,
+            currentExecutablePath: "adevcontainer",
+            runningExecutablePath: root.appendingPathComponent("no-such-running").path,
+            pathEnvironment: pathDir.path
+        )
+        let binaryPath = ContainerPluginLayout.binaryPath(installRoot: root.path)
+        let staged = try Data(contentsOf: URL(fileURLWithPath: binaryPath))
+        try MiniTest.expectEqual(staged, sourceBytes)
+    }),
+
+    ("installPluginCopiesSymlinkTargetMachO", {
+        let root = try PluginTestSupport.makeInstallRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sourceBytes = Data("cellar-mach-o-\(UUID().uuidString)\n".utf8)
+        let cellar = root.appendingPathComponent("Cellar/adevcontainer/0.1.0/bin/adevcontainer")
+        try PluginTestSupport.writeExecutable(at: cellar, contents: sourceBytes)
+        let brewBin = root.appendingPathComponent("opt/homebrew/bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: brewBin, withIntermediateDirectories: true)
+        let link = brewBin.appendingPathComponent("adevcontainer")
+        try FileManager.default.createSymbolicLink(
+            atPath: link.path,
+            withDestinationPath: cellar.path
+        )
+        let runtime = try PluginTestSupport.readyRuntime(
+            executablePath: PluginTestSupport.containerBinary(in: root)
+        )
+        try InstallPluginCommand.run(
+            runtime: runtime,
+            currentExecutablePath: link.path
+        )
+        let binaryPath = ContainerPluginLayout.binaryPath(installRoot: root.path)
+        let staged = try Data(contentsOf: URL(fileURLWithPath: binaryPath))
+        try MiniTest.expectEqual(staged, sourceBytes)
+        let destLink = try URL(fileURLWithPath: binaryPath).resourceValues(forKeys: [.isSymbolicLinkKey])
+        try MiniTest.expect(destLink.isSymbolicLink != true, "Homebrew symlink is resolved before copy")
+    }),
+
+    ("installPluginDoesNotUnlinkSelfWhenSourceIsDest", {
         let root = try PluginTestSupport.makeInstallRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let bytes = Data("plugin-self-\(UUID().uuidString)\n".utf8)
@@ -248,15 +381,13 @@ nonisolated(unsafe) let containerPluginTests: [(String, () throws -> Void)] = [
         let runtime = try PluginTestSupport.readyRuntime(
             executablePath: PluginTestSupport.containerBinary(in: root)
         )
-        let report = try DoctorCommand.run(
+        try InstallPluginCommand.run(
             runtime: runtime,
-            repair: true,
             currentExecutablePath: dest
         )
-        try MiniTest.expect(report.ok)
         try MiniTest.expect(
             FileManager.default.isExecutableFile(atPath: dest),
-            "plugin binary still present after plugin-invoked --repair"
+            "plugin binary still present after plugin-invoked install-plugin"
         )
         let staged = try Data(contentsOf: URL(fileURLWithPath: dest))
         try MiniTest.expectEqual(staged, bytes)
@@ -269,7 +400,7 @@ nonisolated(unsafe) let containerPluginTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!toml.contains("[servicesConfig]"))
     }),
 
-    ("doctorRepairElevationHintWhenDestinationNotWritable", {
+    ("installPluginElevationHintWhenDestinationNotWritable", {
         let root = try PluginTestSupport.makeInstallRoot()
         defer {
             try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
@@ -279,19 +410,18 @@ nonisolated(unsafe) let containerPluginTests: [(String, () throws -> Void)] = [
         let source = root.appendingPathComponent("bin/container")
         let runtime = try PluginTestSupport.readyRuntime(executablePath: source.path)
         try MiniTest.expectThrows({
-            _ = try DoctorCommand.run(
+            try InstallPluginCommand.run(
                 runtime: runtime,
-                repair: true,
                 currentExecutablePath: source.path
             )
         }) { error in
             let hint = (error as! CLIError).hint ?? ""
             try MiniTest.expect(hint.contains("sudo"), "names elevated privileges")
             try MiniTest.expect(
-                hint.contains("adevcontainer doctor --repair"),
-                "elevated remediation still names PATH doctor --repair"
+                hint.contains("adevcontainer install-plugin"),
+                "elevated remediation names PATH adevcontainer install-plugin"
             )
-            try MiniTest.expect(!hint.contains("container dev doctor --repair"))
+            try MiniTest.expect(!hint.contains("container dev install-plugin"))
         }
     }),
 
@@ -310,12 +440,12 @@ nonisolated(unsafe) let containerPluginTests: [(String, () throws -> Void)] = [
         }) { error in
             let hint = (error as! CLIError).hint ?? ""
             try MiniTest.expect(hint.contains("sudo"), "missing plugin names elevation when required")
-            try MiniTest.expect(hint.contains("adevcontainer doctor --repair"))
-            try MiniTest.expect(!hint.contains("container dev doctor --repair"))
+            try MiniTest.expect(hint.contains("adevcontainer install-plugin"))
+            try MiniTest.expect(!hint.contains("container dev install-plugin"))
         }
     }),
 
-    ("doctorRepairMissingSourceDoesNotHintSudo", {
+    ("installPluginMissingSourceDoesNotHintSudo", {
         let root = try PluginTestSupport.makeInstallRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let runtime = try PluginTestSupport.readyRuntime(
@@ -323,22 +453,69 @@ nonisolated(unsafe) let containerPluginTests: [(String, () throws -> Void)] = [
         )
         let missing = root.appendingPathComponent("no-such-adevcontainer-\(UUID().uuidString)")
         try MiniTest.expectThrows({
-            _ = try DoctorCommand.run(
+            try InstallPluginCommand.run(
                 runtime: runtime,
-                repair: true,
                 currentExecutablePath: missing.path
             )
         }) { error in
-            let hint = (error as! CLIError).hint ?? ""
+            let err = error as! CLIError
+            let hint = err.hint ?? ""
+            try MiniTest.expect(
+                err.message.contains(missing.path),
+                "names the resolved source path"
+            )
+            try MiniTest.expect(
+                !err.message.contains("couldn't open"),
+                "does not claim FileManager's basename-only open error"
+            )
             try MiniTest.expect(
                 !hint.contains("sudo"),
                 "missing source is not an elevation failure"
             )
             try MiniTest.expect(
-                hint.contains("adevcontainer doctor --repair"),
-                "still names PATH doctor --repair"
+                !hint.contains("install-plugin"),
+                "missing source is not fixed by restaging"
             )
-            try MiniTest.expect(!hint.contains("container dev doctor --repair"))
+            try MiniTest.expect(!hint.contains("container dev install-plugin"))
+        }
+    }),
+
+    ("installPluginUnresolvableBareArgv0NamesUsablePath", {
+        let root = try PluginTestSupport.makeInstallRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cwd = FileManager.default.temporaryDirectory
+            .appendingPathComponent("adev-missing-argv0-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cwd) }
+        let previousCwd = FileManager.default.currentDirectoryPath
+        try MiniTest.expect(FileManager.default.changeCurrentDirectoryPath(cwd.path))
+        defer { FileManager.default.changeCurrentDirectoryPath(previousCwd) }
+        let runtime = try PluginTestSupport.readyRuntime(
+            executablePath: PluginTestSupport.containerBinary(in: root)
+        )
+        let missingRunning = root.appendingPathComponent("no-such-running-\(UUID().uuidString)")
+        try MiniTest.expectThrows({
+            try InstallPluginCommand.run(
+                runtime: runtime,
+                currentExecutablePath: "adevcontainer",
+                runningExecutablePath: missingRunning.path,
+                pathEnvironment: ""
+            )
+        }) { error in
+            let err = error as! CLIError
+            let hint = err.hint ?? ""
+            try MiniTest.expect(
+                err.message.contains(missingRunning.path),
+                "names a usable resolved path, not the bare argv0"
+            )
+            try MiniTest.expect(
+                !err.message.contains("couldn't open"),
+                "does not claim FileManager's basename-only open error"
+            )
+            try MiniTest.expect(
+                !hint.contains("install-plugin"),
+                "missing source is not fixed by restaging"
+            )
         }
     }),
 

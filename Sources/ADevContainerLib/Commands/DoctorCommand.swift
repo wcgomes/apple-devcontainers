@@ -67,6 +67,43 @@ public enum ContainerPluginLayout {
         }
     }
 
+    /// Prefer the running Mach-O over a relative argv[0] basename (e.g. `sudo adevcontainer`).
+    public static func resolveSourceExecutable(
+        argv0: String,
+        runningExecutablePath: String? = Bundle.main.executableURL?.path,
+        pathEnvironment: String? = ProcessInfo.processInfo.environment["PATH"],
+        fileManager: FileManager = .default
+    ) -> String {
+        func resolvedExisting(_ path: String) -> String? {
+            guard !path.isEmpty, fileManager.fileExists(atPath: path) else { return nil }
+            return URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        }
+
+        let isBareName = argv0.isEmpty || !argv0.contains("/")
+        if !isBareName {
+            let standardized = URL(fileURLWithPath: argv0).standardizedFileURL.path
+            return resolvedExisting(standardized) ?? standardized
+        }
+
+        if let running = runningExecutablePath, let resolved = resolvedExisting(running) {
+            return resolved
+        }
+        if let pathEnvironment {
+            for entry in pathEnvironment.split(separator: ":", omittingEmptySubsequences: false) {
+                let directory = String(entry)
+                guard directory.hasPrefix("/") else { continue }
+                let candidate = (directory as NSString).appendingPathComponent(argv0)
+                if let resolved = resolvedExisting(candidate) {
+                    return resolved
+                }
+            }
+        }
+        if let running = runningExecutablePath, !running.isEmpty {
+            return running
+        }
+        return argv0
+    }
+
     public static func stage(
         installRoot: String,
         executablePath: String,
@@ -76,15 +113,24 @@ public enum ContainerPluginLayout {
         let destBinary = binaryPath(installRoot: installRoot)
         let destConfig = configPath(installRoot: installRoot)
         let binDir = (destBinary as NSString).deletingLastPathComponent
+        let sourcePath = URL(fileURLWithPath: executablePath).resolvingSymlinksInPath().path
+        let sourceExists = fileManager.fileExists(atPath: executablePath)
+            || fileManager.fileExists(atPath: sourcePath)
+        guard sourceExists else {
+            throw CLIError(
+                code: CLIErrorCode.runtimeFailed,
+                message: "Could not restage Apple CLI plugin: source executable not found at \(executablePath)",
+                hint: "Reinstall adevcontainer onto PATH or retry using the full path to the binary"
+            )
+        }
         do {
             try fileManager.createDirectory(atPath: binDir, withIntermediateDirectories: true)
-            let sourcePath = URL(fileURLWithPath: executablePath).standardizedFileURL.path
-            let destPath = URL(fileURLWithPath: destBinary).standardizedFileURL.path
+            let destPath = URL(fileURLWithPath: destBinary).resolvingSymlinksInPath().path
             if sourcePath != destPath {
                 if fileManager.fileExists(atPath: destBinary) {
                     try fileManager.removeItem(atPath: destBinary)
                 }
-                try fileManager.copyItem(atPath: executablePath, toPath: destBinary)
+                try fileManager.copyItem(atPath: sourcePath, toPath: destBinary)
             }
             try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destBinary)
             try configTOML.write(toFile: destConfig, atomically: true, encoding: .utf8)
@@ -107,16 +153,14 @@ public enum ContainerPluginLayout {
 
     static func restageHint(installRoot: String, fileManager: FileManager) -> String {
         requiresElevation(installRoot: installRoot, fileManager: fileManager)
-            ? "Run 'sudo adevcontainer doctor --repair' to restage the plugin (destination requires elevated privileges)"
-            : "Run 'adevcontainer doctor --repair' to restage the plugin"
+            ? "Run 'sudo adevcontainer install-plugin' to restage the plugin (destination requires elevated privileges)"
+            : "Run 'adevcontainer install-plugin' to restage the plugin"
     }
 }
 
 public enum DoctorCommand {
     public static func run(
         runtime: AppleContainerRuntime,
-        repair: Bool = false,
-        currentExecutablePath: String = CommandLine.arguments.first ?? "",
         fileManager: FileManager = .default
     ) throws -> DoctorReport {
         var messages: [String] = []
@@ -132,13 +176,6 @@ public enum DoctorCommand {
         messages.append("binary: \(path)")
 
         let installRoot = ContainerPluginLayout.installRoot(containerBinaryPath: path)
-        if repair {
-            try ContainerPluginLayout.stage(
-                installRoot: installRoot,
-                executablePath: currentExecutablePath,
-                fileManager: fileManager
-            )
-        }
 
         let versions = try runtime.systemVersion()
         let versionString: String

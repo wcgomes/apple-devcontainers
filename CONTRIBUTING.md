@@ -14,12 +14,12 @@ swift build            # binary: .build/debug/adevcontainer
 swift build -c release # binary: .build/release/adevcontainer
 ```
 
-To install from source onto PATH and restage the Apple CLI plugin (same layout as `doctor --repair`):
+To install from source onto PATH and restage the Apple CLI plugin (same layout as `install-plugin`):
 
 ```bash
 swift build -c release
 cp .build/release/adevcontainer /usr/local/bin/   # or another directory on PATH
-adevcontainer doctor --repair                     # use sudo when the plugin destination requires it
+adevcontainer install-plugin                      # use sudo when the plugin destination requires it
 ```
 
 ## Tests

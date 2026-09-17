@@ -61,11 +61,13 @@ struct AdevcontainerMain {
 
         switch subcommand {
         case "doctor":
-            let report = try DoctorCommand.run(
-                runtime: runtime,
-                repair: parsed.flags.contains("repair")
-            )
+            let report = try DoctorCommand.run(runtime: runtime)
             DoctorCommand.printReport(report)
+            return 0
+
+        case "install-plugin":
+            try InstallPluginCommand.run(runtime: runtime)
+            InstallPluginCommand.printSuccess()
             return 0
 
         case "up":
@@ -209,7 +211,7 @@ struct AdevcontainerMain {
             throw CLIError(
                 code: CLIErrorCode.usage,
                 message: "Unknown subcommand '\(subcommand)'",
-                hint: "Try: doctor | up | clone | rebuild | list | start | exec | stop | delete | purge | inspect"
+                hint: "Try: doctor | install-plugin | up | clone | rebuild | list | start | exec | stop | delete | purge | inspect"
             )
         }
     }

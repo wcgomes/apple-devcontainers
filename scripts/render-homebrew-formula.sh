@@ -78,7 +78,7 @@ class Adevcontainer < Formula
         brew reinstall wcgomes/tap/adevcontainer
 
       If post_install cannot write /usr/local/libexec, restage with:
-        sudo adevcontainer doctor --repair
+        sudo adevcontainer install-plugin
 
       After install, run:
         adevcontainer doctor
