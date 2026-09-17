@@ -104,6 +104,22 @@ public enum SafeFileWriteResult: Equatable, Sendable {
     case conflict(currentHash: String)
 }
 
+/// Nested Apple process-table inconsistency:
+/// `deleteProcess: exec <uuid> does not exist in container <name>`.
+enum AppleStaleExec {
+    static func isMissingExecProcess(_ result: ProcessResult) -> Bool {
+        isMissingExecProcess(in: result.stderrString)
+            || isMissingExecProcess(in: result.stdoutString)
+    }
+
+    static func isMissingExecProcess(in text: String) -> Bool {
+        let lower = text.lowercased()
+        return lower.contains("deleteprocess")
+            && lower.contains("exec")
+            && lower.contains("does not exist in container")
+    }
+}
+
 /// Sole module that invokes the Apple `container` CLI.
 public struct AppleContainerRuntime: Sendable {
     public var executablePath: String
@@ -910,16 +926,29 @@ public struct AppleContainerRuntime: Sendable {
     }
 
     public func stop(nameOrId: String) throws {
-        let result = try invoke(["stop", nameOrId], streamStderr: true)
-        try ensureSuccess(result, action: "stop \(nameOrId)")
+        try invokeWithStaleExecRetry(
+            arguments: ["stop", nameOrId],
+            action: "stop \(nameOrId)",
+            nameOrId: nameOrId,
+            bounceThenRetry: false
+        )
     }
 
     public func delete(nameOrId: String, force: Bool = true) throws {
+        // Apple can fail `delete --force` with nested
+        // `deleteProcess: exec <uuid> does not exist in container <name>` while the
+        // container is still listed. Retry; if still present, one stop+start bounce
+        // then delete again. Already-gone after a failed-looking delete is success.
+        // Still present after the budget fails closed with the Apple diagnostic.
         var args = ["delete"]
         if force { args.append("--force") }
         args.append(nameOrId)
-        let result = try invoke(args, streamStderr: true)
-        try ensureSuccess(result, action: "delete \(nameOrId)")
+        try invokeWithStaleExecRetry(
+            arguments: args,
+            action: "delete \(nameOrId)",
+            nameOrId: nameOrId,
+            bounceThenRetry: true
+        )
     }
 
     public func exec(
@@ -1447,6 +1476,49 @@ printf 'RECOVERY_APPLIED:%s\n' "$actual"
             message: "Unable to verify container mount schema: \(detail)",
             hint: "Recovery requires machine-readable Apple container mount metadata"
         )
+    }
+
+    private static let staleExecRetryLimit = 3
+
+    private func invokeWithStaleExecRetry(
+        arguments: [String],
+        action: String,
+        nameOrId: String,
+        bounceThenRetry: Bool
+    ) throws {
+        var lastFailure: ProcessResult?
+        for _ in 0..<Self.staleExecRetryLimit {
+            let result = try invoke(arguments, streamStderr: true)
+            if result.succeeded { return }
+            lastFailure = result
+            guard AppleStaleExec.isMissingExecProcess(result) else {
+                throw mapFailure(result, action: action)
+            }
+            if containerIsListed(nameOrId) == false { return }
+        }
+        let listedAfterRetries = containerIsListed(nameOrId)
+        if listedAfterRetries == false { return }
+        if bounceThenRetry, listedAfterRetries == true {
+            try? stop(nameOrId: nameOrId)
+            do {
+                try start(nameOrId: nameOrId)
+            } catch {
+                // Fall through; start can no-op/fail on zombie metadata.
+            }
+            let result = try invoke(arguments, streamStderr: true)
+            if result.succeeded { return }
+            lastFailure = result
+            if containerIsListed(nameOrId) == false { return }
+        }
+        throw mapFailure(lastFailure!, action: action)
+    }
+
+    private func containerIsListed(_ nameOrId: String) -> Bool? {
+        do {
+            return try findByName(nameOrId) != nil
+        } catch {
+            return nil
+        }
     }
 
     @discardableResult

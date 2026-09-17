@@ -84,6 +84,7 @@ Eligible only for a managed clone-origin container with complete volume-mode sta
 - `RecoveryConfigSession.cleanup` fail-closed bar: path/ownership/session-id only — not on-disk metadata equality after `applyValidatedEdit` advances `lastAppliedHash`.
 - Helper/session retained for retry; crossing helper delete gate detaches/replaces helper before another edit. Cleanup only after successful final verification.
 - **Named apply after volume auto-start** (order: volume auto-start → apply/write). Helper must be **exec-ready** before exec (probe → `start` → stop+start bounce); status alone insufficient (`cannot exec: container is not running` while listed running).
+- Sibling Apple process inconsistency: `container delete --force` can fail after successful product execs with nested `deleteProcess: exec … does not exist in container …`. Product retries that Apple error on `AppleContainerRuntime.delete`/`stop` (3 attempts; delete then one stop+start bounce; gone after a failed-looking delete is success even if stderr is `not found`; still listed after budget fail-closed). Named rebuild still force-deletes through that runtime path. Do not re-add the wrap or treat leftover `[RECOVERY]` as a rebuild-logic bug; do not purge volumes (container-only). Live leftover-helper validation of the retry path is still pending.
 - No `container cp`, volume delete/replace/repopulate, or image rollback (named-volume `cp` limitation still applies independently).
 
 #### Bind / `up` path
