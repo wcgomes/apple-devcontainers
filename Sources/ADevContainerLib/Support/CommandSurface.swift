@@ -28,6 +28,29 @@ public struct ParsedArgs: Sendable {
 /// Lives in the library so subcommand dispatch behavior is unit-testable; the
 /// executable target's `AdevcontainerMain` is a thin caller.
 public enum CommandSurface {
+    public static let pathBinaryName = "adevcontainer"
+    public static let pluginInvocationPrefix = "container dev"
+    public static let pluginArgvName = "dev"
+
+    /// Help, usage, and retry-hint command prefix for this process.
+    /// PATH binary: `adevcontainer`. Apple CLI plugin: `container dev`.
+    nonisolated(unsafe) public static var commandPrefix = pathBinaryName
+
+    public static func invocationPrefix(processPath: String, argv: [String]) -> String {
+        let base = (processPath as NSString).lastPathComponent
+        if base == pluginArgvName { return pluginInvocationPrefix }
+        if argv.first == pluginArgvName { return pluginInvocationPrefix }
+        return pathBinaryName
+    }
+
+    /// Apple dispatches the plugin as `dev <subcommand> …`. Strip that token.
+    public static func productArguments(from argv: [String]) -> [String] {
+        if argv.first == pluginArgvName {
+            return Array(argv.dropFirst())
+        }
+        return argv
+    }
+
     /// Parse global options (everything after the subcommand).
     public static func parseArgs(_ args: [String]) throws -> ParsedArgs {
         var workspace: String?
@@ -157,6 +180,11 @@ public enum CommandSurface {
                 i += 1
                 continue
             }
+            if a == "--repair" {
+                flags.insert("repair")
+                i += 1
+                continue
+            }
             // Reject product-non-goal flags explicitly
             if a == "--branch" || a.hasPrefix("--branch=")
                 || a == "--depth" || a.hasPrefix("--depth=")
@@ -196,12 +224,20 @@ public enum CommandSurface {
 
     /// `-w` / `--workspace` is only valid for `up` (bind-mode create).
     public static func enforceWorkspaceGate(subcommand: String, parsed: ParsedArgs) throws {
+        if parsed.flags.contains("repair"), subcommand != "doctor" {
+            throw CLIError(
+                code: CLIErrorCode.usage,
+                property: "--repair",
+                message: "--repair is only valid for doctor",
+                hint: "Restage the Apple CLI plugin with: adevcontainer doctor --repair"
+            )
+        }
         if parsed.workspace != nil, subcommand != "up" {
             throw CLIError(
                 code: CLIErrorCode.usage,
                 property: "-w",
                 message: "-w is only valid for up",
-                hint: "Lifecycle commands use --name (or picker). Create with: adevcontainer up [-w <path>]"
+                hint: "Lifecycle commands use --name (or picker). Create with: \(commandPrefix) up [-w <path>]"
             )
         }
         if parsed.resume != nil, subcommand != "clone" {
@@ -209,7 +245,7 @@ public enum CommandSurface {
                 code: CLIErrorCode.usage,
                 property: "--resume",
                 message: "--resume is only valid for clone",
-                hint: "Resume a retained checkout with: adevcontainer clone <git-url> --resume <config-dir>"
+                hint: "Resume a retained checkout with: \(commandPrefix) clone <git-url> --resume <config-dir>"
             )
         }
     }
@@ -217,14 +253,15 @@ public enum CommandSurface {
     // MARK: - Usage / help
 
     public static func usageText() -> String {
-        """
+        let cmd = commandPrefix
+        return """
         adevcontainer — Apple container devcontainer CLI
 
         Usage:
-          adevcontainer <command> [options]
+          \(cmd) <command> [options]
 
         Commands:
-          doctor              Check Apple container runtime readiness
+          doctor [--repair]   Check Apple container runtime and plugin layout
           up [-w path]        Create/start/reuse bind-mode dev container (host path)
           clone <git-url>     Clone repo into volume-mode dev container (managed)
           list [--json]       List managed dev containers (up + clone)
@@ -245,6 +282,7 @@ public enum CommandSurface {
                                    suppresses the interactive recovery prompt
           --skip-pull              Skip image pull on up/clone/rebuild
           --vscode                 Best-effort open VS Code (not apply). postAttach is CLI attach except already-running start
+          --repair                 Restage the Apple CLI plugin layout (doctor only)
           -h, --help               Show help
 
         Identity:
@@ -261,7 +299,7 @@ public enum CommandSurface {
             rebuild (fresh create-path, up reuse, and up start-stopped). Soft-fail; marker
             idempotency; Server extensions.json + transitive extensionDependencies ∪
             extensionPack. Not gated on --vscode or open success.
-          - adevcontainer start does not apply settings or extensions (with or without
+          - \(cmd) start does not apply settings or extensions (with or without
             --vscode). Real start runs initialize (when a host workspace exists), then
             config postStart and remelted feature postStart. Already-running is a no-op
             for those hooks.
@@ -287,7 +325,7 @@ public enum CommandSurface {
             populate/hooks), clone retains the fetched config checkout and, in a TTY,
             prompts to edit the retained devcontainer.json and retry. Non-TTY/--json
             retains the checkout and prints an exact
-            `adevcontainer clone <git-url> --resume <config-dir>` command.
+            `\(cmd) clone <git-url> --resume <config-dir>` command.
 
         Rebuild notes:
           - Force-rebuilds a managed container from its CURRENT devcontainer.json,
@@ -324,10 +362,25 @@ public enum CommandSurface {
 
     /// Per-command help text; nil when unknown (caller falls back to usage).
     public static func commandHelpText(_ subcommand: String) -> String? {
+        let cmd = commandPrefix
         switch subcommand {
+        case "doctor":
+            return """
+            \(cmd) doctor [--repair]
+
+            Check Apple container runtime readiness (binary, version, system status)
+            and the Apple CLI plugin layout under the container install-root.
+
+            --repair copies this executable to {install-root}/libexec/container-plugins/dev/bin/dev
+            and writes config.toml (CLI plugin: abstract, no [servicesConfig]).
+            Uses elevated privileges when the destination requires them.
+            A missing plugin is restaged with PATH `adevcontainer doctor --repair`
+            (never `container dev doctor --repair`).
+            Doctor does not require a devcontainer.json.
+            """
         case "up":
             return """
-            adevcontainer up [-w <path>] [--json] [--skip-pull] [--vscode]
+            \(cmd) up [-w <path>] [--json] [--skip-pull] [--vscode]
 
             Create/start/reuse a bind-mode dev container for a host checkout.
             -w/--workspace defaults to the current directory (host project root). Stamps
@@ -352,7 +405,7 @@ public enum CommandSurface {
             """
         case "clone":
             return """
-            adevcontainer clone <git-url> [--json] [--skip-pull] [--vscode] [--resume <config-dir>]
+            \(cmd) clone <git-url> [--json] [--skip-pull] [--vscode] [--resume <config-dir>]
 
             Create a volume-mode managed dev container (workspace on a named volume).
             Host git fetches config only; full clone runs inside the container.
@@ -380,14 +433,14 @@ public enum CommandSurface {
             """
         case "list":
             return """
-            adevcontainer list [--json]
+            \(cmd) list [--json]
 
             List containers with label devcontainer.managed=adevcontainer
             (bind-mode from up and volume-mode from clone).
             """
         case "start":
             return """
-            adevcontainer start [--name <container>] [--vscode] [--json]
+            \(cmd) start [--name <container>] [--vscode] [--json]
 
             Start a stopped managed container. Real start runs host initializeCommand
             (when a host workspace exists), then config postStartCommand and remelted
@@ -404,7 +457,7 @@ public enum CommandSurface {
             """
         case "exec":
             return """
-            adevcontainer exec [-it] [--name <container>] [--] [cmd...]
+            \(cmd) exec [-it] [--name <container>] [--] [cmd...]
 
             Run a command, or interactive shell when cmd is omitted.
             Resolves a managed container via --name or picker (no -w).
@@ -412,33 +465,33 @@ public enum CommandSurface {
             """
         case "stop":
             return """
-            adevcontainer stop [--name <container>]
+            \(cmd) stop [--name <container>]
 
             Stop a managed container via --name or interactive picker.
             -w is not accepted (use up only for workspace path).
             """
         case "delete", "rm":
             return """
-            adevcontainer delete [--name <container>]
+            \(cmd) delete [--name <container>]
 
             Remove the managed container only (not volumes or images).
             """
         case "purge":
             return """
-            adevcontainer purge [--name <container>]
+            \(cmd) purge [--name <container>]
 
             Remove managed container, config named volumes (label), volume-mode
             workspace volume (*-ws), and config image. Selection via --name/picker.
             """
         case "inspect":
             return """
-            adevcontainer inspect [--name <container>]
+            \(cmd) inspect [--name <container>]
 
             Show identity, state, and labels from runtime + managed labels.
             """
         case "rebuild":
             return """
-            adevcontainer rebuild [--name <container>] [--skip-pull] [--vscode] [--json]
+            \(cmd) rebuild [--name <container>] [--skip-pull] [--vscode] [--json]
 
             Force-rebuild a managed container (bind from up, volume from clone): a forced
             rebuild from the container's CURRENT devcontainer.json. Selection via

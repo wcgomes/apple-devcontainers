@@ -3,6 +3,7 @@
 ## Architecture
 
 - [Architecture](architecture.md) — architecture, lifecycle, identity, purge — System structure, lifecycle behavior, and command routing.
+- [Plugin dual surface](architecture.md#dual-surface) — plugin, container-dev, restage — PATH and Apple plugin install surfaces.
 
 ## Decisions
 

@@ -226,7 +226,7 @@ public enum UpCommand {
                     code: CLIErrorCode.configHashMismatch,
                     property: ContainerIdentity.labelConfigHash,
                     message: "Existing container config hash does not match current config",
-                    hint: "Run 'adevcontainer rebuild' (managed selection: --name or auto) to force-rebuild from current config"
+                    hint: "Run '\(CommandSurface.commandPrefix) rebuild' (managed selection: --name or auto) to force-rebuild from current config"
                 )
             } else if existing.isRunning {
                 // Reuse running: no feature fetch/build; settings+extensions repair on marker drift; postAttach gated after open.
@@ -723,7 +723,7 @@ public enum UpCommand {
     }
 
     private static func upRetryCommand(options: UpOptions) -> String {
-        var command = "adevcontainer up --workspace \(shellQuote(options.workspacePath))"
+        var command = "\(CommandSurface.commandPrefix) up --workspace \(shellQuote(options.workspacePath))"
         if options.jsonOutput { command += " --json" }
         if options.skipPull { command += " --skip-pull" }
         if options.openVSCode { command += " --vscode" }

@@ -1,6 +1,6 @@
 # Architecture
 
-Greenfield native Swift executable (arm64). Reads `devcontainer.json`, drives Apple `container` CLI. No Node runtime for this product.
+Greenfield native Swift executable (arm64). Reads `devcontainer.json`, drives Apple `container` CLI. Dual surface: PATH `adevcontainer` and Apple plugin `container dev …`. No Node runtime for this product.
 
 ## Host and deps
 
@@ -10,11 +10,21 @@ Greenfield native Swift executable (arm64). Reads `devcontainer.json`, drives Ap
 | CLI language | Swift 6.x (SPM; full Xcode not required) |
 | User runtime dep | Apple `container` CLI (install separately — [apple/container](https://github.com/apple/container); tested with 1.2.x JSON) |
 | Apple container binary (typical) | `/usr/local/bin/container` |
-| Product binary | `adevcontainer` |
+| Product binary | `adevcontainer` (PATH; same Mach-O also staged as Apple plugin `dev`) |
 | GitHub repo | [wcgomes/apple-devcontainers](https://github.com/wcgomes/apple-devcontainers) (ex-`apple-dev-containers`, ex-`dev-containerization`) |
 | Release / install | CI + GitHub Release tarball; Homebrew primary — [release-distribution.md](conventions/release-distribution.md) |
 
 Swift/`ld` injects Xcode-shaped `CommandLineTools/Developer/...` paths that CLT lacks. The warning `ld: warning: search path '...CommandLineTools/Developer/usr/lib' not found` appears when `adevcontainerTests-product` relinks; ignore it, or host mkdir / install Xcode — not a package linker setting.
+
+## Dual surface
+
+PATH `adevcontainer` and `container dev …` are the same Mach-O (SPM product stays `adevcontainer`). Apple discovers `{install-root}/libexec/container-plugins/dev/{config.toml,bin/dev}` (`abstract`, no `[servicesConfig]`), not PATH. Install-root is the parent of Apple `container`’s `bin/` (typically `/usr/local`). `container system start` is required for Apple to list/dispatch plugins.
+
+Help/hints follow the invocation (`container dev` vs `adevcontainer`). Managed labels, guest paths, and cache names stay `adevcontainer`.
+
+Runtime still shells to Apple `container` (prefer `/usr/local/bin/container`); never the plugin binary.
+
+Apple upgrades wipe that plugin dir ([apple/container#1617](https://github.com/apple/container/issues/1617)). PATH `adevcontainer` survives. Restage with PATH `adevcontainer doctor --repair` — never `container dev doctor --repair` when missing. Lifecycle does not auto-repair. Contract: [`specs/plugin.md`](../specs/plugin.md). Doctor/identity: [`specs/core.md`](../specs/core.md).
 
 ## Package layout
 
@@ -55,7 +65,7 @@ Volume mode exists for better metadata I/O (git status, node_modules, many small
 
 | Command | Role |
 |---------|------|
-| `doctor` | Host/runtime readiness checks |
+| `doctor` | Host/runtime readiness; plugin layout; `--repair` restages (PATH only when missing). |
 | `up` | **Bind-mode** only: resolve config from host workspace, create/start/reuse; ensure named volumes; workspace bind; Features; lifecycle hooks in scope. Optional `--vscode` after success (see [VS Code flow](#vs-code-flow)). Reuse only when stamped config hash matches; mismatch → fail `config_hash_mismatch` (remediate with `rebuild`). Eligible bring-up failure with an editable host `devcontainer.json` → [bring-up recovery](#bring-up-recovery). Author synchronization is not part of `up` fresh-create. |
 | `clone <git-url> [--resume]` | **Volume-mode** workspace (VS Code clone-in-volume analogue): host sparse/shallow **config-only** fetch → resolve (workspaceFolder default + `${localWorkspaceFolderBasename}` = **git URL repo basename**, not temp dir name) → **author identity before Features/create:** host `git -C <sparse-temp> config --get user.name/email` (includeIf-aware; env `ADEVCONTAINER_GIT_AUTHOR_*`); both env → skip prompt; TTY confirm/override or collect; non-TTY silent + warn if incomplete → **ensure Features `ghcr.io/devcontainers/features/git:1` when no `git`/`common-utils`** (Features path, not apt; `up` unchanged) → ensure workspace volume → create + start (**SSH:** inject `create --ssh` when `SSH_AUTH_SOCK` set) → **in-container full `git clone`** + verify `.git` (**HTTPS:** host `git credential fill` one-shot → guest `credential.helper store`; no GCM-in-guest; no host full+tar happy path) → **author both:** a complete chosen pair writes `<workspace>/.git/config` at local scope (persistence/source of truth) and the resolved connection user’s global Git config so sibling repositories/hooks inherit it; local config remains authoritative for the main repo; incomplete → warn, no partial → create-path hooks. Global HOME is container-scoped, not the persistence mechanism; workspace-local config survives via the bind path or workspace volume. Eligible failure retains the config checkout (not always-clean). Optional `--vscode` after success. Resume: `clone --resume <config-dir>` — [bring-up recovery](#bring-up-recovery) |
 | `rebuild [--name]` | **Forced-rebuild** path (realized in domain specs; archive [`20260810-rebuild`](../specs/changes/archive/20260810-rebuild/)): managed selection (`--name` / auto-single / picker); read **current** stamped `devcontainer.json` before any delete and capture the existing workspace-local Git author identity as the sole source of truth (bind: host workspace; volume: old container workspace); after config/host/Features succeed → container-only delete old → create under the **live computed** name (user `name` change and old `adev-*` migrate). Reuse stem-keyed workspace `*-ws` and `${devcontainerId}` volumes; after replacement preparation, synchronize a complete pair to the replacement connection user’s global Git config before create-path hooks; no host config or other container users changed; missing/incomplete → no invented value. User-literal sources stay as written (data preserved, never re-clone). Foreign occupant of the new name: do not delete selected; TTY Y/n + new name. Volume/clone-origin with no host workspace still runs host `initializeCommand` from a temp guest-config root (not skip). Optional `--skip-pull` / `--vscode` / `--json`. Recovery mode-split (TTY prompt Y/n, retain): [gaps](domain/devcontainer-apple-gaps.md#failed-rebuild-recovery-mode-split) |

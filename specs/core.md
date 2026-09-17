@@ -10,6 +10,8 @@ Core product identity, config discovery and admission, bind-mode identity and la
 
 The product MUST be a greenfield Swift SPM executable named **`adevcontainer`**, package root at the repository root. It MUST target macOS 26+ Apple Silicon only. It MUST NOT require Node. It MUST NOT fork or wrap `@devcontainers/cli`. The sole external runtime dependency for users MUST be the Apple `container` CLI.
 
+The same Mach-O MUST also be installable as Apple CLI plugin `dev` so users can run `container dev <subcommand>`. Dual install MUST NOT change the SPM product name. Managed labels, guest paths, and cache names MUST remain `adevcontainer`.
+
 #### Scenario: Binary name and package layout
 - Given a clean checkout of the repository
 - When the Swift package is built
@@ -19,6 +21,11 @@ The product MUST be a greenfield Swift SPM executable named **`adevcontainer`**,
 - Given a host with Swift toolchain and Apple `container` only (no Node)
 - When the user runs `adevcontainer doctor` and supported `up`/`exec` flows
 - Then the CLI completes without invoking Node or `@devcontainers/cli`
+
+#### Scenario: Dual surface does not rename the SPM product
+- Given the dual PATH-and-plugin install
+- When the Swift package is built
+- Then the executable product is still named `adevcontainer` and is not renamed to `dev`
 
 ---
 
@@ -480,10 +487,12 @@ The existing known optional families remain warn-and-ignore in default mode: doc
 
 ### Requirement: Doctor preflight
 
-`adevcontainer doctor` MUST verify host readiness before users rely on `up`: Apple `container` binary presence (default path `/usr/local/bin/container` or PATH resolution), invokability, and a reported version suitable for machine use. Doctor MUST emit a clear pass/fail summary. Doctor MUST NOT require a devcontainer.json.
+`adevcontainer doctor` MUST verify host readiness before users rely on `up`: Apple `container` binary presence (default path `/usr/local/bin/container` or PATH resolution), invokability, and a reported version suitable for machine use. Doctor MUST also verify the Apple CLI plugin layout for `dev` under the install-root parent of Apple `container`’s `bin/`. Doctor MUST emit a clear pass/fail summary. Doctor MUST NOT require a `devcontainer.json`.
+
+PATH invocation of `adevcontainer doctor` MUST keep the existing missing-binary failure. Success MUST still report Apple `container` binary path and version and MUST require the plugin layout to be present. When Apple container services are not running, doctor MUST surface that `container system start` is required (Apple needs it to list/dispatch plugins). Doctor MUST accept `--repair` to restage the plugin layout as specified in [plugin.md](plugin.md) **Explicit plugin restage after Apple upgrade wipe**.
 
 #### Scenario: Doctor success
-- Given Apple `container` is installed and runnable
+- Given Apple `container` is installed and runnable and the plugin layout is present
 - When the user runs `adevcontainer doctor`
 - Then the command exits 0 and reports binary path and version
 
@@ -491,6 +500,16 @@ The existing known optional families remain warn-and-ignore in default mode: doc
 - Given `container` is not on PATH and not at the default path
 - When the user runs `adevcontainer doctor`
 - Then the command exits non-zero with a structured error explaining the missing runtime
+
+#### Scenario: Doctor does not require devcontainer.json
+- Given a directory with no `devcontainer.json`
+- When the user runs `adevcontainer doctor`
+- Then doctor does not fail for missing configuration
+
+#### Scenario: Doctor surfaces container system start when not running
+- Given Apple `container` is installed and the system status is not running
+- When the user runs `adevcontainer doctor`
+- Then doctor exits non-zero and tells the user to run `container system start`
 
 ---
 

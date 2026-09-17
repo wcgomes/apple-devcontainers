@@ -14,6 +14,14 @@ swift build            # binary: .build/debug/adevcontainer
 swift build -c release # binary: .build/release/adevcontainer
 ```
 
+To install from source onto PATH and restage the Apple CLI plugin (same layout as `doctor --repair`):
+
+```bash
+swift build -c release
+cp .build/release/adevcontainer /usr/local/bin/   # or another directory on PATH
+adevcontainer doctor --repair                     # use sudo when the plugin destination requires it
+```
+
 ## Tests
 Plain `swift test` may report “no tests found” on Command Line Tools hosts, which lack `XCTest.framework`; the suite of record is `swift run adevcontainerTests`. On a TTY, clone tests can prompt for git identity; `swift run adevcontainerTests < /dev/null` runs the suite without prompts.
 

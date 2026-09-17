@@ -1,7 +1,7 @@
 # Apple Dev Container CLI (adevcontainer)
 
 [![CI](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml/badge.svg)](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-1041%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
+[![tests](https://img.shields.io/badge/tests-1061%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Native Swift CLI that reads `devcontainer.json` and runs development environments on Apple [`container`](https://github.com/apple/container).
@@ -33,6 +33,7 @@ Download `adevcontainer-macos-arm64.tar.gz` and `adevcontainer-macos-arm64.tar.g
 shasum -a 256 -c adevcontainer-macos-arm64.tar.gz.sha256
 tar xzf adevcontainer-macos-arm64.tar.gz
 sudo mv adevcontainer /usr/local/bin/ # or move it to another directory on PATH
+sudo adevcontainer doctor --repair   # restage container dev plugin (same as doctor --repair)
 ```
 
 Verify the installation and Apple `container` setup:
@@ -73,6 +74,27 @@ The cloned source remains in a named volume. You can work, commit, and push from
 If bring-up fails after the config-only fetch, the CLI retains that checkout for recovery. On a
 TTY it offers to open and retry the config; in automation, edit the printed path and run the exact
 `adevcontainer clone <git-url> --resume <config-dir>` command.
+
+## Apple container plugin
+
+After the plugin is staged, every command also works as `container dev <subcommand>`. PATH `adevcontainer` remains valid.
+
+Apple must be running to dispatch plugins:
+
+```bash
+container system start
+```
+
+Examples:
+
+```bash
+container dev up
+container dev exec
+container dev list
+container dev doctor
+```
+
+Apple upgrades wipe the plugin. Restage with PATH `adevcontainer doctor --repair`. Do not run `container dev doctor --repair` when the plugin is missing — Apple cannot dispatch it.
 
 ## Commands
 

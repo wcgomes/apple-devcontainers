@@ -30,6 +30,7 @@ let allTests: [(String, () throws -> Void)] = []
     + remoteUserResolutionTests
     + runtimeTests
     + doctorTests
+    + containerPluginTests
     + upTests
     + execTests
     + lifecycleTests

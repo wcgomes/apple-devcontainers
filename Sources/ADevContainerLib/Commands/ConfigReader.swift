@@ -199,7 +199,7 @@ public enum ConfigReader {
         guard !configRel.isEmpty else {
             throw notFound(
                 "the container is missing the \(ContainerIdentity.labelConfigFile) label (volume mode)",
-                hint: "Run 'adevcontainer clone <git-url>' to restore the stamped labels"
+                hint: "Run '\(CommandSurface.commandPrefix) clone <git-url>' to restore the stamped labels"
             )
         }
 
@@ -276,13 +276,13 @@ public enum ConfigReader {
         guard !localFolder.isEmpty, !configFile.isEmpty else {
             throw ConfigReaderMiss(error: notFound(
                 "the container is missing \(ContainerIdentity.labelLocalFolder) or \(ContainerIdentity.labelConfigFile) labels",
-                hint: "Run 'adevcontainer up' to restore the stamped labels"
+                hint: "Run '\(CommandSurface.commandPrefix) up' to restore the stamped labels"
             ))
         }
         guard fileManager.fileExists(atPath: configFile) else {
             throw ConfigReaderMiss(error: notFound(
                 "devcontainer config file not found at \(configFile)",
-                hint: "Fix the stamped devcontainer.config_file label or run 'adevcontainer up'"
+                hint: "Fix the stamped devcontainer.config_file label or run '\(CommandSurface.commandPrefix) up'"
             ))
         }
 

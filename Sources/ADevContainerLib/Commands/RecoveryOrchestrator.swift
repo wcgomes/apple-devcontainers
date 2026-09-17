@@ -133,7 +133,7 @@ public enum RecoveryOrchestrator {
                 code: CLIErrorCode.configNotFound,
                 property: ContainerIdentity.labelLocalFolder,
                 message: "Bind recovery is missing \(ContainerIdentity.labelLocalFolder)",
-                hint: "Run 'adevcontainer up' to restore the container"
+                hint: "Run '\(CommandSurface.commandPrefix) up' to restore the container"
             )
         }
         guard fileManager.fileExists(atPath: hostConfigPath) else {
@@ -421,7 +421,7 @@ public enum RecoveryOrchestrator {
             throw CLIError(
                 code: CLIErrorCode.recoveryUnavailable,
                 message: "Bind recovery requires stamped local_folder and config_file",
-                hint: "Run 'adevcontainer up' to restore the container"
+                hint: "Run '\(CommandSurface.commandPrefix) up' to restore the container"
             )
         }
 
@@ -778,9 +778,9 @@ public enum RecoveryOrchestrator {
         let edit = editor.command(for: session.tempFileURL.path)
             .map(shellQuoteCommand)
             ?? "recovery editor unavailable"
-        let retry = shellQuoteCommand(["adevcontainer", "rebuild", "--name", selectedName])
+        let retry = "\(CommandSurface.commandPrefix) \(shellQuoteCommand(["rebuild", "--name", selectedName]))"
         let cleanup = helperAvailable
-            ? "adevcontainer delete --name \(shellQuote(selectedName)); rm -rf -- \(shellQuote(session.directoryURL.path))"
+            ? "\(CommandSurface.commandPrefix) delete --name \(shellQuote(selectedName)); rm -rf -- \(shellQuote(session.directoryURL.path))"
             : "rm -rf -- \(shellQuote(session.directoryURL.path))"
         let failureKind = (failure as? CLIError)?.code ?? "runtime_failure"
         let reason: String
@@ -837,7 +837,7 @@ public enum RecoveryOrchestrator {
         let edit = editor.command(for: hostPath)
             .map(shellQuoteCommand)
             ?? "recovery editor unavailable"
-        let retry = shellQuoteCommand(["adevcontainer", "rebuild", "--name", selected.name])
+        let retry = "\(CommandSurface.commandPrefix) \(shellQuoteCommand(["rebuild", "--name", selected.name]))"
         let failureKind = (failure as? CLIError)?.code ?? "runtime_failure"
         let reason: String
         if let cli = failure as? CLIError {

@@ -38,7 +38,7 @@ public enum ExecCommand {
             throw CLIError(
                 code: CLIErrorCode.containerNotRunning,
                 message: "Container \(info.id) is not running (state: \(info.state))",
-                hint: "Run 'adevcontainer start --name \(info.name)' or 'adevcontainer up' to start it"
+                hint: "Run '\(CommandSurface.commandPrefix) start --name \(info.name)' or '\(CommandSurface.commandPrefix) up' to start it"
             )
         }
 

@@ -215,7 +215,7 @@ public enum RebuildCommand {
                     code: CLIErrorCode.configNotFound,
                     property: ContainerIdentity.labelConfigFile,
                     message: "Managed container has no readable devcontainer config",
-                    hint: "Run 'adevcontainer up' or 'adevcontainer clone' to restore the container"
+                    hint: "Run '\(CommandSurface.commandPrefix) up' or '\(CommandSurface.commandPrefix) clone' to restore the container"
                 )
             }
             resolvedConfig = config
@@ -292,7 +292,7 @@ public enum RebuildCommand {
                 editCommand: configPath.isEmpty
                     ? "recovery editor unavailable"
                     : "edit \(configPath)",
-                retryCommand: "adevcontainer rebuild --name \(shellQuote(selected.name))"
+                retryCommand: "\(CommandSurface.commandPrefix) rebuild --name \(shellQuote(selected.name))"
             )
             return try BringUpRecovery.runNameCollision(
                 failure: failure,
