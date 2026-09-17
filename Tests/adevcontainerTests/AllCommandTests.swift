@@ -42,42 +42,59 @@ nonisolated(unsafe) let doctorTests: [(String, () throws -> Void)] = [
             )
         }
     }),
-    ("doctorRepairRestagesWhenSystemNotRunningThenFailsStart", {
+    ("installPluginRestagesWhenSystemNotRunning", {
         let root = try PluginTestSupport.makeInstallRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let sourceBytes = Data("repair-while-stopped-\(UUID().uuidString)\n".utf8)
+        let sourceBytes = Data("install-plugin-while-stopped-\(UUID().uuidString)\n".utf8)
         let source = root.appendingPathComponent("adevcontainer-src")
         try sourceBytes.write(to: source)
         let runtime = try PluginTestSupport.readyRuntime(
             executablePath: PluginTestSupport.containerBinary(in: root),
             status: "stopped"
         )
-        try MiniTest.expectThrows({
-            _ = try DoctorCommand.run(
-                runtime: runtime,
-                repair: true,
-                currentExecutablePath: source.path
-            )
-        }) { error in
+        try InstallPluginCommand.run(
+            runtime: runtime,
+            currentExecutablePath: source.path
+        )
+        let configPath = ContainerPluginLayout.configPath(installRoot: root.path)
+        let binaryPath = ContainerPluginLayout.binaryPath(installRoot: root.path)
+        try MiniTest.expect(
+            FileManager.default.fileExists(atPath: configPath),
+            "install-plugin restages config.toml even when container services are not running"
+        )
+        try MiniTest.expect(
+            FileManager.default.isExecutableFile(atPath: binaryPath),
+            "install-plugin restages plugin binary even when container services are not running"
+        )
+        let staged = try Data(contentsOf: URL(fileURLWithPath: binaryPath))
+        try MiniTest.expectEqual(staged, sourceBytes)
+    }),
+    ("doctorDoesNotRestageWhenSystemNotRunning", {
+        let root = try PluginTestSupport.makeInstallRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtime = try PluginTestSupport.readyRuntime(
+            executablePath: PluginTestSupport.containerBinary(in: root),
+            status: "stopped"
+        )
+        try MiniTest.expectThrows({ _ = try DoctorCommand.run(runtime: runtime) }) { error in
             let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.runtimeFailed)
             let text = (err.hint ?? "") + err.message
             try MiniTest.expect(
                 text.contains("container system start"),
-                "doctor may still fail afterward for non-running system"
+                "doctor still fails for a non-running system"
             )
         }
         let configPath = ContainerPluginLayout.configPath(installRoot: root.path)
         let binaryPath = ContainerPluginLayout.binaryPath(installRoot: root.path)
         try MiniTest.expect(
-            FileManager.default.fileExists(atPath: configPath),
-            "--repair restages config.toml even when container services are not running"
+            !FileManager.default.fileExists(atPath: configPath),
+            "doctor MUST NOT restage config.toml"
         )
         try MiniTest.expect(
-            FileManager.default.isExecutableFile(atPath: binaryPath),
-            "--repair restages plugin binary even when container services are not running"
+            !FileManager.default.fileExists(atPath: binaryPath),
+            "doctor MUST NOT restage plugin binary"
         )
-        let staged = try Data(contentsOf: URL(fileURLWithPath: binaryPath))
-        try MiniTest.expectEqual(staged, sourceBytes)
     })
 ]
 

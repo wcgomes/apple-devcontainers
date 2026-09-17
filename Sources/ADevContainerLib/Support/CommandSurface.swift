@@ -181,9 +181,12 @@ public enum CommandSurface {
                 continue
             }
             if a == "--repair" {
-                flags.insert("repair")
-                i += 1
-                continue
+                throw CLIError(
+                    code: CLIErrorCode.usage,
+                    property: "--repair",
+                    message: "Unknown option '--repair'",
+                    hint: "Restage the Apple CLI plugin with: adevcontainer install-plugin"
+                )
             }
             // Reject product-non-goal flags explicitly
             if a == "--branch" || a.hasPrefix("--branch=")
@@ -224,12 +227,12 @@ public enum CommandSurface {
 
     /// `-w` / `--workspace` is only valid for `up` (bind-mode create).
     public static func enforceWorkspaceGate(subcommand: String, parsed: ParsedArgs) throws {
-        if parsed.flags.contains("repair"), subcommand != "doctor" {
+        if parsed.flags.contains("repair") {
             throw CLIError(
                 code: CLIErrorCode.usage,
                 property: "--repair",
-                message: "--repair is only valid for doctor",
-                hint: "Restage the Apple CLI plugin with: adevcontainer doctor --repair"
+                message: "Unknown option '--repair'",
+                hint: "Restage the Apple CLI plugin with: adevcontainer install-plugin"
             )
         }
         if parsed.workspace != nil, subcommand != "up" {
@@ -261,7 +264,8 @@ public enum CommandSurface {
           \(cmd) <command> [options]
 
         Commands:
-          doctor [--repair]   Check Apple container runtime and plugin layout
+          doctor              Check Apple container runtime and plugin layout
+          install-plugin      Restage the Apple CLI plugin layout
           up [-w path]        Create/start/reuse bind-mode dev container (host path)
           clone <git-url>     Clone repo into volume-mode dev container (managed)
           list [--json]       List managed dev containers (up + clone)
@@ -282,7 +286,6 @@ public enum CommandSurface {
                                    suppresses the interactive recovery prompt
           --skip-pull              Skip image pull on up/clone/rebuild
           --vscode                 Best-effort open VS Code (not apply). postAttach is CLI attach except already-running start
-          --repair                 Restage the Apple CLI plugin layout (doctor only)
           -h, --help               Show help
 
         Identity:
@@ -366,17 +369,26 @@ public enum CommandSurface {
         switch subcommand {
         case "doctor":
             return """
-            \(cmd) doctor [--repair]
+            \(cmd) doctor
 
             Check Apple container runtime readiness (binary, version, system status)
             and the Apple CLI plugin layout under the container install-root.
 
-            --repair copies this executable to {install-root}/libexec/container-plugins/dev/bin/dev
-            and writes config.toml (CLI plugin: abstract, no [servicesConfig]).
-            Uses elevated privileges when the destination requires them.
-            A missing plugin is restaged with PATH `adevcontainer doctor --repair`
-            (never `container dev doctor --repair`).
+            Doctor does not restage the plugin. A missing plugin is restaged with
+            PATH `adevcontainer install-plugin` (use sudo when the destination
+            requires elevated privileges).
             Doctor does not require a devcontainer.json.
+            """
+        case "install-plugin":
+            return """
+            \(cmd) install-plugin
+
+            Copy this executable to {install-root}/libexec/container-plugins/dev/bin/dev
+            and write config.toml (CLI plugin: abstract, no [servicesConfig]).
+            Uses elevated privileges when the destination requires them.
+            Does not require `container system start`.
+            Restage a missing plugin with PATH `adevcontainer install-plugin`
+            (use sudo when the destination requires elevated privileges).
             """
         case "up":
             return """

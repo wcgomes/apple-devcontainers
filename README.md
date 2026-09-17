@@ -1,7 +1,7 @@
 # Apple Dev Container CLI (adevcontainer)
 
 [![CI](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml/badge.svg)](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-1061%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
+[![tests](https://img.shields.io/badge/tests-1066%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Native Swift CLI that reads `devcontainer.json` and runs development environments on Apple [`container`](https://github.com/apple/container).
@@ -33,7 +33,7 @@ Download `adevcontainer-macos-arm64.tar.gz` and `adevcontainer-macos-arm64.tar.g
 shasum -a 256 -c adevcontainer-macos-arm64.tar.gz.sha256
 tar xzf adevcontainer-macos-arm64.tar.gz
 sudo mv adevcontainer /usr/local/bin/ # or move it to another directory on PATH
-sudo adevcontainer doctor --repair   # restage container dev plugin (same as doctor --repair)
+sudo adevcontainer install-plugin    # restage container dev plugin (sudo when /usr/local/libexec is not writable)
 ```
 
 Verify the installation and Apple `container` setup:
@@ -94,7 +94,7 @@ container dev list
 container dev doctor
 ```
 
-Apple upgrades wipe the plugin. Restage with PATH `adevcontainer doctor --repair`. Do not run `container dev doctor --repair` when the plugin is missing — Apple cannot dispatch it.
+Apple upgrades wipe the plugin. Restage with PATH `adevcontainer install-plugin` (`sudo` when the destination requires elevation).
 
 ## Commands
 
@@ -105,6 +105,7 @@ The `start`, `exec`, `stop`, `delete`, `purge`, `rebuild`, and `inspect` command
 | Command | Purpose |
 | --- | --- |
 | `adevcontainer doctor` | Check Apple `container` readiness |
+| `adevcontainer install-plugin` | Restage the Apple CLI plugin after an Apple container upgrade |
 | `adevcontainer up [-w <path>] [--vscode]` | Create or start a dev container from a local folder |
 | `adevcontainer clone <git-url> [--vscode] [--resume <config-dir>]` | Clone a repository into a named volume and start its dev container |
 | `adevcontainer exec [-it] [--name <name>] [--] [cmd…]` | Open a shell or run a command in a running managed container |
