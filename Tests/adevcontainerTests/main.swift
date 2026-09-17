@@ -29,6 +29,7 @@ let allTests: [(String, () throws -> Void)] = []
     + errorModelTests
     + remoteUserResolutionTests
     + runtimeTests
+    + appleStaleExecTests
     + doctorTests
     + containerPluginTests
     + upTests
