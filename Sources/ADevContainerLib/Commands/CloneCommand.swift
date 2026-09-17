@@ -58,7 +58,7 @@ public enum CloneCommand {
             throw CLIError(
                 code: CLIErrorCode.usage,
                 message: "clone requires a git URL",
-                hint: "Usage: adevcontainer clone <git-url>"
+                hint: "Usage: \(CommandSurface.commandPrefix) clone <git-url>"
             )
         }
 
@@ -804,7 +804,7 @@ public enum CloneCommand {
         checkoutDir: String,
         options: CloneOptions
     ) -> String {
-        var command = "adevcontainer clone \(shellQuote(url))"
+        var command = "\(CommandSurface.commandPrefix) clone \(shellQuote(url))"
         if options.skipPull { command += " --skip-pull" }
         if options.openVSCode { command += " --vscode" }
         if options.jsonOutput { command += " --json" }

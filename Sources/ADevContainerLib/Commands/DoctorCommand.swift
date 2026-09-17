@@ -16,12 +16,113 @@ public struct DoctorReport: Equatable, Sendable {
     }
 }
 
+/// Apple CLI plugin `dev` layout under the parent of Apple `container`'s `bin/`.
+public enum ContainerPluginLayout {
+    public static let pluginName = "dev"
+    public static let relativeDirectory = "libexec/container-plugins/dev"
+    public static let configTOML = """
+    abstract = "Native Swift CLI for devcontainer.json on Apple container"
+    """
+
+    public static func installRoot(containerBinaryPath: String) -> String {
+        URL(fileURLWithPath: containerBinaryPath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .path
+    }
+
+    public static func pluginDirectory(installRoot: String) -> String {
+        URL(fileURLWithPath: installRoot)
+            .appendingPathComponent("libexec/container-plugins/dev")
+            .path
+    }
+
+    public static func configPath(installRoot: String) -> String {
+        URL(fileURLWithPath: pluginDirectory(installRoot: installRoot))
+            .appendingPathComponent("config.toml")
+            .path
+    }
+
+    public static func binaryPath(installRoot: String) -> String {
+        URL(fileURLWithPath: pluginDirectory(installRoot: installRoot))
+            .appendingPathComponent("bin/dev")
+            .path
+    }
+
+    public static func isPresent(installRoot: String, fileManager: FileManager = .default) -> Bool {
+        fileManager.fileExists(atPath: configPath(installRoot: installRoot))
+            && fileManager.isExecutableFile(atPath: binaryPath(installRoot: installRoot))
+    }
+
+    public static func requiresElevation(installRoot: String, fileManager: FileManager = .default) -> Bool {
+        var path = binaryPath(installRoot: installRoot)
+        path = (path as NSString).deletingLastPathComponent
+        while true {
+            if fileManager.fileExists(atPath: path) {
+                return !fileManager.isWritableFile(atPath: path)
+            }
+            let parent = (path as NSString).deletingLastPathComponent
+            if parent == path || parent.isEmpty { return true }
+            path = parent
+        }
+    }
+
+    public static func stage(
+        installRoot: String,
+        executablePath: String,
+        fileManager: FileManager = .default
+    ) throws {
+        let dir = pluginDirectory(installRoot: installRoot)
+        let destBinary = binaryPath(installRoot: installRoot)
+        let destConfig = configPath(installRoot: installRoot)
+        let binDir = (destBinary as NSString).deletingLastPathComponent
+        do {
+            try fileManager.createDirectory(atPath: binDir, withIntermediateDirectories: true)
+            let sourcePath = URL(fileURLWithPath: executablePath).standardizedFileURL.path
+            let destPath = URL(fileURLWithPath: destBinary).standardizedFileURL.path
+            if sourcePath != destPath {
+                if fileManager.fileExists(atPath: destBinary) {
+                    try fileManager.removeItem(atPath: destBinary)
+                }
+                try fileManager.copyItem(atPath: executablePath, toPath: destBinary)
+            }
+            try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destBinary)
+            try configTOML.write(toFile: destConfig, atomically: true, encoding: .utf8)
+        } catch {
+            throw CLIError(
+                code: CLIErrorCode.runtimeFailed,
+                message: "Could not write Apple CLI plugin layout at \(dir): \(error.localizedDescription)",
+                hint: restageHint(installRoot: installRoot, fileManager: fileManager)
+            )
+        }
+    }
+
+    public static func missingPluginError(installRoot: String, fileManager: FileManager = .default) -> CLIError {
+        CLIError(
+            code: CLIErrorCode.runtimeFailed,
+            message: "Apple CLI plugin 'dev' is not installed at \(pluginDirectory(installRoot: installRoot))",
+            hint: restageHint(installRoot: installRoot, fileManager: fileManager)
+        )
+    }
+
+    static func restageHint(installRoot: String, fileManager: FileManager) -> String {
+        requiresElevation(installRoot: installRoot, fileManager: fileManager)
+            ? "Run 'sudo adevcontainer doctor --repair' to restage the plugin (destination requires elevated privileges)"
+            : "Run 'adevcontainer doctor --repair' to restage the plugin"
+    }
+}
+
 public enum DoctorCommand {
-    public static func run(runtime: AppleContainerRuntime) throws -> DoctorReport {
+    public static func run(
+        runtime: AppleContainerRuntime,
+        repair: Bool = false,
+        currentExecutablePath: String = CommandLine.arguments.first ?? "",
+        fileManager: FileManager = .default
+    ) throws -> DoctorReport {
         var messages: [String] = []
         let path = runtime.executablePath
 
-        guard runtime.binaryExists() else {
+        guard runtime.binaryExists(fileManager: fileManager) else {
             throw CLIError(
                 code: CLIErrorCode.runtimeMissing,
                 message: "Apple container binary not found at \(path)",
@@ -29,6 +130,15 @@ public enum DoctorCommand {
             )
         }
         messages.append("binary: \(path)")
+
+        let installRoot = ContainerPluginLayout.installRoot(containerBinaryPath: path)
+        if repair {
+            try ContainerPluginLayout.stage(
+                installRoot: installRoot,
+                executablePath: currentExecutablePath,
+                fileManager: fileManager
+            )
+        }
 
         let versions = try runtime.systemVersion()
         let versionString: String
@@ -54,6 +164,13 @@ public enum DoctorCommand {
             )
         }
 
+        if !ContainerPluginLayout.isPresent(installRoot: installRoot, fileManager: fileManager) {
+            throw ContainerPluginLayout.missingPluginError(
+                installRoot: installRoot,
+                fileManager: fileManager
+            )
+        }
+
         return DoctorReport(
             ok: true,
             binaryPath: path,
@@ -64,7 +181,7 @@ public enum DoctorCommand {
     }
 
     public static func printReport(_ report: DoctorReport) {
-        print("adevcontainer doctor: PASS")
+        print("\(CommandSurface.commandPrefix) doctor: PASS")
         for m in report.messages {
             print("  \(m)")
         }

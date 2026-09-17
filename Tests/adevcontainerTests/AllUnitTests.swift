@@ -2188,7 +2188,32 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
     })
 ]
 
- nonisolated(unsafe) let runtimeTests: [(String, () throws -> Void)] = [
+  nonisolated(unsafe) let runtimeTests: [(String, () throws -> Void)] = [
+    ("resolveDefaultBinaryPrefersUsrLocalWhenExecutable", {
+        let fm = PluginTestFileManager()
+        fm.executablePaths.insert(AppleContainerRuntime.defaultBinaryPath)
+        fm.executablePaths.insert("/opt/plugin/bin/dev")
+        fm.executablePaths.insert("/opt/other/bin/container")
+        let path = AppleContainerRuntime.resolveDefaultBinary(
+            fileManager: fm,
+            processPath: "/opt/plugin/bin/dev",
+            pathEnvironment: "/opt/plugin/bin:/opt/other/bin"
+        )
+        try MiniTest.expectEqual(path, AppleContainerRuntime.defaultBinaryPath)
+    }),
+    ("resolveDefaultBinaryNeverSelectsPluginDev", {
+        let fm = PluginTestFileManager()
+        fm.executablePaths.insert("/opt/plugin/bin/dev")
+        fm.executablePaths.insert("/opt/real/bin/container")
+        let path = AppleContainerRuntime.resolveDefaultBinary(
+            fileManager: fm,
+            processPath: "/opt/plugin/bin/dev",
+            pathEnvironment: "/opt/plugin/bin:/opt/real/bin"
+        )
+        try MiniTest.expectEqual(path, "/opt/real/bin/container")
+        try MiniTest.expectEqual((path as NSString).lastPathComponent, "container")
+        try MiniTest.expect(path != "/opt/plugin/bin/dev")
+    }),
     ("createEnvExpandsPathRefs", {
         let nvmPrefix = "/usr/local/share/nvm/current/bin"
         let request = CreateRequest(

@@ -4,7 +4,13 @@ import ADevContainerLib
 @main
 struct AdevcontainerMain {
     static func main() {
-        let args = Array(CommandLine.arguments.dropFirst())
+        let processPath = CommandLine.arguments.first ?? ""
+        let raw = Array(CommandLine.arguments.dropFirst())
+        CommandSurface.commandPrefix = CommandSurface.invocationPrefix(
+            processPath: processPath,
+            argv: raw
+        )
+        let args = CommandSurface.productArguments(from: raw)
         do {
             let code = try dispatch(args: args)
             exit(code)
@@ -55,7 +61,10 @@ struct AdevcontainerMain {
 
         switch subcommand {
         case "doctor":
-            let report = try DoctorCommand.run(runtime: runtime)
+            let report = try DoctorCommand.run(
+                runtime: runtime,
+                repair: parsed.flags.contains("repair")
+            )
             DoctorCommand.printReport(report)
             return 0
 
@@ -90,7 +99,7 @@ struct AdevcontainerMain {
                     message: parsed.passthrough.isEmpty
                         ? "clone requires a git URL"
                         : "clone accepts only a single git URL argument",
-                    hint: "Usage: adevcontainer clone <git-url>"
+                    hint: "Usage: \(CommandSurface.commandPrefix) clone <git-url>"
                 )
             }
             let opts = CloneOptions(

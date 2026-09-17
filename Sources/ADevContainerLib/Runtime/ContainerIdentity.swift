@@ -356,7 +356,7 @@ public enum ContainerIdentity {
             code: CLIErrorCode.containerNameInUse,
             property: "name",
             message: "Container name '\(name)' is in use and is not this workspace",
-            hint: "Change \"name\" in devcontainer.json, or delete the occupant: adevcontainer delete --name \(name)"
+            hint: "Change \"name\" in devcontainer.json, or delete the occupant: \(CommandSurface.commandPrefix) delete --name \(name)"
         )
     }
 
@@ -364,7 +364,7 @@ public enum ContainerIdentity {
         CLIError(
             code: CLIErrorCode.workspaceContainerExists,
             message: "This workspace already has a managed container '\(existingName)'",
-            hint: "Delete it first: adevcontainer delete --name \(existingName)"
+            hint: "Delete it first: \(CommandSurface.commandPrefix) delete --name \(existingName)"
         )
     }
 
@@ -372,7 +372,7 @@ public enum ContainerIdentity {
         CLIError(
             code: CLIErrorCode.workspaceContainerExists,
             message: "Container '\(existingName)' already exists for this repository",
-            hint: "Delete it first: adevcontainer delete --name \(existingName)"
+            hint: "Delete it first: \(CommandSurface.commandPrefix) delete --name \(existingName)"
         )
     }
 

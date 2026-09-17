@@ -123,15 +123,26 @@ public struct AppleContainerRuntime: Sendable {
 
     public static let defaultBinaryPath = "/usr/local/bin/container"
 
-    public static func resolveDefaultBinary(fileManager: FileManager = .default) -> String {
-        if fileManager.isExecutableFile(atPath: defaultBinaryPath) {
+    public static func resolveDefaultBinary(
+        fileManager: FileManager = .default,
+        processPath: String = CommandLine.arguments.first ?? "",
+        pathEnvironment: String? = ProcessInfo.processInfo.environment["PATH"]
+    ) -> String {
+        func isUsableAppleContainer(_ path: String) -> Bool {
+            let base = (path as NSString).lastPathComponent
+            if base == ContainerPluginLayout.pluginName { return false }
+            if !processPath.isEmpty, path == processPath, base == ContainerPluginLayout.pluginName {
+                return false
+            }
+            return fileManager.isExecutableFile(atPath: path)
+        }
+        if isUsableAppleContainer(defaultBinaryPath) {
             return defaultBinaryPath
         }
-        // PATH lookup
-        if let pathEnv = ProcessInfo.processInfo.environment["PATH"] {
+        if let pathEnv = pathEnvironment {
             for dir in pathEnv.split(separator: ":") {
                 let candidate = "\(dir)/container"
-                if fileManager.isExecutableFile(atPath: candidate) {
+                if isUsableAppleContainer(candidate) {
                     return candidate
                 }
             }
@@ -811,7 +822,7 @@ public struct AppleContainerRuntime: Sendable {
                     code: CLIErrorCode.populateFailed,
                     property: "mounts",
                     message: "Cannot safely initialize new named volume '\(mount.source)' mounted at container root '/'",
-                    hint: "Mount it below '/', or create and pre-populate the named volume before running adevcontainer up"
+                    hint: "Mount it below '/', or create and pre-populate the named volume before running \(CommandSurface.commandPrefix) up"
                 )
             }
             return normalized
@@ -877,7 +888,7 @@ public struct AppleContainerRuntime: Sendable {
         let volumeNames = mounts.map(\.source).joined(separator: ", ")
         let hint: String
         if primaryError == nil {
-            hint = "Run 'container delete --force \(helperID)', then retry adevcontainer up; initialized volume(s) were preserved: \(volumeNames)"
+            hint = "Run 'container delete --force \(helperID)', then retry \(CommandSurface.commandPrefix) up; initialized volume(s) were preserved: \(volumeNames)"
         } else {
             hint = "Run 'container delete --force \(helperID)', then remove the partial volume(s) with 'container volume delete <name>' (\(volumeNames)), and retry"
         }
@@ -1472,7 +1483,7 @@ printf 'RECOVERY_APPLIED:%s\n' "$actual"
             code: CLIErrorCode.runtimeFailed,
             message: "container \(action) failed (exit \(result.exitCode))"
                 + (detail.isEmpty ? "" : ": \(detail)"),
-            hint: "Run 'adevcontainer doctor' and check Apple container system status"
+            hint: "Run '\(CommandSurface.commandPrefix) doctor' and check Apple container system status"
         )
     }
 

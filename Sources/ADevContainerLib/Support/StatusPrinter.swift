@@ -80,11 +80,11 @@ public enum StatusPrinter {
         }
         writeConnectionHint(
             label: "Connect with: ",
-            command: "adevcontainer exec -it --name \(nameOrId)"
+            command: "\(CommandSurface.commandPrefix) exec -it --name \(nameOrId)"
         )
         writeConnectionHint(
             label: "Open in VS Code with: ",
-            command: "adevcontainer start --name \(nameOrId) --vscode"
+            command: "\(CommandSurface.commandPrefix) start --name \(nameOrId) --vscode"
         )
     }
 

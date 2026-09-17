@@ -41,7 +41,7 @@ public enum ManagedContainers {
                 throw CLIError(
                     code: CLIErrorCode.containerNotFound,
                     message: "No managed container named '\(name)'",
-                    hint: "Run 'adevcontainer list' to see managed containers"
+                    hint: "Run '\(CommandSurface.commandPrefix) list' to see managed containers"
                 )
             }
             return found
@@ -50,7 +50,7 @@ public enum ManagedContainers {
             throw CLIError(
                 code: CLIErrorCode.containerNotFound,
                 message: "No managed containers found",
-                hint: "Create one with 'adevcontainer up' or 'adevcontainer clone <git-url>'"
+                hint: "Create one with '\(CommandSurface.commandPrefix) up' or '\(CommandSurface.commandPrefix) clone <git-url>'"
             )
         }
         if managed.count == 1 {
@@ -61,7 +61,7 @@ public enum ManagedContainers {
             throw CLIError(
                 code: CLIErrorCode.selectionRequired,
                 message: "Multiple managed containers; specify --name",
-                hint: "Run 'adevcontainer list' then retry with --name <container>"
+                hint: "Run '\(CommandSurface.commandPrefix) list' then retry with --name <container>"
             )
         }
         return try picker.pick(from: managed)

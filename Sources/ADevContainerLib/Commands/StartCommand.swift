@@ -197,7 +197,7 @@ public enum StartCommand {
     /// Original failure plus a `rebuild --name` hint (preserves code/message/property so
     /// scripts can match on the failure that triggered recovery rather than a synthetic wrapper).
     private static func startRecoveryHintError(_ failure: Error, name: String) -> CLIError {
-        let retry = "adevcontainer rebuild --name \(name)"
+        let retry = "\(CommandSurface.commandPrefix) rebuild --name \(name)"
         if let cli = failure as? CLIError {
             return CLIError(
                 code: cli.code,
