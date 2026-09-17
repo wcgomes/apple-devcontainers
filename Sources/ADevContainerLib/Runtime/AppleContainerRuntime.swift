@@ -1191,9 +1191,10 @@ if [ "$current" != "$expected_current" ]; then
   printf 'RECOVERY_CONFLICT:%s\n' "$current" >&2
   exit 42
 fi
-# Private temp while streaming bytes; final in-volume config must remain readable by
-# the workspace remoteUser (final-container verification and normal volume cat use
-# non-root). umask 077 only protects the transient temp file.
+# Private temp while streaming bytes. umask 077 only protects the transient temp
+# file. After mv the helper (root) would leave 644 root:root — readable but not
+# writable by the connection user (VS Code EACCES). Chown to the parent directory
+# owner (the rest of the volume already belongs to that user) then chmod 644.
 umask 077
 tmp=$(mktemp "$dir/.adevcontainer-recovery.XXXXXX")
 cleanup() {
@@ -1214,7 +1215,8 @@ if [ "$actual" != "$expected_bytes" ]; then
 fi
 mv -f -- "$tmp" "$target"
 trap - EXIT
-# Match ordinary workspace file readability (owner rw, group/other r).
+owner=$(stat -c '%u:%g' -- "$dir")
+chown "$owner" -- "$target"
 chmod 644 -- "$target"
 actual=$(hash_file "$target")
 printf 'RECOVERY_APPLIED:%s\n' "$actual"
@@ -1488,7 +1490,10 @@ printf 'RECOVERY_APPLIED:%s\n' "$actual"
     ) throws {
         var lastFailure: ProcessResult?
         for _ in 0..<Self.staleExecRetryLimit {
-            let result = try invoke(arguments, streamStderr: true)
+            // Capture stderr for classification and mapFailure. Live-tee would frame a
+            // retryable `deleteProcess: exec … does not exist` as `    | Error:` under
+            // `==> Deleting container` even when the wrap then succeeds.
+            let result = try invoke(arguments, streamStderr: false)
             if result.succeeded { return }
             lastFailure = result
             guard AppleStaleExec.isMissingExecProcess(result) else {
@@ -1505,7 +1510,7 @@ printf 'RECOVERY_APPLIED:%s\n' "$actual"
             } catch {
                 // Fall through; start can no-op/fail on zombie metadata.
             }
-            let result = try invoke(arguments, streamStderr: true)
+            let result = try invoke(arguments, streamStderr: false)
             if result.succeeded { return }
             lastFailure = result
             if containerIsListed(nameOrId) == false { return }

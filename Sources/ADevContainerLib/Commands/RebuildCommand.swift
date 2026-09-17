@@ -106,7 +106,8 @@ public enum RebuildCommand {
         fileManager: FileManager,
         recovery: RecoveryOrchestrator.Prepared? = nil,
         recoveryHelperID: String? = nil,
-        /// Same-process bind recovery retry: reuse stamps without requiring a live container.
+        /// Same-process recovery retry: skip re-selection. Bind resume may have no live
+        /// container; volume retry prefers the live helper, else the already-selected id.
         selectedOverride: ContainerInfo? = nil,
         allowRecovery: Bool = true,
         isTTY: Bool = AppleContainerConfig.stdinIsTTY(),
@@ -135,6 +136,12 @@ public enum RebuildCommand {
                 }
             }
         }
+        // Once a managed container is selected (picker / auto-single / --name / override),
+        // pin --name so nested recovery retry cannot re-open InteractivePicker.
+        var options = options
+        if options.name == nil || options.name?.isEmpty == true {
+            options.name = selected.name
+        }
         let labels = selected.labels
         let isVolumeMode = labels[ContainerIdentity.labelWorkspaceMode]
             == ContainerIdentity.workspaceModeVolume
@@ -148,6 +155,29 @@ public enum RebuildCommand {
                     try? recoveryContext.session.cleanup()
                 }
             }
+        }
+
+        func retryVolumeRecovery(
+            helperID: String,
+            prepared: RecoveryOrchestrator.Prepared
+        ) throws -> RebuildResult {
+            let retrySelected = (try? runtime.findByName(helperID)) ?? selected
+            return try runInternal(
+                options: options,
+                runtime: runtime,
+                credentials: credentials,
+                picker: picker,
+                localEnv: localEnv,
+                hostResources: hostResources,
+                fileManager: fileManager,
+                recovery: prepared,
+                recoveryHelperID: helperID,
+                selectedOverride: retrySelected,
+                allowRecovery: false,
+                isTTY: isTTY,
+                recoveryEditor: recoveryEditor,
+                openEditorPrompt: openEditorPrompt
+            )
         }
 
         // ═══════════════════════════ PHASE A (non-destructive gate) ═══════════════════════════
@@ -709,22 +739,8 @@ public enum RebuildCommand {
                     isTTY: isTTY,
                     editor: recoveryEditor,
                     openEditorPrompt: openEditorPrompt,
-                    retry: { helperID, session in
-                        try runInternal(
-                            options: options,
-                            runtime: runtime,
-                            credentials: credentials,
-                            picker: picker,
-                            localEnv: localEnv,
-                            hostResources: hostResources,
-                            fileManager: fileManager,
-                            recovery: recovery,
-                            recoveryHelperID: helperID,
-                            allowRecovery: false,
-                            isTTY: isTTY,
-                            recoveryEditor: recoveryEditor,
-                            openEditorPrompt: openEditorPrompt
-                        )
+                    retry: { helperID, _ in
+                        try retryVolumeRecovery(helperID: helperID, prepared: recovery)
                     }
                 )
             }
@@ -769,21 +785,7 @@ public enum RebuildCommand {
                     editor: recoveryEditor,
                     openEditorPrompt: openEditorPrompt,
                     retry: { helperID, _ in
-                        try runInternal(
-                            options: options,
-                            runtime: runtime,
-                            credentials: credentials,
-                            picker: picker,
-                            localEnv: localEnv,
-                            hostResources: hostResources,
-                            fileManager: fileManager,
-                            recovery: recovery,
-                            recoveryHelperID: helperID,
-                            allowRecovery: false,
-                            isTTY: isTTY,
-                            recoveryEditor: recoveryEditor,
-                            openEditorPrompt: openEditorPrompt
-                        )
+                        try retryVolumeRecovery(helperID: helperID, prepared: recovery)
                     }
                 )
             }
@@ -852,21 +854,7 @@ public enum RebuildCommand {
                     editor: recoveryEditor,
                     openEditorPrompt: openEditorPrompt,
                     retry: { helperID, _ in
-                        try runInternal(
-                            options: options,
-                            runtime: runtime,
-                            credentials: credentials,
-                            picker: picker,
-                            localEnv: localEnv,
-                            hostResources: hostResources,
-                            fileManager: fileManager,
-                            recovery: recovery,
-                            recoveryHelperID: helperID,
-                            allowRecovery: false,
-                            isTTY: isTTY,
-                            recoveryEditor: recoveryEditor,
-                            openEditorPrompt: openEditorPrompt
-                        )
+                        try retryVolumeRecovery(helperID: helperID, prepared: recovery)
                     }
                 )
             }
@@ -997,21 +985,7 @@ public enum RebuildCommand {
                     editor: recoveryEditor,
                     openEditorPrompt: openEditorPrompt,
                     retry: { helperID, _ in
-                        try runInternal(
-                            options: options,
-                            runtime: runtime,
-                            credentials: credentials,
-                            picker: picker,
-                            localEnv: localEnv,
-                            hostResources: hostResources,
-                            fileManager: fileManager,
-                            recovery: recovery,
-                            recoveryHelperID: helperID,
-                            allowRecovery: false,
-                            isTTY: isTTY,
-                            recoveryEditor: recoveryEditor,
-                            openEditorPrompt: openEditorPrompt
-                        )
+                        try retryVolumeRecovery(helperID: helperID, prepared: recovery)
                     }
                 )
             }
