@@ -275,6 +275,18 @@ func rebuildPickIndexPicker(_ index: Int) -> InteractivePicker {
     InteractivePicker(isInteractive: true, readLine: { "\(index)" })
 }
 
+final class RebuildPickerCallCount: @unchecked Sendable {
+    var value = 0
+}
+
+/// Interactive picker that records each `pick` (via numbered `readLine`) and selects `index`.
+func rebuildCountingPicker(_ index: Int, count: RebuildPickerCallCount) -> InteractivePicker {
+    InteractivePicker(isInteractive: true, readLine: {
+        count.value += 1
+        return "\(index)"
+    })
+}
+
 /// Build the OrderedFeature the FeaturesRunner would construct for `ref` from the fixture,
 /// so the derived tag computed in tests matches the implementation's.
 func rebuildOrderedFeature(
@@ -1404,6 +1416,521 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(editorLaunchesBeforeWrite, 1, "editor runs before the recovery write")
         try MiniTest.expect(sawWrite, "validated edit is written through the helper")
         try MiniTest.expect(mock.calls.contains { $0.arguments.first == "create" }, "rebuild proceeds after edit")
+    }),
+
+    ("rebuildNamedRecoveryRetryDoesNotRepromptPickerWhenMultipleManaged", {
+        // Named retry / in-editor rebuild already has a selected helper. A sibling managed
+        // container must not re-open InteractivePicker — rebuild that same id.
+        let broken = Data(#"{"image":"alpine:3.20","postCreateCommand":"exit 42","remoteUser":"vscode"}"#.utf8)
+        let fixed = Data(#"{"image":"alpine:3.20","postCreateCommand":"true","remoteUser":"vscode"}"#.utf8)
+        let sessionID = "tty-named-nopick-\(String(UUID().uuidString.prefix(8)).lowercased())"
+        let helperLabels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
+            ContainerIdentity.labelGitURL: "https://github.com/example/repo.git",
+            ContainerIdentity.labelWorkspaceVolume: "adev-repo-ws",
+            ContainerIdentity.labelConfigFile: ".devcontainer/devcontainer.json",
+            ContainerIdentity.labelWorkspaceFolder: "/workspaces/repo",
+            ContainerIdentity.labelConfigHash: "old-hash",
+            ContainerIdentity.labelRemoteUser: "vscode",
+            RecoveryHelper.recoveryMarkerLabel: RecoveryHelper.recoveryMarkerValue,
+            RecoveryHelper.recoverySessionLabel: sessionID
+        ]
+        let otherLabels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeBind,
+            ContainerIdentity.labelLocalFolder: "/tmp/other-ws",
+            ContainerIdentity.labelConfigFile: "/tmp/other-ws/.devcontainer/devcontainer.json",
+            ContainerIdentity.labelConfigHash: "other-hash",
+            ContainerIdentity.labelWorkspaceFolder: "/workspaces/other",
+            ContainerIdentity.labelRemoteUser: "vscode"
+        ]
+        let helper = ContainerInfo(
+            id: "adev-repo-123456789abc",
+            name: "adev-repo-123456789abc",
+            state: "running",
+            labels: helperLabels,
+            image: RecoveryHelper.helperImageReference
+        )
+        let raw = RawVolumeConfig(
+            bytes: broken,
+            pathInContainer: "/workspaces/repo/.devcontainer/devcontainer.json",
+            workspaceFolder: "/workspaces/repo",
+            workspaceFolderBasename: "repo"
+        )
+        let session = try RecoveryConfigSession(
+            rawVolumeConfig: raw,
+            targetContainerID: "old-id",
+            targetContainerName: helper.name,
+            workspaceVolume: "adev-repo-ws",
+            configFile: ".devcontainer/devcontainer.json",
+            sessionID: sessionID
+        )
+        defer { try? session.cleanup() }
+
+        let imageJSON: Data = {
+            let object: [String: Any] = [
+                "configuration": [
+                    "name": RecoveryHelper.helperImageReference,
+                    "variants": [[
+                        "digest": RecoveryHelper.helperImageDigest,
+                        "platform": ["os": "linux", "architecture": "arm64", "variant": "v8"]
+                    ]]
+                ]
+            ]
+            return try! JSONSerialization.data(withJSONObject: [object])
+        }()
+        let mountJSON: Data = {
+            let object: [String: Any] = [
+                "configuration": [
+                    "id": helper.id,
+                    "mounts": [[
+                        "source": "/var/lib/container/volumes/adev-repo-ws.img",
+                        "destination": "/workspaces/repo",
+                        "options": [],
+                        "type": ["volume": ["name": "adev-repo-ws"]]
+                    ]]
+                ]
+            ]
+            return try! JSONSerialization.data(withJSONObject: [object])
+        }()
+        var sawWrite = false
+        let editorRunner = RebuildTTYEditorRunner(bytes: fixed)
+        let pickCount = RebuildPickerCallCount()
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.starts(with: ["list", "--all"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: try! JSONSerialization.data(withJSONObject: [
+                        MockProcessRunner.containerListJSON(
+                            id: helper.id,
+                            state: "running",
+                            labels: helperLabels,
+                            image: RecoveryHelper.helperImageReference
+                        ),
+                        MockProcessRunner.containerListJSON(
+                            id: "sibling-bind",
+                            state: "running",
+                            labels: otherLabels
+                        )
+                    ]),
+                    stderr: Data()
+                )
+            }
+            if args.starts(with: ["volume", "list"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: try! JSONSerialization.data(withJSONObject: [["configuration": ["name": "adev-repo-ws"]]]),
+                    stderr: Data()
+                )
+            }
+            if args.starts(with: ["image", "inspect"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: args.last == RecoveryHelper.helperImageReference
+                        ? imageJSON
+                        : Data(#"{"configuration":{"labels":{}}}"#.utf8),
+                    stderr: Data()
+                )
+            }
+            if args == ["inspect", helper.id] {
+                return ProcessResult(exitCode: 0, stdout: mountJSON, stderr: Data())
+            }
+            if args.first == "exec", args.contains("cat") {
+                return ProcessResult(exitCode: 0, stdout: sawWrite ? fixed : broken, stderr: Data())
+            }
+            if args.first == "exec", args.contains("adevcontainer-recovery-write") {
+                sawWrite = true
+                let hash = RecoveryConfigSession.sha256Hex(fixed)
+                return ProcessResult(exitCode: 0, stdout: Data("RECOVERY_APPLIED:\(hash)\n".utf8), stderr: Data())
+            }
+            if args.first == "create" {
+                return ProcessResult(exitCode: 0, stdout: Data("final-id\n".utf8), stderr: Data())
+            }
+            if args.first == "start" || args.first == "delete" {
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            return nil
+        }]
+        let runtime = AppleContainerRuntime(executablePath: "container", runner: mock)
+        let editor = RecoveryEditor(
+            environment: ["VISUAL": "/test-editor"],
+            runner: editorRunner,
+            fallbackEditors: [],
+            executableChecker: { _ in true }
+        )
+        try withRebuildVolumeOverrides {
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(name: helper.name, skipPull: true),
+                runtime: runtime,
+                picker: rebuildCountingPicker(2, count: pickCount),
+                isTTY: true,
+                recoveryEditor: editor
+            )
+        }
+        try MiniTest.expectEqual(pickCount.value, 0, "named retry must not open the picker")
+        try MiniTest.expectEqual(editorRunner.launches, 1, "TTY named retry launches the editor once")
+        try MiniTest.expect(sawWrite, "validated edit is written through the helper")
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "create" }, "rebuild proceeds after edit")
+        let deletes = mock.calls.filter { $0.arguments.first == "delete" }.map(\.arguments)
+        try MiniTest.expect(deletes.contains { $0.contains(helper.id) }, "deletes the already-selected helper")
+        try MiniTest.expect(!deletes.contains { $0.contains("sibling-bind") }, "does not rebuild the sibling")
+    }),
+
+    ("rebuildInEditorRetryWithoutNameDoesNotRepromptPickerWhenMultipleManaged", {
+        // Operator selected the recovery helper via picker (no --name). After the terminal
+        // editor, rebuild must keep that container — a sibling must not re-prompt.
+        let broken = Data(#"{"image":"alpine:3.20","postCreateCommand":"exit 42","remoteUser":"vscode"}"#.utf8)
+        let fixed = Data(#"{"image":"alpine:3.20","postCreateCommand":"true","remoteUser":"vscode"}"#.utf8)
+        let sessionID = "tty-pick-once-\(String(UUID().uuidString.prefix(8)).lowercased())"
+        let helperLabels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
+            ContainerIdentity.labelGitURL: "https://github.com/example/repo.git",
+            ContainerIdentity.labelWorkspaceVolume: "adev-repo-ws",
+            ContainerIdentity.labelConfigFile: ".devcontainer/devcontainer.json",
+            ContainerIdentity.labelWorkspaceFolder: "/workspaces/repo",
+            ContainerIdentity.labelConfigHash: "old-hash",
+            ContainerIdentity.labelRemoteUser: "vscode",
+            RecoveryHelper.recoveryMarkerLabel: RecoveryHelper.recoveryMarkerValue,
+            RecoveryHelper.recoverySessionLabel: sessionID
+        ]
+        let otherLabels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeBind,
+            ContainerIdentity.labelLocalFolder: "/tmp/other-ws",
+            ContainerIdentity.labelConfigFile: "/tmp/other-ws/.devcontainer/devcontainer.json",
+            ContainerIdentity.labelConfigHash: "other-hash",
+            ContainerIdentity.labelWorkspaceFolder: "/workspaces/other",
+            ContainerIdentity.labelRemoteUser: "vscode"
+        ]
+        let helper = ContainerInfo(
+            id: "adev-repo-123456789abc",
+            name: "adev-repo-123456789abc",
+            state: "running",
+            labels: helperLabels,
+            image: RecoveryHelper.helperImageReference
+        )
+        let raw = RawVolumeConfig(
+            bytes: broken,
+            pathInContainer: "/workspaces/repo/.devcontainer/devcontainer.json",
+            workspaceFolder: "/workspaces/repo",
+            workspaceFolderBasename: "repo"
+        )
+        let session = try RecoveryConfigSession(
+            rawVolumeConfig: raw,
+            targetContainerID: "old-id",
+            targetContainerName: helper.name,
+            workspaceVolume: "adev-repo-ws",
+            configFile: ".devcontainer/devcontainer.json",
+            sessionID: sessionID
+        )
+        defer { try? session.cleanup() }
+
+        let imageJSON: Data = {
+            let object: [String: Any] = [
+                "configuration": [
+                    "name": RecoveryHelper.helperImageReference,
+                    "variants": [[
+                        "digest": RecoveryHelper.helperImageDigest,
+                        "platform": ["os": "linux", "architecture": "arm64", "variant": "v8"]
+                    ]]
+                ]
+            ]
+            return try! JSONSerialization.data(withJSONObject: [object])
+        }()
+        let mountJSON: Data = {
+            let object: [String: Any] = [
+                "configuration": [
+                    "id": helper.id,
+                    "mounts": [[
+                        "source": "/var/lib/container/volumes/adev-repo-ws.img",
+                        "destination": "/workspaces/repo",
+                        "options": [],
+                        "type": ["volume": ["name": "adev-repo-ws"]]
+                    ]]
+                ]
+            ]
+            return try! JSONSerialization.data(withJSONObject: [object])
+        }()
+        var sawWrite = false
+        let editorRunner = RebuildTTYEditorRunner(bytes: fixed)
+        let pickCount = RebuildPickerCallCount()
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.starts(with: ["list", "--all"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: try! JSONSerialization.data(withJSONObject: [
+                        MockProcessRunner.containerListJSON(
+                            id: helper.id,
+                            state: "running",
+                            labels: helperLabels,
+                            image: RecoveryHelper.helperImageReference
+                        ),
+                        MockProcessRunner.containerListJSON(
+                            id: "sibling-bind",
+                            state: "running",
+                            labels: otherLabels
+                        )
+                    ]),
+                    stderr: Data()
+                )
+            }
+            if args.starts(with: ["volume", "list"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: try! JSONSerialization.data(withJSONObject: [["configuration": ["name": "adev-repo-ws"]]]),
+                    stderr: Data()
+                )
+            }
+            if args.starts(with: ["image", "inspect"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: args.last == RecoveryHelper.helperImageReference
+                        ? imageJSON
+                        : Data(#"{"configuration":{"labels":{}}}"#.utf8),
+                    stderr: Data()
+                )
+            }
+            if args == ["inspect", helper.id] {
+                return ProcessResult(exitCode: 0, stdout: mountJSON, stderr: Data())
+            }
+            if args.first == "exec", args.contains("cat") {
+                return ProcessResult(exitCode: 0, stdout: sawWrite ? fixed : broken, stderr: Data())
+            }
+            if args.first == "exec", args.contains("adevcontainer-recovery-write") {
+                sawWrite = true
+                let hash = RecoveryConfigSession.sha256Hex(fixed)
+                return ProcessResult(exitCode: 0, stdout: Data("RECOVERY_APPLIED:\(hash)\n".utf8), stderr: Data())
+            }
+            if args.first == "create" {
+                return ProcessResult(exitCode: 0, stdout: Data("final-id\n".utf8), stderr: Data())
+            }
+            if args.first == "start" || args.first == "delete" {
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            return nil
+        }]
+        let runtime = AppleContainerRuntime(executablePath: "container", runner: mock)
+        let editor = RecoveryEditor(
+            environment: ["VISUAL": "/test-editor"],
+            runner: editorRunner,
+            fallbackEditors: [],
+            executableChecker: { _ in true }
+        )
+        try withRebuildVolumeOverrides {
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(skipPull: true),
+                runtime: runtime,
+                picker: rebuildCountingPicker(1, count: pickCount),
+                isTTY: true,
+                recoveryEditor: editor
+            )
+        }
+        try MiniTest.expectEqual(pickCount.value, 1, "picker runs once for initial selection, not after the editor")
+        try MiniTest.expectEqual(editorRunner.launches, 1)
+        try MiniTest.expect(sawWrite)
+        let deletes = mock.calls.filter { $0.arguments.first == "delete" }.map(\.arguments)
+        try MiniTest.expect(deletes.contains { $0.contains(helper.id) }, "deletes the picker-selected helper")
+        try MiniTest.expect(!deletes.contains { $0.contains("sibling-bind") }, "does not rebuild the sibling")
+    }),
+
+    ("rebuildVolumeTTYRecoverRetryDoesNotRepromptPickerWhenMultipleManaged", {
+        // Nested recover → retry → runInternal with name nil: picker once, then editor, never again.
+        let original = Data(#"{"image":"alpine:3.20","remoteUser":"vscode"}"#.utf8)
+        let fixed = Data(#"{"image":"alpine:3.20","remoteUser":"vscode","postCreateCommand":"true"}"#.utf8)
+        let volumeLabels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
+            ContainerIdentity.labelGitURL: "https://github.com/example/repo.git",
+            ContainerIdentity.labelWorkspaceVolume: "adev-repo-ws",
+            ContainerIdentity.labelConfigFile: ".devcontainer/devcontainer.json",
+            ContainerIdentity.labelWorkspaceFolder: "/workspaces/repo",
+            ContainerIdentity.labelConfigHash: "old-hash",
+            ContainerIdentity.labelRemoteUser: "vscode"
+        ]
+        let otherLabels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeBind,
+            ContainerIdentity.labelLocalFolder: "/tmp/other-ws",
+            ContainerIdentity.labelConfigFile: "/tmp/other-ws/.devcontainer/devcontainer.json",
+            ContainerIdentity.labelConfigHash: "other-hash",
+            ContainerIdentity.labelWorkspaceFolder: "/workspaces/other",
+            ContainerIdentity.labelRemoteUser: "vscode"
+        ]
+        let selected = ContainerInfo(
+            id: "vol-old",
+            name: "vol-old",
+            state: "running",
+            labels: volumeLabels,
+            image: "alpine:3.20"
+        )
+        let helperID = "recovery-helper-id"
+        let helperLabels = volumeLabels.merging([
+            RecoveryHelper.recoveryMarkerLabel: RecoveryHelper.recoveryMarkerValue,
+            RecoveryHelper.recoverySessionLabel: "will-be-replaced"
+        ]) { _, new in new }
+
+        let imageJSON: Data = {
+            let object: [String: Any] = [
+                "configuration": [
+                    "name": RecoveryHelper.helperImageReference,
+                    "variants": [[
+                        "digest": RecoveryHelper.helperImageDigest,
+                        "platform": ["os": "linux", "architecture": "arm64", "variant": "v8"]
+                    ]]
+                ]
+            ]
+            return try! JSONSerialization.data(withJSONObject: [object])
+        }()
+        let workspaceMount: [String: Any] = [
+            "source": "/var/lib/container/volumes/adev-repo-ws.img",
+            "destination": "/workspaces/repo",
+            "options": [],
+            "type": ["volume": ["name": "adev-repo-ws"]]
+        ]
+        func mountJSON(id: String) -> Data {
+            let object: [String: Any] = [
+                "configuration": [
+                    "id": id,
+                    "mounts": [workspaceMount]
+                ]
+            ]
+            return try! JSONSerialization.data(withJSONObject: [object])
+        }
+        func listEntry(
+            id: String,
+            labels: [String: String],
+            image: String = "alpine:3.20",
+            mounts: [[String: Any]]
+        ) -> [String: Any] {
+            var json = MockProcessRunner.containerListJSON(
+                id: id,
+                state: "running",
+                labels: labels,
+                image: image
+            )
+            var configuration = json["configuration"] as? [String: Any] ?? [:]
+            configuration["mounts"] = mounts
+            json["configuration"] = configuration
+            return json
+        }
+
+        var listed: [[String: Any]] = [
+            listEntry(id: selected.id, labels: volumeLabels, mounts: [workspaceMount]),
+            listEntry(id: "sibling-bind", labels: otherLabels, mounts: [])
+        ]
+        var sawWrite = false
+        var failedReplacement = false
+        let editorRunner = RebuildTTYEditorRunner(bytes: fixed)
+        let pickCount = RebuildPickerCallCount()
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.starts(with: ["list", "--all"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: try! JSONSerialization.data(withJSONObject: listed),
+                    stderr: Data()
+                )
+            }
+            if args.starts(with: ["volume", "list"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: try! JSONSerialization.data(withJSONObject: [["configuration": ["name": "adev-repo-ws"]]]),
+                    stderr: Data()
+                )
+            }
+            if args.starts(with: ["image", "inspect"]) {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: args.last == RecoveryHelper.helperImageReference
+                        ? imageJSON
+                        : Data(#"{"configuration":{"labels":{}}}"#.utf8),
+                    stderr: Data()
+                )
+            }
+            if args.first == "inspect" {
+                return ProcessResult(exitCode: 0, stdout: mountJSON(id: args.last ?? ""), stderr: Data())
+            }
+            if args.first == "exec", args.contains("cat") {
+                return ProcessResult(exitCode: 0, stdout: sawWrite ? fixed : original, stderr: Data())
+            }
+            if args.first == "exec", args.contains("adevcontainer-recovery-write") {
+                sawWrite = true
+                let hash = RecoveryConfigSession.sha256Hex(fixed)
+                return ProcessResult(exitCode: 0, stdout: Data("RECOVERY_APPLIED:\(hash)\n".utf8), stderr: Data())
+            }
+            if args.first == "create" {
+                if args.contains(RecoveryHelper.helperImageReference) {
+                    listed.append(
+                        listEntry(
+                            id: helperID,
+                            labels: helperLabels,
+                            image: RecoveryHelper.helperImageReference,
+                            mounts: [workspaceMount]
+                        )
+                    )
+                    return ProcessResult(exitCode: 0, stdout: Data("\(helperID)\n".utf8), stderr: Data())
+                }
+                if !failedReplacement {
+                    failedReplacement = true
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("create failed".utf8))
+                }
+                return ProcessResult(exitCode: 0, stdout: Data("final-id\n".utf8), stderr: Data())
+            }
+            if args.first == "delete" {
+                let id = args.last ?? ""
+                listed.removeAll { ($0["id"] as? String) == id }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            if args.first == "start" {
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            return nil
+        }]
+        let runtime = AppleContainerRuntime(executablePath: "container", runner: mock)
+        let editor = RecoveryEditor(
+            environment: ["VISUAL": "/test-editor"],
+            runner: editorRunner,
+            fallbackEditors: [],
+            executableChecker: { _ in true }
+        )
+        final class PromptAnswers: @unchecked Sendable {
+            var remaining: [String?] = [""]
+        }
+        let promptAnswers = PromptAnswers()
+        let openPrompt = RecoveryOpenEditorPrompt(
+            readLine: {
+                if promptAnswers.remaining.isEmpty { return nil }
+                return promptAnswers.remaining.removeFirst()
+            },
+            writeError: { _ in }
+        )
+        try withRebuildVolumeOverrides {
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(skipPull: true),
+                runtime: runtime,
+                picker: rebuildCountingPicker(1, count: pickCount),
+                isTTY: true,
+                recoveryEditor: editor,
+                openEditorPrompt: openPrompt
+            )
+        }
+        try MiniTest.expectEqual(pickCount.value, 1, "recover retry must not re-open the picker")
+        try MiniTest.expectEqual(editorRunner.launches, 1, "TTY recover opens the editor once after hard failure")
+        try MiniTest.expect(sawWrite, "recover writes through the helper before retry")
+        try MiniTest.expect(failedReplacement, "first replacement create is the hard post-delete failure")
+        let deletes = mock.calls.filter { $0.arguments.first == "delete" }.map(\.arguments)
+        try MiniTest.expect(deletes.contains { $0.contains(selected.id) || $0.contains(helperID) })
+        try MiniTest.expect(!deletes.contains { $0.contains("sibling-bind") }, "does not rebuild the sibling")
+        let creates = mock.calls.filter { $0.arguments.first == "create" }.map(\.arguments)
+        try MiniTest.expect(creates.contains { $0.contains(RecoveryHelper.helperImageReference) })
+        try MiniTest.expect(
+            !creates.contains { $0.contains("sibling-bind") },
+            "replacement create is not the sibling"
+        )
     }),
 
     ("rebuildNamedRecoveryRetryMissingWorkspaceVolumeFailsClosed", {

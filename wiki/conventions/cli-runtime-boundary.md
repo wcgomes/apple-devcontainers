@@ -262,7 +262,7 @@ After ownership, before create-path hooks, `up` fresh create (bind) and `rebuild
 
 ### InteractivePicker (multi-container)
 
-`ManagedContainers.resolveSelection` → **`InteractivePicker`** when `--name` omitted and more than one managed container. Code: `ManagedContainers.swift`, `TerminalRawInput.swift`. Rows/header via shared **`ManagedContainerTable`** (NAME STATE MODE SOURCE; lead `>` / `N)` — [terminal-output](terminal-output.md#managed-container-table-list--interactivepicker)). Foreign create-name collision does not use this picker.
+`ManagedContainers.resolveSelection` → **`InteractivePicker`** when `--name` omitted and more than one managed container. Code: `ManagedContainers.swift`, `TerminalRawInput.swift`. Rows/header via shared **`ManagedContainerTable`** (NAME STATE MODE SOURCE; lead `>` / `N)` — [terminal-output](terminal-output.md#managed-container-table-list--interactivepicker)). Foreign create-name collision does not use this picker. Rebuild recovery retry must **not** re-open the picker once a container is selected — pin the same id via `--name` / `selectedOverride` (bind resume already; volume named/retry must too). [gaps — clone-origin](../domain/devcontainer-apple-gaps.md#clone-origin-volume-path).
 
 | Mode | When | Behavior |
 |------|------|----------|

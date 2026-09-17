@@ -394,7 +394,14 @@ nonisolated(unsafe) let recoveryConfigSessionTests: [(String, () throws -> Void)
         try MiniTest.expectEqual(applied, expectedHash)
         try MiniTest.expectEqual(session.lastAppliedHash, expectedHash)
         try MiniTest.expectEqual(atomicCall?.stdinData, edited)
-        try MiniTest.expect(atomicCall?.arguments.contains { $0.contains("mktemp") } == true)
+        let script = atomicCall?.arguments.first { $0.contains("mktemp") } ?? ""
+        try MiniTest.expect(!script.isEmpty, "atomic write script is exec'd")
+        try MiniTest.expect(script.contains("chmod 644 -- \"$target\""), "final mode is owner-writable 644")
+        try MiniTest.expect(
+            script.contains("stat -c '%u:%g'") && script.contains("chown \"$owner\" -- \"$target\""),
+            "chown stamped config to parent-dir owner so the connection user can write"
+        )
+        try MiniTest.expect(!script.contains("chmod 666"), "must not world-write the stamped config")
         try MiniTest.expect(atomicCall?.arguments.contains("cp") != true)
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "cp" || $0.arguments.first == "copy" })
     }),

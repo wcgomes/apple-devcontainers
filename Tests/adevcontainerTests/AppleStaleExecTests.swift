@@ -29,7 +29,34 @@ private func isVolumeOrImageCommand(_ args: [String]) -> Bool {
     args.first == "volume" || args.first == "image"
 }
 
+private func assertDeleteStopNotStreamed(_ mock: MockProcessRunner) throws {
+    for call in mock.calls where call.arguments.first == "delete" || call.arguments.first == "stop" {
+        try MiniTest.expect(
+            call.streamStderr != true,
+            "delete/stop must not live-tee Apple stderr (got streamStderr=\(String(describing: call.streamStderr)) for \(call.arguments))"
+        )
+    }
+}
+
 nonisolated(unsafe) let appleStaleExecTests: [(String, () throws -> Void)] = [
+    ("deleteSucceedsFirstShotWithoutStreaming", {
+        var deleteCount = 0
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.first == "delete" {
+                deleteCount += 1
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            return nil
+        }]
+        try appleRuntime(mock).delete(nameOrId: "adev-helper", force: true)
+        try MiniTest.expectEqual(deleteCount, 1, "first-shot success is one invoke")
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "list" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "stop" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "start" })
+        try assertDeleteStopNotStreamed(mock)
+    }),
+
     ("appleStaleExecClassifiesNestedDeleteProcess", {
         try MiniTest.expect(AppleStaleExec.isMissingExecProcess(in: appleStaleExecStderr))
         try MiniTest.expect(AppleStaleExec.isMissingExecProcess(appleStaleExecFailure()))
@@ -85,6 +112,7 @@ nonisolated(unsafe) let appleStaleExecTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "stop" })
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "start" })
         try MiniTest.expect(!mock.calls.contains { isVolumeOrImageCommand($0.arguments) })
+        try assertDeleteStopNotStreamed(mock)
     }),
 
     ("deleteTreatsGoneAfterRetryBudgetAsSuccessWithoutBounce", {
@@ -235,6 +263,7 @@ nonisolated(unsafe) let appleStaleExecTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(mock.calls.contains { $0.arguments.first == "stop" })
         try MiniTest.expect(mock.calls.contains { $0.arguments.first == "start" })
         try MiniTest.expect(!mock.calls.contains { isVolumeOrImageCommand($0.arguments) })
+        try assertDeleteStopNotStreamed(mock)
     }),
 
     ("deleteDoesNotRetryUnrelatedFailure", {
@@ -283,6 +312,7 @@ nonisolated(unsafe) let appleStaleExecTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "start" })
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
         try MiniTest.expect(!mock.calls.contains { isVolumeOrImageCommand($0.arguments) })
+        try assertDeleteStopNotStreamed(mock)
     }),
 
     ("stopFailsClosedWithoutBounceWhenStillListed", {
@@ -312,6 +342,7 @@ nonisolated(unsafe) let appleStaleExecTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "start" })
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
         try MiniTest.expect(!mock.calls.contains { isVolumeOrImageCommand($0.arguments) })
+        try assertDeleteStopNotStreamed(mock)
     }),
 
     ("stopTreatsStaleExecAsSuccessWhenContainerAlreadyGone", {
