@@ -200,6 +200,43 @@ nonisolated(unsafe) let recoveryHelperTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "volume" && $0.arguments.dropFirst().first == "create" })
     }),
 
+    ("recoveryHelperCreateArgvStaysSleepOnly", {
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args == ["volume", "list", "--format", "json"] {
+                return ProcessResult(exitCode: 0, stdout: recoveryVolumeListJSON(["adev-repo-ws"]), stderr: Data())
+            }
+            if args == ["image", "inspect", RecoveryHelper.helperImageReference] {
+                return ProcessResult(exitCode: 0, stdout: recoveryImageInspectionJSON(), stderr: Data())
+            }
+            return nil
+        }]
+        let original = ContainerInfo(
+            id: "old-id",
+            name: "adev-repo-hash",
+            state: "running",
+            labels: recoveryLabels(),
+            image: "alpine:3.20"
+        )
+        let runtime = AppleContainerRuntime(executablePath: "container", runner: mock)
+        let preparation = try RecoveryHelper.prepare(
+            for: original,
+            sessionID: "session-opaque",
+            runtime: runtime,
+            pullIfMissing: false
+        )
+        try MiniTest.expect(preparation.request.createRequest.featureEntrypoints.isEmpty)
+        let args = preparation.request.createRequest.createArguments()
+        guard let i = args.firstIndex(of: "--entrypoint") else {
+            throw MiniTest.Failure(message: "recovery helper create missing --entrypoint")
+        }
+        try MiniTest.expectEqual(args[i + 1], "/bin/sleep")
+        try MiniTest.expect(args.contains("infinity"))
+        try MiniTest.expectEqual(args[i + 1], "/bin/sleep")
+        try MiniTest.expect(!args.contains("/bin/sh") || args[i + 1] != "/bin/sh")
+        try MiniTest.expect(!args.contains("-c") || args[i + 1] != "/bin/sh")
+    }),
+
     ("recoveryMissingVolumeRefusesBlankReplacement", {
         let mock = MockProcessRunner()
         mock.handlers = [{ args in

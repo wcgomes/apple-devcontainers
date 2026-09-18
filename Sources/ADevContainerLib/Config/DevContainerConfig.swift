@@ -307,6 +307,9 @@ public struct ResolvedDevContainerConfig: Equatable {
     public var featurePostCreateCommands: [NamedLifecycleCommand]
     public var featurePostStartCommands: [NamedLifecycleCommand]
     public var featurePostAttachCommands: [NamedLifecycleCommand]
+    /// Feature metadata `entrypoint` strings in install order. Applied only at main create.
+    /// Not a lifecycle hook and not hashed independently of `features`.
+    public var featureEntrypoints: [String]
     /// Config-stage (and later merged) compatibility issues. Excluded from hash material.
     public var compatibilityReport: CompatibilityReport
 
@@ -341,6 +344,7 @@ public struct ResolvedDevContainerConfig: Equatable {
         featurePostCreateCommands: [NamedLifecycleCommand] = [],
         featurePostStartCommands: [NamedLifecycleCommand] = [],
         featurePostAttachCommands: [NamedLifecycleCommand] = [],
+        featureEntrypoints: [String] = [],
         compatibilityReport: CompatibilityReport = CompatibilityReport()
     ) {
         self.name = name
@@ -373,6 +377,7 @@ public struct ResolvedDevContainerConfig: Equatable {
         self.featurePostCreateCommands = featurePostCreateCommands
         self.featurePostStartCommands = featurePostStartCommands
         self.featurePostAttachCommands = featurePostAttachCommands
+        self.featureEntrypoints = featureEntrypoints
         self.compatibilityReport = compatibilityReport
     }
 

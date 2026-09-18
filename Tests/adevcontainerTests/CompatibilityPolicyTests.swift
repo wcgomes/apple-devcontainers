@@ -141,6 +141,40 @@ nonisolated(unsafe) let compatibilityPolicyTests: [(String, () throws -> Void)] 
             try MiniTest.expect(err.message.lowercased().contains("image command") || err.message.contains("preserve"))
         }
     }),
+    ("overrideCommandDoesNotSelectFeatureEntrypointWrap", {
+        let previous = StatusPrinter.onWarning
+        defer { StatusPrinter.onWarning = previous }
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+        let resolved = try TestRepo.resolveConfig("""
+        {
+          "image": "alpine:3.20",
+          "overrideCommand": true
+        }
+        """)
+        try MiniTest.expect(warnings.isEmpty)
+        try MiniTest.expect(!resolved.compatibilityReport.hasDegradation)
+        try MiniTest.expect(resolved.featureEntrypoints.isEmpty)
+        let args = CreateRequest.from(
+            resolved: resolved,
+            identityName: "ctr",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        ).createArguments()
+        try MiniTest.expectEqual(
+            try createEntrypointTokens(args),
+            ["--entrypoint", "/bin/sleep", "alpine:3.20", "infinity"]
+        )
+        try MiniTest.expectThrows({
+            try ConfigAdmissions.admit([
+                "image": "alpine:3.20",
+                "overrideCommand": false
+            ])
+        }) { error in
+            try MiniTest.expectEqual((error as! CLIError).property, "overrideCommand")
+        }
+    }),
     ("invalidMetadataShapesRemainBlocking", {
         let cases: [(String, Any)] = [
             ("$schema", 1),

@@ -63,6 +63,8 @@ public struct CreateRequest: Equatable, Sendable {
     /// OCI platform for multi-arch images (e.g. `linux/arm64`). Never implies `--rosetta`.
     public var platform: String?
     public var configHash: String
+    /// Feature metadata `entrypoint` strings for main managed create. Empty → sleep-only argv.
+    public var featureEntrypoints: [String]
 
     public init(
         name: String,
@@ -81,7 +83,8 @@ public struct CreateRequest: Equatable, Sendable {
         memoryLimit: String? = nil,
         cpuLimit: String? = nil,
         platform: String? = nil,
-        configHash: String
+        configHash: String,
+        featureEntrypoints: [String] = []
     ) {
         self.name = name
         self.image = image
@@ -100,6 +103,7 @@ public struct CreateRequest: Equatable, Sendable {
         self.cpuLimit = cpuLimit
         self.platform = platform
         self.configHash = configHash
+        self.featureEntrypoints = featureEntrypoints
     }
 
     /// Build `container create` argv (without the executable).
@@ -161,7 +165,13 @@ public struct CreateRequest: Equatable, Sendable {
 
         // Keep container alive for attach/exec.
         // Never pass --rosetta here; user must opt in via runArgs if needed.
-        args += ["--entrypoint", "/bin/sleep", image, "infinity"]
+        // Feature entrypoints wrap as `/bin/sh -c` lines then `exec /bin/sleep infinity`.
+        if featureEntrypoints.isEmpty {
+            args += ["--entrypoint", "/bin/sleep", image, "infinity"]
+        } else {
+            let script = (featureEntrypoints + ["exec /bin/sleep infinity"]).joined(separator: "\n")
+            args += ["--entrypoint", "/bin/sh", image, "-c", script]
+        }
         return args
     }
 
@@ -262,7 +272,8 @@ public struct CreateRequest: Equatable, Sendable {
             memoryLimit: memoryLimit,
             cpuLimit: cpuLimit,
             platform: platform,
-            configHash: configHash
+            configHash: configHash,
+            featureEntrypoints: expanded.featureEntrypoints
         )
     }
 
@@ -309,7 +320,8 @@ public struct CreateRequest: Equatable, Sendable {
             memoryLimit: memoryLimit,
             cpuLimit: cpuLimit,
             platform: platform,
-            configHash: configHash
+            configHash: configHash,
+            featureEntrypoints: expanded.featureEntrypoints
         )
     }
 
