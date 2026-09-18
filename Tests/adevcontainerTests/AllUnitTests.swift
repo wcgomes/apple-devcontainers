@@ -44,6 +44,14 @@ enum TestRepo {
     }
 }
 
+/// Tokens from `--entrypoint` through the end of create argv.
+func createEntrypointTokens(_ args: [String]) throws -> [String] {
+    guard let i = args.firstIndex(of: "--entrypoint") else {
+        throw MiniTest.Failure(message: "create argv missing --entrypoint")
+    }
+    return Array(args[i...])
+}
+
 func makeUnitFixtureWorkspace(_ fileName: String) throws -> (workspace: URL, raw: [String: Any]) {
     let path = TestRepo.root().appendingPathComponent("Tests/Fixtures/").appendingPathComponent(fileName)
     let raw = try JSONCParser.loadFile(at: path.path)
@@ -6248,6 +6256,370 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expect(ctx.dockerfileContents.contains("FROM adev-app-df:abc123def456"))
         try MiniTest.expect(!ctx.dockerfileContents.contains("FROM alpine"))
+    }),
+    ("featureMetadataEntrypointStringParses", {
+        let meta = try FeatureMetadata.parse(
+            data: Data(#"{ "id": "sshd", "entrypoint": "/usr/local/share/ssh-init.sh" }"#.utf8),
+            featureRef: "ghcr.io/devcontainers/features/sshd:1"
+        )
+        try MiniTest.expectEqual(meta.entrypoint, "/usr/local/share/ssh-init.sh")
+    }),
+    ("featureMetadataEntrypointAbsentEmptyWhitespaceContributeNothing", {
+        let cases = [
+            #"{ "id": "x" }"#,
+            #"{ "id": "x", "entrypoint": "" }"#,
+            #"{ "id": "x", "entrypoint": "   " }"#,
+            #"{ "id": "x", "entrypoint": "\n\t" }"#
+        ]
+        for json in cases {
+            let meta = try FeatureMetadata.parse(data: Data(json.utf8), featureRef: "ghcr.io/x/y:1")
+            try MiniTest.expect(meta.entrypoint == nil, json)
+        }
+    }),
+    ("featureMetadataEntrypointNonStringFailsClosed", {
+        let cases: [(String, String)] = [
+            (#"{ "id": "x", "entrypoint": 1 }"#, "number"),
+            (#"{ "id": "x", "entrypoint": true }"#, "boolean"),
+            (#"{ "id": "x", "entrypoint": ["a"] }"#, "array"),
+            (#"{ "id": "x", "entrypoint": {"a":"b"} }"#, "object"),
+            (#"{ "id": "x", "entrypoint": null }"#, "null")
+        ]
+        for (json, kind) in cases {
+            try MiniTest.expectThrows({
+                _ = try FeatureMetadata.parse(data: Data(json.utf8), featureRef: "ghcr.io/x/y:1")
+            }) { error in
+                let err = error as! CLIError
+                try MiniTest.expectEqual(err.code, CLIErrorCode.featureMetadata, kind)
+                try MiniTest.expectEqual(err.property, "entrypoint", kind)
+                try MiniTest.expect(err.message.contains("ghcr.io/x/y:1"), kind)
+                try MiniTest.expect(err.message.lowercased().contains("entrypoint"), kind)
+            }
+        }
+    }),
+    ("featureEntrypointsCollectedInInstallOrder", {
+        let metaA = try FeatureMetadata.parse(
+            data: Data(#"{ "id": "a", "entrypoint": "/bin/a-init" }"#.utf8),
+            featureRef: "ghcr.io/example/a:1"
+        )
+        let metaB = try FeatureMetadata.parse(
+            data: Data(#"{ "id": "b" }"#.utf8),
+            featureRef: "ghcr.io/example/b:1"
+        )
+        let contrib = try FeatureContributionMerge.collect(from: [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: "ghcr.io/example/a:1"),
+                metadata: metaA
+            ),
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: "ghcr.io/example/b:1"),
+                metadata: metaB
+            )
+        ])
+        try MiniTest.expectEqual(contrib.entrypoints, ["/bin/a-init"])
+        try MiniTest.expect(contrib.initProcess == false)
+    }),
+    ("featureEmptyEntrypointContributesNothing", {
+        let meta = try FeatureMetadata.parse(
+            data: Data(#"""
+            { "id": "a", "init": true, "containerEnv": { "FOO": "bar" }, "entrypoint": "" }
+            """#.utf8),
+            featureRef: "ghcr.io/example/a:1"
+        )
+        let contrib = try FeatureContributionMerge.collect(from: [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: "ghcr.io/example/a:1"),
+                metadata: meta
+            )
+        ])
+        try MiniTest.expect(contrib.initProcess)
+        try MiniTest.expectEqual(contrib.containerEnv["FOO"], "bar")
+        try MiniTest.expect(contrib.entrypoints.isEmpty)
+        let merged = try FeatureContributionMerge.apply(
+            contributions: contrib,
+            to: ResolvedDevContainerConfig(image: "alpine:3.20", workspaceFolder: "/workspaces/x")
+        )
+        try MiniTest.expect(merged.featureEntrypoints.isEmpty)
+        try MiniTest.expect(merged.runArgs.contains(.initFlag))
+        try MiniTest.expectEqual(merged.containerEnv["FOO"], "bar")
+    }),
+    ("featureEntrypointIsNotMergedAsLifecycleHook", {
+        let meta = try FeatureMetadata.parse(
+            data: Data(#"{ "id": "sshd", "entrypoint": "/usr/local/share/ssh-init.sh" }"#.utf8),
+            featureRef: "ghcr.io/devcontainers/features/sshd:1"
+        )
+        let contrib = try FeatureContributionMerge.collect(from: [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: "ghcr.io/devcontainers/features/sshd:1"),
+                metadata: meta
+            )
+        ])
+        try MiniTest.expectEqual(contrib.entrypoints, ["/usr/local/share/ssh-init.sh"])
+        try MiniTest.expect(contrib.onCreateCommands.isEmpty)
+        try MiniTest.expect(contrib.updateContentCommands.isEmpty)
+        try MiniTest.expect(contrib.postCreateCommands.isEmpty)
+        try MiniTest.expect(contrib.postStartCommands.isEmpty)
+        try MiniTest.expect(contrib.postAttachCommands.isEmpty)
+        let merged = try FeatureContributionMerge.apply(
+            contributions: contrib,
+            to: ResolvedDevContainerConfig(image: "alpine:3.20", workspaceFolder: "/workspaces/x")
+        )
+        try MiniTest.expectEqual(merged.featureEntrypoints, ["/usr/local/share/ssh-init.sh"])
+        try MiniTest.expect(merged.featureOnCreateCommands.isEmpty)
+        try MiniTest.expect(merged.featureUpdateContentCommands.isEmpty)
+        try MiniTest.expect(merged.featurePostCreateCommands.isEmpty)
+        try MiniTest.expect(merged.featurePostStartCommands.isEmpty)
+        try MiniTest.expect(merged.featurePostAttachCommands.isEmpty)
+        try MiniTest.expect(merged.onCreateCommand == nil)
+        try MiniTest.expect(merged.postStartCommand == nil)
+    }),
+    ("emptyFeatureEntrypointKeepsSleepOnlyCreateArgv", {
+        let meta = try FeatureMetadata.parse(
+            data: Data(#"{ "id": "a", "entrypoint": "  " }"#.utf8),
+            featureRef: "ghcr.io/example/a:1"
+        )
+        let contrib = try FeatureContributionMerge.collect(from: [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: "ghcr.io/example/a:1"),
+                metadata: meta
+            )
+        ])
+        let merged = try FeatureContributionMerge.apply(
+            contributions: contrib,
+            to: ResolvedDevContainerConfig(image: "alpine:3.20", workspaceFolder: "/workspaces/x")
+        )
+        try MiniTest.expect(merged.featureEntrypoints.isEmpty)
+        let args = CreateRequest.from(
+            resolved: merged,
+            identityName: "ctr",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        ).createArguments()
+        try MiniTest.expectEqual(
+            try createEntrypointTokens(args),
+            ["--entrypoint", "/bin/sleep", "alpine:3.20", "infinity"]
+        )
+        try MiniTest.expect(!args.contains("-c"))
+    }),
+    ("singleFeatureEntrypointWrapsThenKeepAlive", {
+        let merged = try FeatureContributionMerge.apply(
+            contributions: FeatureContributions(entrypoints: ["/usr/local/share/ssh-init.sh"]),
+            to: ResolvedDevContainerConfig(image: "alpine:3.20", workspaceFolder: "/workspaces/x")
+        )
+        let args = CreateRequest.from(
+            resolved: merged,
+            identityName: "ctr",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        ).createArguments()
+        let tokens = try createEntrypointTokens(args)
+        try MiniTest.expectEqual(
+            Array(tokens.prefix(4)),
+            ["--entrypoint", "/bin/sh", "alpine:3.20", "-c"]
+        )
+        try MiniTest.expectEqual(tokens.count, 5)
+        let lines = tokens[4].split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        try MiniTest.expectEqual(lines, [
+            "/usr/local/share/ssh-init.sh",
+            "exec /bin/sleep infinity"
+        ])
+    }),
+    ("multipleFeatureEntrypointsRunAsSeparateLines", {
+        let contrib = try FeatureContributionMerge.collect(from: [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: "a"),
+                metadata: FeatureMetadata(id: "a", entrypoint: "/bin/a-init")
+            ),
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: "b"),
+                metadata: FeatureMetadata(id: "b", entrypoint: "/bin/b-init")
+            )
+        ])
+        try MiniTest.expectEqual(contrib.entrypoints, ["/bin/a-init", "/bin/b-init"])
+        let merged = try FeatureContributionMerge.apply(
+            contributions: contrib,
+            to: ResolvedDevContainerConfig(image: "alpine:3.20", workspaceFolder: "/workspaces/x")
+        )
+        let args = CreateRequest.from(
+            resolved: merged,
+            identityName: "ctr",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        ).createArguments()
+        let script = try createEntrypointTokens(args)[4]
+        let lines = script.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        try MiniTest.expectEqual(lines, [
+            "/bin/a-init",
+            "/bin/b-init",
+            "exec /bin/sleep infinity"
+        ])
+        try MiniTest.expect(!lines[0].hasPrefix("exec "))
+        try MiniTest.expect(!lines[1].hasPrefix("exec "))
+        try MiniTest.expectEqual(lines.filter { $0.hasPrefix("exec ") }, ["exec /bin/sleep infinity"])
+    }),
+    ("wrapperDoesNotExecFeatureEntrypointLines", {
+        let args = CreateRequest.from(
+            resolved: ResolvedDevContainerConfig(
+                image: "alpine:3.20",
+                workspaceFolder: "/workspaces/x",
+                featureEntrypoints: ["/usr/local/share/ssh-init.sh"]
+            ),
+            identityName: "ctr",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        ).createArguments()
+        let script = try createEntrypointTokens(args)[4]
+        let lines = script.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        try MiniTest.expectEqual(lines.first, "/usr/local/share/ssh-init.sh")
+        try MiniTest.expect(!lines[0].hasPrefix("exec "))
+        try MiniTest.expectEqual(lines.last, "exec /bin/sleep infinity")
+        try MiniTest.expectEqual(lines.filter { $0.contains("exec /bin/sleep infinity") }.count, 1)
+    }),
+    ("devcontainerIdInFeatureEntrypointExpandsAtCreate", {
+        let stem = "adev-ws-0123456789ab"
+        let args = CreateRequest.from(
+            resolved: ResolvedDevContainerConfig(
+                image: "alpine:3.20",
+                workspaceFolder: "/workspaces/x",
+                featureEntrypoints: ["echo ${devcontainerId}"]
+            ),
+            identityName: "ctr",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws",
+            devcontainerId: stem
+        ).createArguments()
+        let script = try createEntrypointTokens(args)[4]
+        try MiniTest.expect(script.contains(stem), "wrapper must contain expanded stem")
+        try MiniTest.expect(
+            !script.contains("${devcontainerId}"),
+            "wrapper must not leave a literal ${devcontainerId} token"
+        )
+        try MiniTest.expect(script.contains("echo \(stem)"))
+    }),
+    ("imageEntrypointAndCmdStayDiscarded", {
+        let sleepArgs = CreateRequest.from(
+            resolved: ResolvedDevContainerConfig(image: "alpine:3.20", workspaceFolder: "/workspaces/x"),
+            identityName: "ctr",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        ).createArguments()
+        try MiniTest.expectEqual(
+            try createEntrypointTokens(sleepArgs),
+            ["--entrypoint", "/bin/sleep", "alpine:3.20", "infinity"]
+        )
+        let wrapArgs = CreateRequest.from(
+            resolved: ResolvedDevContainerConfig(
+                image: "alpine:3.20",
+                workspaceFolder: "/workspaces/x",
+                featureEntrypoints: ["/usr/local/share/ssh-init.sh"]
+            ),
+            identityName: "ctr",
+            labels: [:],
+            configHash: "h",
+            workspacePath: "/ws"
+        ).createArguments()
+        let wrapTokens = try createEntrypointTokens(wrapArgs)
+        try MiniTest.expectEqual(wrapTokens[0], "--entrypoint")
+        try MiniTest.expectEqual(wrapTokens[1], "/bin/sh")
+        try MiniTest.expect(wrapTokens.last?.contains("exec /bin/sleep infinity") == true)
+        try MiniTest.expect(!wrapArgs.contains("CMD"))
+        try MiniTest.expect(!sleepArgs.contains("CMD"))
+    }),
+    ("featureDockerfileHasNoEntrypointAndRecipeVersionUnchanged", {
+        try MiniTest.expectEqual(DerivedImageTag.recipeVersion, "7")
+        let meta = try FeatureMetadata.parse(
+            data: Data(#"{ "id": "sshd", "entrypoint": "/usr/local/share/ssh-init.sh" }"#.utf8),
+            featureRef: "./sshd"
+        )
+        let ctxDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-df-ep-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: ctxDir) }
+        let pkgDir = (ctxDir as NSString).appendingPathComponent("pkg")
+        try FileManager.default.createDirectory(atPath: pkgDir, withIntermediateDirectories: true)
+        try #"{"id":"sshd","entrypoint":"/usr/local/share/ssh-init.sh"}"#.write(
+            toFile: (pkgDir as NSString).appendingPathComponent("devcontainer-feature.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "#!/bin/sh\n".write(
+            toFile: (pkgDir as NSString).appendingPathComponent("install.sh"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let ordered = [
+            FeatureOrder.OrderedFeature(
+                admitted: AdmittedFeature(reference: "./sshd"),
+                metadata: meta
+            )
+        ]
+        let ctx = try FeatureDockerfileGenerator.write(
+            baseImage: "alpine:3.20",
+            ordered: ordered,
+            packages: [FetchedFeaturePackage(reference: "./sshd", directoryPath: pkgDir)],
+            contextDirectory: ctxDir,
+            baseUser: "root"
+        )
+        try MiniTest.expect(
+            !ctx.dockerfileContents.contains("ENTRYPOINT"),
+            "Features Dockerfile must not emit ENTRYPOINT"
+        )
+        try MiniTest.expectEqual(DerivedImageTag.recipeVersion, "7")
+    }),
+    ("runArgsEntrypointRemainsRejected", {
+        for entry in [["--entrypoint"], ["--entrypoint", "/bin/bash"], ["--entrypoint=bash"]] as [[String]] {
+            try MiniTest.expectThrows({
+                try ConfigAdmissions.admit(["image": "alpine:3.20", "runArgs": entry])
+            }) { error in
+                let err = error as! CLIError
+                try MiniTest.expectEqual(err.property, "runArgs")
+                try MiniTest.expect(
+                    err.message.lowercased().contains("entrypoint")
+                        || (err.hint?.lowercased().contains("entrypoint") ?? false)
+                )
+            }
+        }
+    }),
+    ("startDoesNotRemeltFeatureEntrypointViaExec", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let config = ResolvedDevContainerConfig(
+            image: "alpine:3.20",
+            workspaceFolder: "/workspaces/app",
+            postCreateCommand: .shell("echo post-create"),
+            onCreateCommand: .shell("echo on-create"),
+            updateContentCommand: .shell("echo update"),
+            featureOnCreateCommands: [
+                NamedLifecycleCommand(name: "sshd", command: .shell("echo feat-on-create"))
+            ],
+            featurePostCreateCommands: [
+                NamedLifecycleCommand(name: "sshd", command: .shell("echo feat-post-create"))
+            ],
+            featureEntrypoints: ["/usr/local/share/ssh-init.sh"]
+        )
+        try LifecycleRunner.runRestartPostStart(
+            containerId: "ctr-ep",
+            config: config,
+            runtime: runtime
+        )
+        let execs = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execs.count, 0, "start remelt must not exec Feature entrypoint")
+        let joined = mock.calls.map { $0.arguments.joined(separator: " ") }.joined(separator: "\n")
+        try MiniTest.expect(!joined.contains("/usr/local/share/ssh-init.sh"))
+        try MiniTest.expect(!joined.contains("on-create"))
+        try MiniTest.expect(!joined.contains("post-create"))
     })
 ]
 

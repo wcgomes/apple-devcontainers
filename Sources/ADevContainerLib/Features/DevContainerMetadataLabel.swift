@@ -208,6 +208,7 @@ public enum DevContainerMetadataLabel {
         out.postCreateCommands.append(contentsOf: b.postCreateCommands)
         out.postStartCommands.append(contentsOf: b.postStartCommands)
         out.postAttachCommands.append(contentsOf: b.postAttachCommands)
+        out.entrypoints.append(contentsOf: b.entrypoints)
         return out
     }
 

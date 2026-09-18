@@ -6,6 +6,8 @@ public struct FeatureContributions: Equatable, Sendable {
     public var capAdd: [String]
     public var containerEnv: [String: String]
     public var mounts: [MountSpec]
+    /// Non-empty Feature `entrypoint` strings in install order. Not lifecycle hooks.
+    public var entrypoints: [String]
     public var onCreateCommands: [NamedLifecycleCommand]
     public var updateContentCommands: [NamedLifecycleCommand]
     public var postCreateCommands: [NamedLifecycleCommand]
@@ -17,6 +19,7 @@ public struct FeatureContributions: Equatable, Sendable {
         capAdd: [String] = [],
         containerEnv: [String: String] = [:],
         mounts: [MountSpec] = [],
+        entrypoints: [String] = [],
         onCreateCommands: [NamedLifecycleCommand] = [],
         updateContentCommands: [NamedLifecycleCommand] = [],
         postCreateCommands: [NamedLifecycleCommand] = [],
@@ -27,6 +30,7 @@ public struct FeatureContributions: Equatable, Sendable {
         self.capAdd = capAdd
         self.containerEnv = containerEnv
         self.mounts = mounts
+        self.entrypoints = entrypoints
         self.onCreateCommands = onCreateCommands
         self.updateContentCommands = updateContentCommands
         self.postCreateCommands = postCreateCommands
@@ -56,6 +60,9 @@ public enum FeatureContributionMerge {
                 }
             }
             result.mounts.append(contentsOf: meta.mounts)
+            if let entrypoint = meta.entrypoint, !entrypoint.isEmpty {
+                result.entrypoints.append(entrypoint)
+            }
             let name = FeatureRef.hookDisplayName(metadataId: meta.id, reference: f.admitted.reference)
             if let c = meta.onCreateCommand {
                 result.onCreateCommands.append(NamedLifecycleCommand(name: name, command: c))
@@ -130,6 +137,7 @@ public enum FeatureContributionMerge {
         out.featurePostCreateCommands = contributions.postCreateCommands
         out.featurePostStartCommands = contributions.postStartCommands
         out.featurePostAttachCommands = contributions.postAttachCommands
+        out.featureEntrypoints = contributions.entrypoints
 
         return out
     }

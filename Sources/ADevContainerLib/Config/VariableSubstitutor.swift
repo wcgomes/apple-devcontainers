@@ -117,6 +117,9 @@ public enum VariableSubstitutor {
             }
             out.containerEnv = env
         }
+        if config.featureEntrypoints.contains(where: { $0.contains(devcontainerIdToken) }) {
+            out.featureEntrypoints = config.featureEntrypoints.map { expandDevcontainerId(in: $0, id: id) }
+        }
         return out
     }
 

@@ -173,7 +173,8 @@ public enum WorkspaceOwnership {
             mounts: Array(helperMounts.dropFirst()),
             runArgs: helperRunArgs,
             platform: createRequest.platform,
-            configHash: ""
+            configHash: "",
+            featureEntrypoints: []
         )
 
         var script = """

@@ -280,7 +280,8 @@ public enum RecoveryHelper {
             memoryLimit: nil,
             cpuLimit: nil,
             platform: image.platform,
-            configHash: configHash
+            configHash: configHash,
+            featureEntrypoints: []
         )
         return HelperRequest(
             image: image,

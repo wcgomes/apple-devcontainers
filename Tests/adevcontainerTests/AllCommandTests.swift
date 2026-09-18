@@ -488,6 +488,46 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
         let mainStart = mock.calls.firstIndex { $0.arguments == ["start", resolved.containerName] }!
         try MiniTest.expect(helperDelete < mainStart, "helper releases the named volume before the main container starts")
     }),
+    ("ownershipHelperCreateStaysSleepOnlyWhenMainWouldWrap", {
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.first == "create" {
+                let name = args[args.firstIndex(of: "--name")! + 1]
+                return ProcessResult(exitCode: 0, stdout: Data("\(name)\n".utf8), stderr: Data())
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let main = CreateRequest(
+            name: "main",
+            image: "alpine:3.20",
+            labels: [:],
+            workspaceBindHost: "/host",
+            workspaceBindTarget: "/workspaces/app",
+            user: "dev",
+            mounts: [],
+            runArgs: [.capDrop("ALL")],
+            configHash: "hash",
+            featureEntrypoints: ["/usr/local/share/ssh-init.sh"]
+        )
+        let mainTokens = try createEntrypointTokens(main.createArguments())
+        try MiniTest.expectEqual(mainTokens[1], "/bin/sh")
+        try MiniTest.expect(mainTokens.contains { $0.contains("/usr/local/share/ssh-init.sh") })
+        try WorkspaceOwnership.ensureNamedVolumeMountsWritableByRemoteUser(
+            containerId: "main-id",
+            mounts: [MountSpec(type: .volume, source: "corepack-cache", target: "/home/dev/.cache")],
+            remoteUser: "dev",
+            runtime: runtime,
+            createRequest: main
+        )
+        let helperCreate = mock.calls.first { $0.arguments.first == "create" }!.arguments
+        try MiniTest.expect(helperCreate.contains(where: { $0.hasPrefix("adev-ownership-") }))
+        let helperTokens = try createEntrypointTokens(helperCreate)
+        try MiniTest.expectEqual(helperTokens[1], "/bin/sleep")
+        try MiniTest.expect(helperTokens.contains("infinity"))
+        try MiniTest.expect(!helperCreate.contains("/usr/local/share/ssh-init.sh"))
+        try MiniTest.expect(!helperCreate.contains("-c") || helperTokens[1] != "/bin/sh")
+    }),
     ("upSkipsNamedVolumeChownForRoot", {
         let workspace = try TestRepo.makeTempWorkspace(configJSON: """
         {

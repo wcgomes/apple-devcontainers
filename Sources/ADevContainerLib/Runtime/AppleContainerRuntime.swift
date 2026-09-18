@@ -758,7 +758,8 @@ public struct AppleContainerRuntime: Sendable {
             mounts: Array(helperMounts.dropFirst()),
             runArgs: request.runArgs.contains(.rosetta) ? [.rosetta] : [],
             platform: request.platform,
-            configHash: ""
+            configHash: "",
+            featureEntrypoints: []
         )
 
         var helperID: String?

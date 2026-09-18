@@ -20,6 +20,8 @@ public struct FeatureMetadata: Equatable, Sendable {
     public var postCreateCommand: LifecycleCommand?
     public var postStartCommand: LifecycleCommand?
     public var postAttachCommand: LifecycleCommand?
+    /// Feature metadata `entrypoint` string. Nil when absent, empty, or whitespace-only.
+    public var entrypoint: String?
     /// Declared option schemas (defaults applied when user omits).
     public var optionDefaults: [String: FeatureOptionValue]
 
@@ -41,6 +43,7 @@ public struct FeatureMetadata: Equatable, Sendable {
         postCreateCommand: LifecycleCommand? = nil,
         postStartCommand: LifecycleCommand? = nil,
         postAttachCommand: LifecycleCommand? = nil,
+        entrypoint: String? = nil,
         optionDefaults: [String: FeatureOptionValue] = [:]
     ) {
         self.id = id
@@ -60,6 +63,7 @@ public struct FeatureMetadata: Equatable, Sendable {
         self.postCreateCommand = postCreateCommand
         self.postStartCommand = postStartCommand
         self.postAttachCommand = postAttachCommand
+        self.entrypoint = entrypoint
         self.optionDefaults = optionDefaults
     }
 
@@ -171,6 +175,7 @@ public struct FeatureMetadata: Equatable, Sendable {
             postCreateCommand: try LifecycleCommand.parse(dict["postCreateCommand"], property: "postCreateCommand"),
             postStartCommand: try LifecycleCommand.parse(dict["postStartCommand"], property: "postStartCommand"),
             postAttachCommand: try LifecycleCommand.parse(dict["postAttachCommand"], property: "postAttachCommand"),
+            entrypoint: try parseEntrypoint(dict["entrypoint"], featureRef: featureRef),
             optionDefaults: optionDefaults
         )
     }
@@ -206,5 +211,21 @@ public struct FeatureMetadata: Equatable, Sendable {
     private static func boolValue(_ any: Any?) -> Bool? {
         if let b = any as? Bool { return b }
         return nil
+    }
+
+    /// String when present and non-empty after trim; nil when absent/empty/whitespace.
+    /// Non-string (number, boolean, array, object, null) fails closed.
+    private static func parseEntrypoint(_ value: Any?, featureRef: String) throws -> String? {
+        guard let value else { return nil }
+        guard let s = value as? String else {
+            throw CLIError(
+                code: CLIErrorCode.featureMetadata,
+                property: "entrypoint",
+                message: "Feature '\(featureRef)' entrypoint must be a string",
+                hint: "Set entrypoint to a shell command string, or omit it"
+            )
+        }
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
