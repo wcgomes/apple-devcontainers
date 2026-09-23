@@ -300,7 +300,7 @@ Shared primitive for `up`/`clone` (edit-and-retry) and `start` (rebuild handoff)
 
 ## `purge` resource set
 
-`purge` removes container + config `image` + **unreferenced** candidate volumes. Labels define candidates only — **not** unconditional volume delete.
+Interactive `purge` is not an immediate delete. Resource set: container + config `image` + **unreferenced** candidate volumes. Labels define candidates only — **not** unconditional volume delete.
 
 | Resource | Included? |
 |----------|-----------|
@@ -314,7 +314,7 @@ Shared primitive for `up`/`clone` (edit-and-retry) and `start` (rebuild handoff)
 
 **Attachment gate (after target container deleted or already absent):** for each distinct candidate name, inspect real volume mounts on **all** remaining containers (managed or not, **running or stopped**) via `containersAttached` / `list --all` style inspection. Target does not count. **Unreferenced** + exists → delete. **Referenced (shared)** → preserve + stderr StatusPrinter warning listing referencers (prefer name+id); share-only is **not** a hard failure (exit 0 when no other hard fails). **Attach inspect fail** → preserve that volume + non-zero. Runtime rejection on volume delete remains hard-fail. Missing resources skipped.
 
-**Model:** labels live on containers, not volumes; same volume name = shared resource (Docker-like). No Compose `external` / shared-private naming schema. `delete` stays container-only. Recovery-helper purge skip unchanged. Contract: [`specs/managed-lifecycle.md`](../../specs/managed-lifecycle.md); archive [`20260812-prune-shared-volume-safety`](../../specs/changes/archive/20260812-prune-shared-volume-safety/).
+**Model:** labels live on containers, not volumes; same volume name = shared resource (Docker-like). No Compose `external` / shared-private naming schema. `delete` stays container-only. Recovery-helper purge skip unchanged. Contract (resource set and confirmation): [`specs/managed-lifecycle.md`](../../specs/managed-lifecycle.md); archive [`20260812-prune-shared-volume-safety`](../../specs/changes/archive/20260812-prune-shared-volume-safety/).
 
 ## Features runner
 

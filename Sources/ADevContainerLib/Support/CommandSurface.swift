@@ -273,7 +273,7 @@ public enum CommandSurface {
           exec [-it] [--name] [--] [cmd...]  Run a command (or shell) in a managed dev container
           stop [--name]       Stop a managed dev container (name or picker)
           delete [--name]     Remove container only (not workspace volume)
-          purge [--name]      Remove container, volumes (incl. *-ws), and config image
+          purge [--name]      Remove container, volumes (incl. *-ws), and config image; confirms on a TTY
           rebuild [--name]    Force-rebuild a managed dev container from its current config
                                (same name; volumes preserved)
           inspect [--name]    Show identity, state, labels (from runtime + labels)
@@ -494,6 +494,7 @@ public enum CommandSurface {
 
             Remove managed container, config named volumes (label), volume-mode
             workspace volume (*-ws), and config image. Selection via --name/picker.
+            On a TTY, confirms before deletion (default no). Non-TTY proceeds without a prompt.
             """
         case "inspect":
             return """
