@@ -1886,8 +1886,209 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
             !mock.calls.contains { $0.arguments == ["volume", "delete", "other-vol"] },
             "volumes not in labels must never be deleted"
         )
-    })
+    }),
+    ("purgeInteractiveDeclineSkipsDeletes", {
+        let previousEnabled = StatusPrinter.enabled
+        let previousPhase = StatusPrinter.hasEmittedPhase
+        defer {
+            StatusPrinter.enabled = previousEnabled
+            StatusPrinter.hasEmittedPhase = previousPhase
+        }
+        StatusPrinter.enabled = true
+        let id = "adev-purge-confirm"
+        let prompt = "Purge dev container \(id) and its unreferenced volumes and image? [y/N] "
+        let answers: [String?] = [nil, "", "  ", "n", "no", "N", "NO", "maybe"]
+        for answer in answers {
+            let (runtime, mock) = makePurgeConfirmRuntime(id: id)
+            var stdout = ""
+            var stderr = ""
+            #if canImport(Darwin) || canImport(Glibc)
+            fflush(nil)
+            #endif
+            try withCapturedStdout({
+                try withCapturedStderr({
+                    let code = try PurgeCommand.run(
+                        name: id,
+                        runtime: runtime,
+                        isInteractive: true,
+                        readLine: { answer }
+                    )
+                    #if canImport(Darwin) || canImport(Glibc)
+                    fflush(nil)
+                    #endif
+                    try MiniTest.expectEqual(code, 0, "decline \(String(describing: answer))")
+                }, capture: &stderr)
+            }, capture: &stdout)
+            try MiniTest.expectEqual(stderr, prompt, "stderr for \(String(describing: answer))")
+            try MiniTest.expect(!stderr.contains("Purging"), "no purging phase for \(String(describing: answer))")
+            try MiniTest.expect(!stderr.contains("Deleting"), "no deleting phase for \(String(describing: answer))")
+            try MiniTest.expectEqual(stdout, "Purge cancelled\n", "stdout for \(String(describing: answer))")
+            try MiniTest.expect(
+                !mock.calls.contains { ["delete", "volume", "image"].contains($0.arguments.first ?? "") },
+                "no deletes for \(String(describing: answer))"
+            )
+        }
+    }),
+    ("purgeInteractiveYesDeletes", {
+        let previousEnabled = StatusPrinter.enabled
+        let previousPhase = StatusPrinter.hasEmittedPhase
+        defer {
+            StatusPrinter.enabled = previousEnabled
+            StatusPrinter.hasEmittedPhase = previousPhase
+        }
+        StatusPrinter.enabled = true
+        let id = "adev-purge-confirm"
+        let prompt = "Purge dev container \(id) and its unreferenced volumes and image? [y/N] "
+        for answer in ["y", "Yes", " y "] {
+            let (runtime, mock) = makePurgeConfirmRuntime(id: id)
+            var stderr = ""
+            let code = try withCapturedPurgeStderr(capture: &stderr) {
+                try PurgeCommand.run(
+                    name: id,
+                    runtime: runtime,
+                    isInteractive: true,
+                    readLine: { answer }
+                )
+            }
+            try MiniTest.expectEqual(code, 0, "yes \(answer)")
+            try MiniTest.expect(stderr.contains(prompt), "prompt for \(answer)")
+            try MiniTest.expect(stderr.contains("Purging"), "purging phase for \(answer)")
+            if let promptAt = stderr.range(of: prompt), let purgingAt = stderr.range(of: "Purging") {
+                try MiniTest.expect(promptAt.upperBound <= purgingAt.lowerBound, "prompt before purging for \(answer)")
+            }
+            try MiniTest.expect(purgeConfirmDeleted(mock, id: id), "deletes run for \(answer)")
+        }
+    }),
+    ("purgeNonInteractiveProceedsWithoutPrompt", {
+        let id = "adev-purge-confirm"
+        let (runtime, mock) = makePurgeConfirmRuntime(id: id)
+        var read = false
+        var stderr = ""
+        let code = try withCapturedPurgeStderr(capture: &stderr) {
+            try PurgeCommand.run(
+                name: id,
+                runtime: runtime,
+                isInteractive: false,
+                readLine: {
+                    read = true
+                    return "n"
+                }
+            )
+        }
+        try MiniTest.expectEqual(code, 0)
+        try MiniTest.expect(!read, "non-TTY must not read a line")
+        try MiniTest.expect(!stderr.contains("Purge dev container"), "non-TTY must not prompt")
+        try MiniTest.expect(purgeConfirmDeleted(mock, id: id))
+    }),
+    ("purgeInteractiveSkipsRecoveryHelperWithoutPrompt", {
+        let id = "recovery-helper"
+        let (runtime, mock) = makePurgeConfirmRuntime(id: id, recoveryHelper: true)
+        var read = false
+        var stderr = ""
+        let code = try withCapturedPurgeStderr(capture: &stderr) {
+            try PurgeCommand.run(
+                name: id,
+                runtime: runtime,
+                isInteractive: true,
+                readLine: {
+                    read = true
+                    return "y"
+                }
+            )
+        }
+        try MiniTest.expectEqual(code, 0)
+        try MiniTest.expect(!read, "recovery helper skip must not prompt")
+        try MiniTest.expect(!stderr.contains("Purge dev container"))
+        try MiniTest.expect(
+            !mock.calls.contains { ["delete", "volume", "image"].contains($0.arguments.first ?? "") },
+            "recovery helper skip must not delete"
+        )
+    }),
+    ("purgeHelpMentionsTTYConfirmation", {
+        let usage = CommandSurface.usageText()
+        try MiniTest.expect(usage.contains("purge [--name]"))
+        try MiniTest.expect(usage.contains("confirms on a TTY"))
+        let help = CommandSurface.commandHelpText("purge") ?? ""
+        try MiniTest.expect(help.contains("TTY"))
+        try MiniTest.expect(help.contains("confirms before deletion"))
+        try MiniTest.expect(help.contains("Non-TTY proceeds without a prompt"))
+        try MiniTest.expect(!help.contains("--yes"))
+        try MiniTest.expect(!usage.contains("--yes"))
+    }),
 ]
+
+private final class PurgeConfirmDeleted: @unchecked Sendable {
+    var value = false
+}
+
+private func makePurgeConfirmRuntime(
+    id: String = "adev-purge-confirm",
+    recoveryHelper: Bool = false
+) -> (runtime: AppleContainerRuntime, mock: MockProcessRunner) {
+    var labels: [String: String] = [
+        ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+        ContainerIdentity.labelConfigVolumes: "vol-confirm",
+    ]
+    if recoveryHelper {
+        labels[RecoveryHelper.recoveryMarkerLabel] = RecoveryHelper.recoveryMarkerValue
+    }
+    let entry = MockProcessRunner.containerListJSON(
+        id: id, state: "stopped", labels: labels, image: "alpine:3.20"
+    )
+    let volumeListData = try! JSONSerialization.data(
+        withJSONObject: [["id": "vol-confirm"]] as [[String: Any]]
+    )
+    let deleted = PurgeConfirmDeleted()
+    let mock = MockProcessRunner()
+    mock.handlers = [
+        { args in
+            if args.starts(with: ["list"]) {
+                let payload: [Any] = deleted.value ? [] : [entry]
+                let data = try! JSONSerialization.data(withJSONObject: payload)
+                return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+            }
+            if args.first == "delete" {
+                deleted.value = true
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            if args == ["volume", "list", "--format", "json"] {
+                return ProcessResult(exitCode: 0, stdout: volumeListData, stderr: Data())
+            }
+            if args.starts(with: ["volume", "delete"]) {
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            if args.starts(with: ["image", "delete"]) || args.starts(with: ["image", "rm"]) {
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            return nil
+        }
+    ]
+    let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+    return (runtime, mock)
+}
+
+private func purgeConfirmDeleted(_ mock: MockProcessRunner, id: String) -> Bool {
+    let deletedContainer = mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.contains(id) }
+    let deletedVolume = mock.calls.contains { $0.arguments == ["volume", "delete", "vol-confirm"] }
+    let deletedImage = mock.calls.contains {
+        $0.arguments == ["image", "delete", "alpine:3.20"] || $0.arguments == ["image", "rm", "alpine:3.20"]
+    }
+    return deletedContainer && deletedVolume && deletedImage
+}
+
+private func withCapturedPurgeStderr(
+    capture: inout String,
+    _ body: () throws -> Int32
+) throws -> Int32 {
+    var code: Int32 = 1
+    try withCapturedStderr({
+        code = try body()
+        #if canImport(Darwin) || canImport(Glibc)
+        fflush(nil)
+        #endif
+    }, capture: &capture)
+    return code
+}
 
 /// Container list JSON with real volume mounts (RecoveryHelperTests shape) for purge attachment mocks.
 private func purgeAttachedContainerJSON(

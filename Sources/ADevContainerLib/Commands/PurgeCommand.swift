@@ -8,12 +8,17 @@ public enum PurgeCommand {
     /// (`config_volumes`, `workspace_volume`); image from runtime inspect.
     /// Candidate volumes are deleted only when unreferenced after target container delete.
     ///
-    /// - Returns: `0` if all resources handled or already gone; `1` if a delete of an existing resource failed.
+    /// On a TTY, confirms before deletion (default no). Non-TTY proceeds without a prompt.
+    /// Recovery helpers are skipped with no prompt and no deletes.
+    ///
+    /// - Returns: `0` if all resources handled, already gone, or the TTY confirmation was declined; `1` if a delete of an existing resource failed.
     @discardableResult
     public static func run(
         name: String? = nil,
         runtime: AppleContainerRuntime,
-        picker: InteractivePicker = .default
+        picker: InteractivePicker = .default,
+        isInteractive: Bool = AppleContainerConfig.stdinIsTTY(),
+        readLine: @escaping () -> String? = { Swift.readLine() }
     ) throws -> Int32 {
         let info = try ManagedContainers.resolveSelection(
             name: name,
@@ -28,6 +33,16 @@ public enum PurgeCommand {
             StatusPrinter.status("Skipping recovery helper resources")
             print("Skipped recovery helper \(info.id) and referenced resources")
             return 0
+        }
+
+        if isInteractive {
+            let prompt = "Purge dev container \(info.id) and its unreferenced volumes and image? [y/N] "
+            FileHandle.standardError.write(Data(prompt.utf8))
+            let answer = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            if answer != "y" && answer != "yes" {
+                print("Purge cancelled")
+                return 0
+            }
         }
 
         let target = PurgeTarget(

@@ -104,6 +104,8 @@ If no container exists, inspect MUST fail structurally or report not-found consi
 | Bind-mount host paths | No |
 | Global volume/image prune | No |
 
+Those removals, and the existing MUST-remove scenarios in this requirement, apply only after an explicit yes on an interactive TTY, or when stdin is not a TTY. A declined or unanswered TTY confirmation MUST NOT remove them.
+
 Features-derived tags keep that existing purge policy. Dockerfile-only creates MUST stamp the product Dockerfile tag so purge can treat it as the config image to delete.
 
 **Identity and candidates (unchanged intent):**
@@ -114,12 +116,21 @@ Features-derived tags keep that existing purge policy. Dockerfile-only creates M
 - Labels define the **candidate volume set only**. The product MUST NOT invent Compose `external` support, shared/private naming conventions, or new public `devcontainer.json` fields for this decision.
 - Same resolved volume name MUST be treated as the same volume (Docker-like sharing). No separate “private copy” identity.
 
+**Confirmation gate (MUST):**
+
+- After managed selection, a recovery-helper skip MUST still exit 0 with no confirmation prompt and no deletes.
+- On an interactive TTY, before any container, volume, or image delete and before the purging status, purge MUST write this raw stderr prompt (not StatusPrinter, not QUIET-gated), naming the container id: `Purge dev container <id> and its unreferenced volumes and image? [y/N] `.
+- Only `y` or `yes` (case-insensitive) MUST proceed into the existing purge path.
+- Empty input, `n`/`no`, EOF, or any other answer MUST cancel: no container, volume, or image deletes; stdout `Purge cancelled`; exit 0; no deleting phases.
+- Non-TTY MUST NOT prompt and MUST keep the existing purge behavior (proceed to delete). Non-TTY MUST NOT fail for lack of confirmation. This requirement MUST NOT add `--yes`.
+
 **Ordering and fail-safe (MUST):**
 
-1. Resolve the managed target (and apply recovery-helper skip first when applicable — unchanged: skip helper, its referenced volumes, and its image; exit 0).
-2. Delete the **target container** (force as today). Missing container after resolve MAY be skipped as today.
-3. **If target container delete fails** (runtime error on an existing container the command attempted to delete), the command MUST **not** delete any candidate volumes, MUST return non-zero, and MAY still attempt image cleanup only if that does not undermine the volume fail-safe (preferred: treat container failure as hard failure and skip volume deletes entirely).
-4. Only after the target container is gone (deleted successfully or already absent), evaluate each **distinct** candidate volume name from labels (`config_volumes` + optional `workspace_volume`).
+1. Resolve the managed target (and apply recovery-helper skip first when applicable — unchanged: skip helper, its referenced volumes, and its image; exit 0; no confirmation prompt and no deletes).
+2. Apply the confirmation gate when stdin is a TTY. Decline exits 0 with no deletes. Non-TTY skips the prompt and continues.
+3. Delete the **target container** (force as today). Missing container after resolve MAY be skipped as today.
+4. **If target container delete fails** (runtime error on an existing container the command attempted to delete), the command MUST **not** delete any candidate volumes, MUST return non-zero, and MAY still attempt image cleanup only if that does not undermine the volume fail-safe (preferred: treat container failure as hard failure and skip volume deletes entirely).
+5. Only after the target container is gone (deleted successfully or already absent), evaluate each **distinct** candidate volume name from labels (`config_volumes` + optional `workspace_volume`).
 
 **Volume attachment gate (MUST):**
 
@@ -151,7 +162,8 @@ For each existing candidate volume name:
 
 | Condition | Volume deletes | Exit |
 |-----------|----------------|------|
-| Recovery helper selected | None (full skip) | 0 |
+| TTY confirmation declined (empty, n/no, EOF, or other) | None | 0 |
+| Recovery helper selected | None (full skip; no prompt) | 0 |
 | Target container delete failed | None | non-zero |
 | Attachment inspection failed for a candidate | Preserve affected volume(s) | non-zero |
 | Shared volume(s) preserved with warning only | Skip those; delete unreferenced others | 0 if no hard failures |
@@ -218,9 +230,21 @@ For each existing candidate volume name:
 - Then the command exits non-zero (hard failure)
 
 #### Scenario: Recovery helper skip unchanged
-- Given a marked recovery helper selected for purge
+- Given a marked recovery helper selected for purge, including on an interactive TTY
 - When the user runs `adevcontainer purge --name <helper>`
-- Then the helper, its referenced workspace/config volumes, and its image are not removed, and the command exits 0
+- Then the helper, its referenced workspace/config volumes, and its image are not removed, no confirmation prompt is shown, and the command exits 0
+
+#### Scenario: TTY confirmation gates purge deletes
+- Given a managed dev container selected for purge and an interactive TTY
+- When the user runs `adevcontainer purge` targeting that container
+- Then before any container, volume, or image delete and before the purging status, stderr shows `Purge dev container <id> and its unreferenced volumes and image? [y/N] `
+- And only `y` or `yes` (case-insensitive) proceeds into the existing purge path
+- And empty input, `n`/`no`, EOF, or any other answer cancels with stdout `Purge cancelled`, exit 0, and no deletes or deleting phases
+
+#### Scenario: Non-TTY purge proceeds without a prompt
+- Given a managed dev container selected for purge and non-interactive stdin
+- When the user runs `adevcontainer purge` targeting that container
+- Then no confirmation prompt is shown and the existing MUST-remove behavior applies
 
 #### Scenario: delete remains container-only
 - Given any managed container
