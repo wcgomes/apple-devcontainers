@@ -228,7 +228,7 @@ Not full Dev Containers up/rebuild or IDE-owned customizations parity; volume-mo
 
 ## Reference config
 
-- **Workspace self-devcontainer:** `.devcontainer/devcontainer.json` — `swift:6.3.3-noble` plus OCI Features (`opencode`, `agents-workspace`) for Linux Swift tooling + product fixture; not full macOS product build/test. Detail: [workspace-devcontainer.md](conventions/workspace-devcontainer.md).
+- **Workspace self-devcontainer:** `.devcontainer/devcontainer.json` — `swift:6.3.3-noble` plus OCI Features (`common-utils`, `git`, `node`, `agents-workspace`) for Linux Swift tooling + product fixture; not full macOS product build/test. OpenCode is installed by `postCreate` `.devcontainer/install-tools.sh`, not an OCI Feature. Detail: [workspace-devcontainer.md](conventions/workspace-devcontainer.md).
 - **Team sample (warn-skip surface):** `reference/devcontainer.json` — features (incl. docker-ood), privileged+tun `runArgs`, mounts, `postCreateCommand`, `forwardPorts`, VS Code customizations. Docker-oriented bits warn-skip; Compose/unknown still fail-closed; see [0003](decisions/0003-warn-skip-apple-incompatibles.md) and [gaps](domain/devcontainer-apple-gaps.md).
 - **Language / multi-feature sample:** `references/multiplatform` — `base:ubuntu` + OCI Features `dotnet:2` + `node:1` (install-time feature `containerEnv` path; no privileged/DinD surface).
 - **Dockerfile sample:** `references/dockerfile/` — nested `build` (no top-level `image`) plus sibling `Dockerfile`.
