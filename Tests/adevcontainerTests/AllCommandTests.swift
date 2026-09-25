@@ -42,32 +42,66 @@ nonisolated(unsafe) let doctorTests: [(String, () throws -> Void)] = [
             )
         }
     }),
-    ("installPluginRestagesWhenSystemNotRunning", {
+    ("pluginInstallWhileSystemNotRunning", {
         let root = try PluginTestSupport.makeInstallRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let sourceBytes = Data("install-plugin-while-stopped-\(UUID().uuidString)\n".utf8)
         let source = root.appendingPathComponent("adevcontainer-src")
-        try sourceBytes.write(to: source)
-        let runtime = try PluginTestSupport.readyRuntime(
+        try PluginTestSupport.writeExecutable(at: source)
+        let mock = MockProcessRunner()
+        mock.handlers = [{ _ in
+            ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("container system start\n".utf8))
+        }]
+        let runtime = AppleContainerRuntime(
             executablePath: PluginTestSupport.containerBinary(in: root),
-            status: "stopped"
+            runner: mock
         )
-        try InstallPluginCommand.run(
+        try PluginCommand.run(
+            install: true,
+            uninstall: false,
             runtime: runtime,
-            currentExecutablePath: source.path
+            currentExecutablePath: source.path,
+            pathEnvironment: ""
+        )
+        try MiniTest.expect(
+            mock.calls.isEmpty,
+            "plugin --install does not invoke container and does not require container system start"
+        )
+        let binaryPath = ContainerPluginLayout.binaryPath(installRoot: root.path)
+        try MiniTest.expectEqual(
+            try FileManager.default.destinationOfSymbolicLink(atPath: binaryPath),
+            source.path
+        )
+        try PluginTestSupport.expectRegularCLIConfig(installRoot: root.path)
+    }),
+    ("pluginUninstallWhileSystemNotRunning", {
+        let root = try PluginTestSupport.makeInstallRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try PluginTestSupport.stagePluginLayout(installRoot: root)
+        let mock = MockProcessRunner()
+        mock.handlers = [{ _ in
+            ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("container system start\n".utf8))
+        }]
+        let runtime = AppleContainerRuntime(
+            executablePath: PluginTestSupport.containerBinary(in: root),
+            runner: mock
+        )
+        try PluginCommand.run(
+            install: false,
+            uninstall: true,
+            runtime: runtime,
+            pathEnvironment: ""
+        )
+        try MiniTest.expect(
+            mock.calls.isEmpty,
+            "plugin --uninstall does not invoke container and does not require container system start"
         )
         let configPath = ContainerPluginLayout.configPath(installRoot: root.path)
         let binaryPath = ContainerPluginLayout.binaryPath(installRoot: root.path)
+        try MiniTest.expect(!FileManager.default.fileExists(atPath: configPath))
+        try MiniTest.expect(!FileManager.default.fileExists(atPath: binaryPath))
         try MiniTest.expect(
-            FileManager.default.fileExists(atPath: configPath),
-            "install-plugin restages config.toml even when container services are not running"
+            (try? FileManager.default.destinationOfSymbolicLink(atPath: binaryPath)) == nil
         )
-        try MiniTest.expect(
-            FileManager.default.isExecutableFile(atPath: binaryPath),
-            "install-plugin restages plugin binary even when container services are not running"
-        )
-        let staged = try Data(contentsOf: URL(fileURLWithPath: binaryPath))
-        try MiniTest.expectEqual(staged, sourceBytes)
     }),
     ("doctorDoesNotRestageWhenSystemNotRunning", {
         let root = try PluginTestSupport.makeInstallRoot()

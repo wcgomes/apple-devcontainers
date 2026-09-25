@@ -180,12 +180,22 @@ public enum CommandSurface {
                 i += 1
                 continue
             }
+            if a == "--install" {
+                flags.insert("install")
+                i += 1
+                continue
+            }
+            if a == "--uninstall" {
+                flags.insert("uninstall")
+                i += 1
+                continue
+            }
             if a == "--repair" {
                 throw CLIError(
                     code: CLIErrorCode.usage,
                     property: "--repair",
                     message: "Unknown option '--repair'",
-                    hint: "Restage the Apple CLI plugin with: adevcontainer install-plugin"
+                    hint: "Restage the Apple CLI plugin with: adevcontainer plugin --install"
                 )
             }
             // Reject product-non-goal flags explicitly
@@ -232,7 +242,7 @@ public enum CommandSurface {
                 code: CLIErrorCode.usage,
                 property: "--repair",
                 message: "Unknown option '--repair'",
-                hint: "Restage the Apple CLI plugin with: adevcontainer install-plugin"
+                hint: "Restage the Apple CLI plugin with: adevcontainer plugin --install"
             )
         }
         if parsed.workspace != nil, subcommand != "up" {
@@ -253,6 +263,45 @@ public enum CommandSurface {
         }
     }
 
+    /// `plugin` requires exactly one of `--install` or `--uninstall`.
+    /// Other commands reject those flags as unknown options.
+    public static func enforcePluginInvocation(subcommand: String, parsed: ParsedArgs) throws {
+        let install = parsed.flags.contains("install")
+        let uninstall = parsed.flags.contains("uninstall")
+        if subcommand != "plugin" {
+            if install {
+                throw CLIError(
+                    code: CLIErrorCode.usage,
+                    property: "--install",
+                    message: "Unknown option '--install'"
+                )
+            }
+            if uninstall {
+                throw CLIError(
+                    code: CLIErrorCode.usage,
+                    property: "--uninstall",
+                    message: "Unknown option '--uninstall'"
+                )
+            }
+            return
+        }
+        if install == uninstall {
+            throw CLIError(
+                code: CLIErrorCode.usage,
+                message: "plugin requires exactly one of --install or --uninstall",
+                hint: "Usage: \(pathBinaryName) plugin --install | \(pathBinaryName) plugin --uninstall"
+            )
+        }
+    }
+
+    public static func unknownSubcommandError(subcommand: String) -> CLIError {
+        CLIError(
+            code: CLIErrorCode.usage,
+            message: "Unknown subcommand '\(subcommand)'",
+            hint: "Try: doctor | plugin | up | clone | rebuild | list | start | exec | stop | delete | purge | inspect"
+        )
+    }
+
     // MARK: - Usage / help
 
     public static func usageText() -> String {
@@ -265,7 +314,8 @@ public enum CommandSurface {
 
         Commands:
           doctor              Check Apple container runtime and plugin layout
-          install-plugin      Restage the Apple CLI plugin layout
+          plugin --install | --uninstall
+                              Install or remove the Apple CLI plugin (exactly one flag)
           up [-w path]        Create/start/reuse bind-mode dev container (host path)
           clone <git-url>     Clone repo into volume-mode dev container (managed)
           list [--json]       List managed dev containers (up + clone)
@@ -375,19 +425,26 @@ public enum CommandSurface {
             and the Apple CLI plugin layout under the container install-root.
 
             Doctor does not restage the plugin. A missing plugin is restaged with
-            PATH `adevcontainer install-plugin` (use sudo when the destination
+            PATH `adevcontainer plugin --install` (use sudo when the destination
             requires elevated privileges).
             Doctor does not require a devcontainer.json.
             """
-        case "install-plugin":
+        case "plugin":
             return """
-            \(cmd) install-plugin
+            \(cmd) plugin --install
+            \(cmd) plugin --uninstall
 
-            Copy this executable to {install-root}/libexec/container-plugins/dev/bin/dev
-            and write config.toml (CLI plugin: abstract, no [servicesConfig]).
+            Install or remove the Apple CLI plugin layout. Exactly one of
+            --install or --uninstall is required.
+
+            --install creates {install-root}/libexec/container-plugins/dev/bin/dev
+            as an absolute symlink to the installed executable and writes
+            config.toml as a regular file (abstract, no [servicesConfig]).
+            It does not copy the executable or change the symlink target.
+            --uninstall removes bin/dev and config.toml only.
             Uses elevated privileges when the destination requires them.
             Does not require `container system start`.
-            Restage a missing plugin with PATH `adevcontainer install-plugin`
+            Restage a missing plugin with PATH `adevcontainer plugin --install`
             (use sudo when the destination requires elevated privileges).
             """
         case "up":

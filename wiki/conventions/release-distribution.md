@@ -5,7 +5,7 @@ How `adevcontainer` binaries are built, versioned, and installed. Decided 2026-0
 ## Repo identity
 
 - **GitHub:** [wcgomes/apple-devcontainers](https://github.com/wcgomes/apple-devcontainers) (renamed 2026-08 from `wcgomes/apple-dev-containers`, previously `wcgomes/dev-containerization`; old URLs 301).
-- **Product/binary:** still `adevcontainer` (PATH). Same Mach-O is also staged as Apple plugin `dev`. Local clone folder may still be named `dev-containerization`.
+- **Product/binary:** still `adevcontainer` (PATH). Plugin `bin/dev` is an absolute symlink, not a copied Mach-O. Local clone folder may still be named `dev-containerization`.
 - **Homebrew tap:** unchanged (`wcgomes/homebrew-tap`); formula homepage/url point at the new repo.
 
 ## Constraints
@@ -58,7 +58,7 @@ Do not paste workflow YAML into the wiki — edit the files under `.github/workf
 
 ## Install UX (priority order)
 
-1. **Homebrew (primary)** — public tap [wcgomes/homebrew-tap](https://github.com/wcgomes/homebrew-tap); sole formula SoT `Formula/adevcontainer.rb`. Install: `brew tap wcgomes/tap && brew install adevcontainer`. Non-prerelease release auto-bumps the tap (`HOMEBREW_TAP_TOKEN` + `scripts/render-homebrew-formula.sh`). No in-repo formula mirror. `post_install` restages the Apple plugin under `{install-root}/libexec/container-plugins/dev/`. Caveats: Apple `container` is a separate runtime install; reinstall this formula after upgrading `container` (upgrade wipes user plugins). Dual-surface contract: [`specs/plugin.md`](../../specs/plugin.md).
+1. **Homebrew (primary)** — public tap [wcgomes/homebrew-tap](https://github.com/wcgomes/homebrew-tap); sole formula SoT `Formula/adevcontainer.rb`. Install: `brew tap wcgomes/tap && brew install adevcontainer`. Non-prerelease release auto-bumps the tap (`HOMEBREW_TAP_TOKEN` + `scripts/render-homebrew-formula.sh`). No in-repo formula mirror. Formula `post_install` does not write Apple’s install-root (brew is not sudo). Caveats: Apple `container` is a separate runtime install; run `sudo adevcontainer plugin --install` once after install. That makes `{install-root}/libexec/container-plugins/dev/bin/dev` an absolute symlink to `$(brew --prefix)/opt/adevcontainer/bin/adevcontainer`, so `brew upgrade adevcontainer` updates the plugin without writing `/usr/local`. Run it again only after an Apple `container` upgrade wipes the plugin dir ([apple/container#1617](https://github.com/apple/container/issues/1617)). `plugin --uninstall` removes only `bin/dev` and `config.toml`. Contract: [`specs/plugin.md`](../../specs/plugin.md); archive [`20260925-plugin-symlink-install`](../../specs/changes/archive/20260925-plugin-symlink-install/).
 2. **GitHub Release curl/tar** — download tarball + verify sha256; fallback for non-brew users.
 3. **Source build** — documented in README (`swift build -c release` on macOS 26+ Apple Silicon).
 
@@ -68,5 +68,5 @@ Do not paste workflow YAML into the wiki — edit the files under `.github/workf
 - Bump/tag version; release workflow owns inject + artifact + GH Release + Homebrew bump (non-prerelease).
 - Ensure `HOMEBREW_TAP_TOKEN` is configured for non-prerelease ships; missing token fails the job. Prereleases skip brew bump.
 - Formula content comes from `scripts/render-homebrew-formula.sh` — do not hand-edit sha/version in the tap formula as part of a normal release.
-- Keep formula `post_install` restaging the plugin and caveats telling users to reinstall after upgrading `container`.
+- Do not write Apple’s install-root from formula `post_install`. Caveats name `sudo adevcontainer plugin --install` once after install, and again only after upgrading Apple `container`.
 - Still no notarize unless an explicit decision supersedes this page.

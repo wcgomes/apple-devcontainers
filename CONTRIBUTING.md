@@ -14,12 +14,12 @@ swift build            # binary: .build/debug/adevcontainer
 swift build -c release # binary: .build/release/adevcontainer
 ```
 
-To install from source onto PATH and restage the Apple CLI plugin (same layout as `install-plugin`):
+To install from source onto PATH and link the Apple CLI plugin:
 
 ```bash
 swift build -c release
 cp .build/release/adevcontainer /usr/local/bin/   # or another directory on PATH
-adevcontainer install-plugin                      # use sudo when the plugin destination requires it
+adevcontainer plugin --install                    # use sudo when the plugin destination requires elevation
 ```
 
 ## Tests

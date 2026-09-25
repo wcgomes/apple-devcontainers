@@ -12,6 +12,11 @@ require_npm() {
   exit 1
 }
 
+install_opencode() {
+  echo "Installing OpenCode V2..."
+  curl -fsSL https://opencode.ai/v2/install | bash
+}
+
 install_codegraph() {
   require_npm
 
@@ -44,4 +49,5 @@ install_codegraph() {
   codegraph init
 }
 
+install_opencode
 install_codegraph

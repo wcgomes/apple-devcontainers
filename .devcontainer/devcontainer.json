@@ -17,7 +17,6 @@
         "ghcr.io/devcontainers/features/node:2.1.0": {
             "version": "lts"
         },
-        "ghcr.io/wcgomes/devcontainer-features/opencode:0": {},
         "ghcr.io/wcgomes/devcontainer-features/agents-workspace:0": {
             "divisions": "engineering,testing,security"
         }

@@ -59,15 +59,22 @@ struct AdevcontainerMain {
             return 0
         }
 
+        try CommandSurface.enforcePluginInvocation(subcommand: subcommand, parsed: parsed)
+
         switch subcommand {
         case "doctor":
             let report = try DoctorCommand.run(runtime: runtime)
             DoctorCommand.printReport(report)
             return 0
 
-        case "install-plugin":
-            try InstallPluginCommand.run(runtime: runtime)
-            InstallPluginCommand.printSuccess()
+        case "plugin":
+            let installing = parsed.flags.contains("install")
+            try PluginCommand.run(
+                install: installing,
+                uninstall: parsed.flags.contains("uninstall"),
+                runtime: runtime
+            )
+            PluginCommand.printSuccess(installed: installing)
             return 0
 
         case "up":
@@ -208,11 +215,7 @@ struct AdevcontainerMain {
             return 0
 
         default:
-            throw CLIError(
-                code: CLIErrorCode.usage,
-                message: "Unknown subcommand '\(subcommand)'",
-                hint: "Try: doctor | install-plugin | up | clone | rebuild | list | start | exec | stop | delete | purge | inspect"
-            )
+            throw CommandSurface.unknownSubcommandError(subcommand: subcommand)
         }
     }
 

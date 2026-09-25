@@ -19,12 +19,13 @@ This repo ships `.devcontainer/devcontainer.json` for **Linux Swift tooling** an
 
 | Feature ID | Options |
 |------------|---------|
-| `ghcr.io/devcontainers/features/node:1` | `{ version: "lts" }` |
-| `ghcr.io/wcgomes/devcontainer-features/opencode:0` | `{}` |
+| `ghcr.io/devcontainers/features/common-utils:2` | `{ installZsh: "false", username: "vscode", upgradePackages: "false" }` |
+| `ghcr.io/devcontainers/features/git:1` | `{ version: "os-provided", ppa: "false" }` |
+| `ghcr.io/devcontainers/features/node:2.1.0` | `{ version: "lts" }` |
 | `ghcr.io/wcgomes/devcontainer-features/agents-workspace:0` | `{ divisions: "engineering,testing,security" }` |
 
-- **node:1 (lts)** — required for npm/global tools (codegraph). Opencode/agents-workspace Features do **not** provide Node.
-- Opencode + agents-workspace unchanged from prior fixture.
+- **node:2.1.0 (lts)** — required for npm/global tools (codegraph). The agents-workspace Feature does **not** provide Node.
+- OpenCode is not an OCI Feature.
 
 These are supported OCI Features (product Features runner). They are not `docker-outside-of-docker` / `docker-in-docker` / `docker-from-docker` (those are warn-skipped).
 
@@ -32,8 +33,11 @@ These are supported OCI Features (product Features runner). They are not `docker
 
 `postCreateCommand` runs `.devcontainer/install-tools.sh`, then `swift package resolve`.
 
+`postCreate` `.devcontainer/install-tools.sh` installs OpenCode via `https://opencode.ai/v2/install` and still installs codegraph.
+
 `install-tools.sh`:
 
+- Installs **OpenCode** via `https://opencode.ai/v2/install` (`install_opencode`, before codegraph)
 - Installs **codegraph** via npm global
 - Agent wiring + init if needed
 

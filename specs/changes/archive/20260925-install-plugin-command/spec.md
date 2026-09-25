@@ -1,90 +1,46 @@
-# adevcontainer — Plugin Specification
+# Change Spec: install-plugin-command
 
-## Purpose
+Corrected before archive to match the symlink contract in [plugin-symlink-install](../20260925-plugin-symlink-install/spec.md). This delta no longer requires a Mach-O copy, `install-plugin`, or Homebrew `post_install` restage of Apple’s install-root. The requirements below are that contract’s overlapping restage and doctor requirements, plus uninstall layout-only. They are not new. Where both deltas speak, `plugin-symlink-install` is authoritative.
 
-Apple `container` CLI plugin surface: dual install of the same Mach-O as PATH `adevcontainer` and plugin `container dev`, invocation-aware help and retry hints with stable `adevcontainer` managed identity, subprocess targeting of Apple `container` (never the plugin), and explicit plugin restage after Apple upgrade wipe.
+## ADDED Requirements
 
-## Requirements
+### Requirement: Plugin uninstall removes layout entries only
 
-### Requirement: Dual install as Apple CLI plugin `dev`
+`plugin --uninstall` MUST remove `{install-root}/libexec/container-plugins/dev/bin/dev` when that path is a symlink or a regular file, and MUST remove `{install-root}/libexec/container-plugins/dev/config.toml`. It MUST NOT delete the symlink target of `bin/dev`, MUST NOT delete the Homebrew keg or the opt-path executable, and MUST NOT remove any other path, including the plugin directory itself. Removing `config.toml` MUST unlink that path and MUST NOT delete a symlink target if `config.toml` is a symlink. When `bin/dev` and `config.toml` are already absent, uninstall MUST succeed. Uninstall MUST NOT require `container system start`.
 
-The same Mach-O MUST be reachable as PATH `adevcontainer` and as an Apple `container` CLI plugin invoked as `container dev <subcommand>`. The plugin name, directory, and binary MUST be `dev`. The plugin binary MUST be an absolute symlink to the installed executable, not a second copy of the Mach-O.
+When the destination is not writable, uninstall MUST re-exec with elevated privileges to complete the removal, or MUST print exact remediation naming PATH `adevcontainer plugin --uninstall` including `sudo`. That remediation MUST NOT name `container dev plugin --uninstall`.
 
-On Unix, install-root MUST be the parent of Apple `container`’s `bin/` directory (typically `/usr/local`). The staged plugin layout MUST be:
+#### Scenario: plugin --uninstall removes the plugin binary and config.toml only
 
-- `{install-root}/libexec/container-plugins/dev/config.toml`
-- `{install-root}/libexec/container-plugins/dev/bin/dev`
+- Given `bin/dev` is a symlink to an existing executable and `config.toml` exists, and the plugin directory contains another file
+- When the user runs `plugin --uninstall`
+- Then `bin/dev` and `config.toml` are gone, the symlink target still exists, and the other file remains
 
-`config.toml` MUST be a regular file, MUST include `abstract`, and MUST omit `[servicesConfig]` so Apple treats it as a CLI plugin. Apple discovers plugins by that directory layout, not PATH. When Apple dispatches the plugin, process argv MUST begin with `dev` followed by the product subcommand. The product MUST NOT ship under Apple’s bundled `libexec/container/plugins/`. The SPM executable product name MUST remain `adevcontainer`. Dual install MUST be that absolute symlink, not a second package product and not a second copy of the Mach-O. The Homebrew formula name MUST remain `adevcontainer`.
+#### Scenario: plugin --uninstall removes a leftover copy without deleting the keg
 
-#### Scenario: PATH binary remains adevcontainer
+- Given `bin/dev` is a regular file left by an older copy install, and the Homebrew keg and opt-path executable exist elsewhere
+- When the user runs `plugin --uninstall`
+- Then the leftover `bin/dev` and `config.toml` are removed and the keg and opt-path executable are unchanged
 
-- Given a successful install of this product
-- When the user runs the PATH binary
-- Then the executable name is `adevcontainer`
+#### Scenario: plugin --uninstall succeeds when the layout is missing
 
-#### Scenario: Plugin layout uses name dev under container install-root
+- Given Apple `container` is installed and the plugin layout is already absent
+- When the user runs `plugin --uninstall`
+- Then the command succeeds and does not create the layout
 
-- Given Apple `container` is installed at `{install-root}/bin/container`
-- When the plugin is staged
-- Then `{install-root}/libexec/container-plugins/dev/config.toml` and `{install-root}/libexec/container-plugins/dev/bin/dev` exist
+#### Scenario: plugin --uninstall uses elevated privileges when required
 
-#### Scenario: config.toml is a CLI plugin
+- Given the plugin destination is not writable by the current user
+- When the user runs `plugin --uninstall`
+- Then the product re-execs with elevated privileges or prints exact remediation naming PATH `adevcontainer plugin --uninstall` with `sudo`, and MUST NOT name `container dev plugin --uninstall`
 
-- Given the plugin is staged
-- When `config.toml` is read
-- Then it is a regular file, includes `abstract`, and omits `[servicesConfig]`
+#### Scenario: plugin --uninstall does not require container system start
 
-#### Scenario: Plugin binary is an absolute symlink to the installed executable
+- Given Apple `container` is installed and Apple container services are not running
+- When the user runs `adevcontainer plugin --uninstall`
+- Then uninstall completes and MUST NOT fail because `container system start` has not been run
 
-- Given PATH `adevcontainer` is installed and the plugin is staged
-- When the plugin binary path is inspected
-- Then `{install-root}/libexec/container-plugins/dev/bin/dev` is an absolute symlink to the installed executable, not a second copy of the Mach-O
-
-#### Scenario: Plugin invocation runs the subcommand
-
-- Given the plugin is staged and Apple can dispatch plugins
-- When the user runs `container dev` with a product subcommand
-- Then that subcommand runs
-
----
-
-### Requirement: Invocation-aware help and retry hints
-
-Help, usage, and retry hints MUST use `container dev …` when the process is invoked as the Apple CLI plugin. They MUST use `adevcontainer …` when the process is invoked as the PATH binary. Managed labels, guest paths, and cache names MUST remain `adevcontainer` under both invocations. The product MUST NOT migrate identity strings to `dev`.
-
-#### Scenario: Plugin invocation uses container-dev help and retry hints
-- Given the process is invoked as the Apple CLI plugin
-- When the user requests help or receives a retry hint
-- Then printed command examples use the prefix `container dev`
-
-#### Scenario: PATH invocation uses adevcontainer help and retry hints
-- Given the process is invoked as the PATH binary `adevcontainer`
-- When the user requests help or receives a retry hint
-- Then printed command examples use the prefix `adevcontainer`
-
-#### Scenario: Managed identity stays adevcontainer when invoked as plugin
-- Given the process is invoked as the Apple CLI plugin
-- When the product stamps managed labels, guest paths, or cache names
-- Then those values remain `adevcontainer` and are not rewritten to `dev`
-
----
-
-### Requirement: Apple container subprocess is never the plugin
-
-The product MUST keep shelling out to Apple `container` as a subprocess. It MUST prefer `/usr/local/bin/container` when that binary exists. It MUST NOT treat the plugin binary as Apple `container` (no recursive self-exec). It MUST NOT migrate host runtime interaction to ContainerAPIClient or XPC.
-
-#### Scenario: Default Apple container binary prefers usr-local
-- Given `/usr/local/bin/container` exists and is executable
-- When the product resolves the Apple `container` binary
-- Then it uses `/usr/local/bin/container`
-
-#### Scenario: Plugin process does not exec itself as container
-- Given the process is the plugin binary `dev`
-- When the product shells out to Apple `container`
-- Then the subprocess executable is Apple `container`, not the plugin binary
-
----
+## MODIFIED Requirements
 
 ### Requirement: Explicit plugin restage after Apple upgrade wipe
 
@@ -259,40 +215,32 @@ Homebrew formula `post_install` MUST NOT write Apple’s install-root plugin lay
 - When install instructions are followed
 - Then the plugin layout is installed with PATH `adevcontainer plugin --install` (with `sudo` when the destination requires elevation), not with `install-plugin`
 
----
+### Requirement: Doctor preflight
 
-### Requirement: Plugin uninstall removes layout entries only
+`adevcontainer doctor` MUST verify host readiness before users rely on `up`: Apple `container` binary presence (default path `/usr/local/bin/container` or PATH resolution), invokability, and a reported version suitable for machine use. Doctor MUST also verify the Apple CLI plugin layout for `dev` under the install-root parent of Apple `container`’s `bin/`. Doctor MUST emit a clear pass/fail summary. Doctor MUST NOT require a `devcontainer.json`.
 
-`plugin --uninstall` MUST remove `{install-root}/libexec/container-plugins/dev/bin/dev` when that path is a symlink or a regular file, and MUST remove `{install-root}/libexec/container-plugins/dev/config.toml`. It MUST NOT delete the symlink target of `bin/dev`, MUST NOT delete the Homebrew keg or the opt-path executable, and MUST NOT remove any other path, including the plugin directory itself. Removing `config.toml` MUST unlink that path and MUST NOT delete a symlink target if `config.toml` is a symlink. When `bin/dev` and `config.toml` are already absent, uninstall MUST succeed. Uninstall MUST NOT require `container system start`.
+PATH invocation of `adevcontainer doctor` MUST keep the existing missing-binary failure. Success MUST still report Apple `container` binary path and version and MUST require the plugin layout to be present, including when `bin/dev` is a symlink. When Apple container services are not running, doctor MUST surface that `container system start` is required (Apple needs it to list/dispatch plugins). Doctor MUST NOT restage the plugin layout. Doctor MUST NOT accept `--repair`. When the plugin layout is missing, doctor MUST fail and print PATH `adevcontainer plugin --install` remediation as specified in **Explicit plugin restage after Apple upgrade wipe**.
 
-When the destination is not writable, uninstall MUST re-exec with elevated privileges to complete the removal, or MUST print exact remediation naming PATH `adevcontainer plugin --uninstall` including `sudo`. That remediation MUST NOT name `container dev plugin --uninstall`.
+#### Scenario: Doctor success
 
-#### Scenario: plugin --uninstall removes the plugin binary and config.toml only
+- Given Apple `container` is installed and runnable and the plugin layout is present
+- When the user runs `adevcontainer doctor`
+- Then the command exits 0 and reports binary path and version
 
-- Given `bin/dev` is a symlink to an existing executable and `config.toml` exists, and the plugin directory contains another file
-- When the user runs `plugin --uninstall`
-- Then `bin/dev` and `config.toml` are gone, the symlink target still exists, and the other file remains
+#### Scenario: Doctor missing binary
 
-#### Scenario: plugin --uninstall removes a leftover copy without deleting the keg
+- Given `container` is not on PATH and not at the default path
+- When the user runs `adevcontainer doctor`
+- Then the command exits non-zero with a structured error explaining the missing runtime
 
-- Given `bin/dev` is a regular file left by an older copy install, and the Homebrew keg and opt-path executable exist elsewhere
-- When the user runs `plugin --uninstall`
-- Then the leftover `bin/dev` and `config.toml` are removed and the keg and opt-path executable are unchanged
+#### Scenario: Doctor does not require devcontainer.json
 
-#### Scenario: plugin --uninstall succeeds when the layout is missing
+- Given a directory with no `devcontainer.json`
+- When the user runs `adevcontainer doctor`
+- Then doctor does not fail for missing configuration
 
-- Given Apple `container` is installed and the plugin layout is already absent
-- When the user runs `plugin --uninstall`
-- Then the command succeeds and does not create the layout
+#### Scenario: Doctor surfaces container system start when not running
 
-#### Scenario: plugin --uninstall uses elevated privileges when required
-
-- Given the plugin destination is not writable by the current user
-- When the user runs `plugin --uninstall`
-- Then the product re-execs with elevated privileges or prints exact remediation naming PATH `adevcontainer plugin --uninstall` with `sudo`, and MUST NOT name `container dev plugin --uninstall`
-
-#### Scenario: plugin --uninstall does not require container system start
-
-- Given Apple `container` is installed and Apple container services are not running
-- When the user runs `adevcontainer plugin --uninstall`
-- Then uninstall completes and MUST NOT fail because `container system start` has not been run
+- Given Apple `container` is installed and the system status is not running
+- When the user runs `adevcontainer doctor`
+- Then doctor exits non-zero and tells the user to run `container system start`

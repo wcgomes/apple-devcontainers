@@ -1,7 +1,7 @@
 # Apple Dev Container CLI (adevcontainer)
 
 [![CI](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml/badge.svg)](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-1105%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
+[![tests](https://img.shields.io/badge/tests-1147%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Native Swift CLI that reads `devcontainer.json` and runs development environments on Apple [`container`](https://github.com/apple/container).
@@ -23,7 +23,10 @@ For implementation details and behavior beyond this quick reference, see the [te
 
 ```bash
 brew install wcgomes/tap/adevcontainer
+sudo adevcontainer plugin --install
 ```
+
+Run `sudo adevcontainer plugin --install` once after install, and again only after upgrading Apple `container`. `brew upgrade adevcontainer` does not require `plugin --install` again when the plugin symlink already targets `$(brew --prefix)/opt/adevcontainer/bin/adevcontainer`.
 
 ### Release binary
 
@@ -33,7 +36,7 @@ Download `adevcontainer-macos-arm64.tar.gz` and `adevcontainer-macos-arm64.tar.g
 shasum -a 256 -c adevcontainer-macos-arm64.tar.gz.sha256
 tar xzf adevcontainer-macos-arm64.tar.gz
 sudo mv adevcontainer /usr/local/bin/ # or move it to another directory on PATH
-sudo adevcontainer install-plugin    # restage container dev plugin (sudo when /usr/local/libexec is not writable)
+sudo adevcontainer plugin --install    # sudo when the plugin destination requires elevation
 ```
 
 Verify the installation and Apple `container` setup:
@@ -77,7 +80,7 @@ TTY it offers to open and retry the config; in automation, edit the printed path
 
 ## Apple container plugin
 
-After the plugin is staged, every command also works as `container dev <subcommand>`. PATH `adevcontainer` remains valid.
+After `adevcontainer plugin --install`, every command also works as `container dev <subcommand>`. PATH `adevcontainer` remains valid. `plugin --uninstall` removes only the plugin `bin/dev` link and `config.toml`.
 
 Apple must be running to dispatch plugins:
 
@@ -94,7 +97,7 @@ container dev list
 container dev doctor
 ```
 
-Apple upgrades wipe the plugin. Restage with PATH `adevcontainer install-plugin` (`sudo` when the destination requires elevation).
+Apple upgrades wipe the plugin directory. PATH `adevcontainer` survives. Restage with PATH `adevcontainer plugin --install` (`sudo` when the destination requires elevation), again only after upgrading Apple `container`. `brew upgrade adevcontainer` does not require restage when the symlink already targets the Homebrew opt path.
 
 ## Commands
 
@@ -105,7 +108,8 @@ The `start`, `exec`, `stop`, `delete`, `purge`, `rebuild`, and `inspect` command
 | Command | Purpose |
 | --- | --- |
 | `adevcontainer doctor` | Check Apple `container` readiness |
-| `adevcontainer install-plugin` | Restage the Apple CLI plugin after an Apple container upgrade |
+| `adevcontainer plugin --install` | Link the Apple CLI plugin (`bin/dev` absolute symlink and `config.toml`) |
+| `adevcontainer plugin --uninstall` | Remove plugin `bin/dev` and `config.toml` only |
 | `adevcontainer up [-w <path>] [--vscode]` | Create or start a dev container from a local folder |
 | `adevcontainer clone <git-url> [--vscode] [--resume <config-dir>]` | Clone a repository into a named volume and start its dev container |
 | `adevcontainer exec [-it] [--name <name>] [--] [cmd…]` | Open a shell or run a command in a running managed container |
