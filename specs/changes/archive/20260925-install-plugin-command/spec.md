@@ -1,6 +1,6 @@
-# Change Spec: plugin-symlink-install
+# Change Spec: install-plugin-command
 
-This delta supersedes the overlapping requirements in the still-active `specs/changes/install-plugin-command/spec.md`. Do not edit or archive that change as part of this work. Where both active deltas speak, this change is the contract.
+Corrected before archive to match the symlink contract in [plugin-symlink-install](../20260925-plugin-symlink-install/spec.md). This delta no longer requires a Mach-O copy, `install-plugin`, or Homebrew `post_install` restage of Apple’s install-root. The requirements below are that contract’s overlapping restage and doctor requirements, plus uninstall layout-only. They are not new. Where both deltas speak, `plugin-symlink-install` is authoritative.
 
 ## ADDED Requirements
 
@@ -41,47 +41,6 @@ When the destination is not writable, uninstall MUST re-exec with elevated privi
 - Then uninstall completes and MUST NOT fail because `container system start` has not been run
 
 ## MODIFIED Requirements
-
-### Requirement: Dual install as Apple CLI plugin `dev`
-
-The same Mach-O MUST be reachable as PATH `adevcontainer` and as an Apple `container` CLI plugin invoked as `container dev <subcommand>`. The plugin name, directory, and binary MUST be `dev`. The plugin binary MUST be an absolute symlink to the installed executable, not a second copy of the Mach-O.
-
-On Unix, install-root MUST be the parent of Apple `container`’s `bin/` directory (typically `/usr/local`). The staged plugin layout MUST be:
-
-- `{install-root}/libexec/container-plugins/dev/config.toml`
-- `{install-root}/libexec/container-plugins/dev/bin/dev`
-
-`config.toml` MUST be a regular file, MUST include `abstract`, and MUST omit `[servicesConfig]` so Apple treats it as a CLI plugin. Apple discovers plugins by that directory layout, not PATH. When Apple dispatches the plugin, process argv MUST begin with `dev` followed by the product subcommand. The product MUST NOT ship under Apple’s bundled `libexec/container/plugins/`. The SPM executable product name MUST remain `adevcontainer`. Dual install MUST be that absolute symlink, not a second package product and not a second copy of the Mach-O. The Homebrew formula name MUST remain `adevcontainer`.
-
-#### Scenario: PATH binary remains adevcontainer
-
-- Given a successful install of this product
-- When the user runs the PATH binary
-- Then the executable name is `adevcontainer`
-
-#### Scenario: Plugin layout uses name dev under container install-root
-
-- Given Apple `container` is installed at `{install-root}/bin/container`
-- When the plugin is staged
-- Then `{install-root}/libexec/container-plugins/dev/config.toml` and `{install-root}/libexec/container-plugins/dev/bin/dev` exist
-
-#### Scenario: config.toml is a CLI plugin
-
-- Given the plugin is staged
-- When `config.toml` is read
-- Then it is a regular file, includes `abstract`, and omits `[servicesConfig]`
-
-#### Scenario: Plugin binary is an absolute symlink to the installed executable
-
-- Given PATH `adevcontainer` is installed and the plugin is staged
-- When the plugin binary path is inspected
-- Then `{install-root}/libexec/container-plugins/dev/bin/dev` is an absolute symlink to the installed executable, not a second copy of the Mach-O
-
-#### Scenario: Plugin invocation runs the subcommand
-
-- Given the plugin is staged and Apple can dispatch plugins
-- When the user runs `container dev` with a product subcommand
-- Then that subcommand runs
 
 ### Requirement: Explicit plugin restage after Apple upgrade wipe
 

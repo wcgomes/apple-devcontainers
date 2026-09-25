@@ -7,15 +7,15 @@ Copying the Mach-O into Apple’s install-root cannot be done by Homebrew: `brew
 ## Scope
 
 - Change id: **`plugin-symlink-install`**.
-- Affected live contract: [plugin.md](../../plugin.md) **Dual install as Apple CLI plugin `dev`** and **Explicit plugin restage after Apple upgrade wipe**; [core.md](../../core.md) **Doctor preflight** as already modified by the active [install-plugin-command](../install-plugin-command/spec.md) delta.
-- This change supersedes the overlapping requirements in that still-active delta (copy the Mach-O; `install-plugin`; Homebrew `post_install` restages `/usr/local`). Do not edit or archive `specs/changes/install-plugin-command/` in this change. Where both active deltas speak, this change is the contract.
+- Affected live contract: [plugin.md](../../../plugin.md) **Dual install as Apple CLI plugin `dev`** and **Explicit plugin restage after Apple upgrade wipe**; [core.md](../../../core.md) **Doctor preflight** as modified by the corrected [install-plugin-command](../20260925-install-plugin-command/spec.md) delta.
+- This change is the authoritative contract. Overlapping requirements in that corrected delta match this contract (absolute symlink, `plugin --install` / `plugin --uninstall`, no Mach-O copy, no `install-plugin`, `post_install` does not write `/usr/local`). Where both deltas speak, this change is the contract.
 - In-scope outcomes: `plugin --install` / `plugin --uninstall`; symlink target rules; elevation and doctor remediation; lifecycle still does not restage; Homebrew formula renderer, README, and CONTRIBUTING name the new command and stop writing Apple’s install-root.
 - Formula name stays `adevcontainer`. Plugin binary name stays `dev`. SPM product stays `adevcontainer`.
 
 ## Non-goals
 
 - Product-code, test, or docs implementation while writing these artifacts.
-- Editing or archiving `specs/changes/install-plugin-command/`.
+- Further edits to the corrected archive [`20260925-install-plugin-command`](../20260925-install-plugin-command/spec.md) after this archive.
 - Wiki edits. `wiki/architecture.md` and `wiki/conventions/release-distribution.md` still describe copy-based `install-plugin` and Homebrew `post_install` restage; that descriptive text conflicts with this confirmed contract and is left stale on purpose.
 - Pushing the external tap `wcgomes/homebrew-tap`. The in-repo renderer is the formula content to change; the release workflow publishes it later.
 - `design.md`. The decisions below stay understandable without an alternatives write-up.

@@ -489,24 +489,28 @@ The existing known optional families remain warn-and-ignore in default mode: doc
 
 `adevcontainer doctor` MUST verify host readiness before users rely on `up`: Apple `container` binary presence (default path `/usr/local/bin/container` or PATH resolution), invokability, and a reported version suitable for machine use. Doctor MUST also verify the Apple CLI plugin layout for `dev` under the install-root parent of Apple `container`’s `bin/`. Doctor MUST emit a clear pass/fail summary. Doctor MUST NOT require a `devcontainer.json`.
 
-PATH invocation of `adevcontainer doctor` MUST keep the existing missing-binary failure. Success MUST still report Apple `container` binary path and version and MUST require the plugin layout to be present. When Apple container services are not running, doctor MUST surface that `container system start` is required (Apple needs it to list/dispatch plugins). Doctor MUST accept `--repair` to restage the plugin layout as specified in [plugin.md](plugin.md) **Explicit plugin restage after Apple upgrade wipe**.
+PATH invocation of `adevcontainer doctor` MUST keep the existing missing-binary failure. Success MUST still report Apple `container` binary path and version and MUST require the plugin layout to be present, including when `bin/dev` is a symlink. When Apple container services are not running, doctor MUST surface that `container system start` is required (Apple needs it to list/dispatch plugins). Doctor MUST NOT restage the plugin layout. Doctor MUST NOT accept `--repair`. When the plugin layout is missing, doctor MUST fail and print PATH `adevcontainer plugin --install` remediation as specified in **Explicit plugin restage after Apple upgrade wipe**.
 
 #### Scenario: Doctor success
+
 - Given Apple `container` is installed and runnable and the plugin layout is present
 - When the user runs `adevcontainer doctor`
 - Then the command exits 0 and reports binary path and version
 
 #### Scenario: Doctor missing binary
+
 - Given `container` is not on PATH and not at the default path
 - When the user runs `adevcontainer doctor`
 - Then the command exits non-zero with a structured error explaining the missing runtime
 
 #### Scenario: Doctor does not require devcontainer.json
+
 - Given a directory with no `devcontainer.json`
 - When the user runs `adevcontainer doctor`
 - Then doctor does not fail for missing configuration
 
 #### Scenario: Doctor surfaces container system start when not running
+
 - Given Apple `container` is installed and the system status is not running
 - When the user runs `adevcontainer doctor`
 - Then doctor exits non-zero and tells the user to run `container system start`
