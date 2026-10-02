@@ -626,6 +626,18 @@ public enum CloneCommand {
 
         if keepExistingTree {
             StatusPrinter.status("Keeping existing workspace tree", item: identity.workspaceVolumeName)
+            // Reuse skips populate. Only Azure needs a fresh URL-scoped helper;
+            // other HTTPS hosts keep whatever local store the earlier clone wrote.
+            if Self.isAzureDevOpsHTTPS(url) {
+                Self.seedGuestGitCredentials(
+                    url: url,
+                    prepared: nil,
+                    containerId: id,
+                    connectionUser: connectionUser,
+                    credentials: credentials,
+                    runtime: runtime
+                )
+            }
         } else {
             StatusPrinter.status("Populating workspace volume")
             do {
@@ -1353,16 +1365,20 @@ public enum CloneCommand {
         execEnv["GIT_TERMINAL_PROMPT"] = "0"
         execEnv["ADEV_CLONE_URL"] = effectiveCloneURL
         execEnv["ADEV_CLONE_WORKDIR"] = workspaceFolder
+        let azure = Self.isAzureDevOpsHTTPS(url)
         if let creds = httpsCreds {
             execEnv["ADEV_CLONE_USER"] = creds.username
             execEnv["ADEV_CLONE_PASS"] = creds.password
-            if let fields = GitURLClassifier.httpsCredentialFields(for: effectiveCloneURL) {
+            if !azure, let fields = GitURLClassifier.httpsCredentialFields(for: effectiveCloneURL) {
                 execEnv["ADEV_CLONE_PROTO"] = fields.protocolName
                 execEnv["ADEV_CLONE_HOST"] = fields.host
             }
         }
 
-        let script = inContainerCloneScript(configureHTTPSStore: httpsCreds != nil)
+        let script = inContainerCloneScript(
+            useHTTPSAskpass: httpsCreds != nil,
+            configureStore: httpsCreds != nil && !azure
+        )
         // Live-tee populate git clone like lifecycle hooks / Features build (framed tool lines).
         let result = try runtime.exec(
             nameOrId: containerId,
@@ -1421,11 +1437,70 @@ public enum CloneCommand {
                 hint: "In-container git clone did not produce a .git directory"
             )
         }
+
+        if azure, let creds = httpsCreds {
+            seedGuestGitCredentials(
+                url: url,
+                prepared: creds,
+                containerId: containerId,
+                connectionUser: remoteUser,
+                credentials: credentials,
+                runtime: runtime
+            )
+        }
+    }
+
+    private static func isAzureDevOpsHTTPS(_ url: String) -> Bool {
+        guard let fields = GitURLClassifier.httpsCredentialFields(for: url) else { return false }
+        return GuestGitCredentialSeed.isAzureDevOpsHost(fields.host)
+    }
+
+    /// Azure-only guest helper. Non-Azure clone keeps local `credential.helper store`.
+    /// `prepared` is the credential populate already filled; nil fills again (reuse).
+    /// Soft-fail: a seed error must not delete a cloned workspace.
+    private static func seedGuestGitCredentials(
+        url: String,
+        prepared: GitHTTPSCredentials?,
+        containerId: String,
+        connectionUser: String?,
+        credentials: any GitCredentialProviding,
+        runtime: AppleContainerRuntime
+    ) {
+        guard isAzureDevOpsHTTPS(url) else { return }
+        let seeder = GuestGitCredentialSeed(
+            credentials: credentials,
+            runner: LifecycleRunner.hostProcessRunnerOverride ?? FoundationProcessRunner()
+        )
+        do {
+            if let prepared {
+                try seeder.installHTTPSCredential(
+                    containerId: containerId,
+                    url: url,
+                    credentials: prepared,
+                    connectionUser: connectionUser,
+                    runtime: runtime
+                )
+            } else {
+                try seeder.seed(
+                    containerId: containerId,
+                    hostWorkspace: nil,
+                    gitURL: url,
+                    connectionUser: connectionUser,
+                    runtime: runtime
+                )
+            }
+        } catch {
+            StatusPrinter.warning(
+                "Git credential seeding failed; continuing without forwarded credentials: \(error.localizedDescription)"
+            )
+        }
     }
 
     /// Portable sh script: clone into workspace (handles lost+found-only volumes).
     /// Credentials (when set) arrive via env ADEV_CLONE_USER / ADEV_CLONE_PASS — never printed.
-    private static func inContainerCloneScript(configureHTTPSStore: Bool) -> String {
+    /// Non-Azure HTTPS stores them with local `credential.helper store`. Azure does not:
+    /// `useHttpPath` makes a pathless store miss, so the caller seeds a URL-scoped helper.
+    private static func inContainerCloneScript(useHTTPSAskpass: Bool, configureStore: Bool) -> String {
         // shellcheck-style: set -e; use env vars only.
         var lines: [String] = [
             "set -e",
@@ -1435,7 +1510,7 @@ public enum CloneCommand {
             "export GIT_TERMINAL_PROMPT=0",
         ]
 
-        if configureHTTPSStore {
+        if useHTTPSAskpass {
             lines += [
                 // One-shot ASKPASS: reads username/password from env at prompt time.
                 "ASKPASS=\"$(mktemp)\"",
@@ -1467,8 +1542,7 @@ public enum CloneCommand {
             "rmdir \"$TMP\" 2>/dev/null || rm -rf \"$TMP\"",
         ]
 
-        if configureHTTPSStore {
-            // HTTPS after clone: store helper + approve once into ~/.git-credentials (user home layer).
+        if configureStore {
             lines += [
                 "git -C \"$WS\" config credential.helper store",
                 "if [ -n \"${ADEV_CLONE_PROTO:-}\" ] && [ -n \"${ADEV_CLONE_HOST:-}\" ]; then",
@@ -1476,6 +1550,10 @@ public enum CloneCommand {
                 "    \"$ADEV_CLONE_PROTO\" \"$ADEV_CLONE_HOST\" \"$ADEV_CLONE_USER\" \"$ADEV_CLONE_PASS\" \\",
                 "    | git -C \"$WS\" credential approve",
                 "fi",
+            ]
+        }
+        if useHTTPSAskpass {
+            lines += [
                 "rm -f \"$ASKPASS\"",
                 "trap - EXIT",
             ]

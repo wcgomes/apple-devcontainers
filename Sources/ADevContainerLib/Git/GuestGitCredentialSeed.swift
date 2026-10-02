@@ -9,6 +9,12 @@ import Foundation
 /// never argv or environment. Silent no-op (no warning, no exec) when host git is missing, the
 /// workspace has no remotes, fill returns nil, or the stamped URL is missing/empty.
 /// In-container failures throw (callers soft-fail with a warning).
+///
+/// The guest helper matches protocol+host and ignores path, so a later `git fetch`
+/// still hits the imported credential when the query includes a path.
+/// Non-Azure hosts keep the previous append-only global helper. `dev.azure.com`
+/// only gets a URL-scoped helper override and `useHttpPath`, so other hosts are
+/// unchanged and an inherited GCM cannot abort that host.
 public struct GuestGitCredentialSeed {
     public var credentials: any GitCredentialProviding
     public var runner: any ProcessRunning
@@ -75,30 +81,46 @@ public struct GuestGitCredentialSeed {
                 entries.append(entry)
             }
         }
-        guard !entries.isEmpty else { return }
-
-        let input = entries.map { entry in
-            "protocol=\(entry.protocolName)\nhost=\(entry.host)\nusername=\(entry.username)\npassword=\(entry.password)\n\n"
-        }.joined()
-
-        let result = try runtime.exec(
-            nameOrId: containerId,
-            command: ["sh", "-c", Self.seedScript()],
-            user: connectionUser,
-            env: [:],
-            stdinData: Data(input.utf8)
+        try install(
+            containerId: containerId,
+            entries: entries,
+            connectionUser: connectionUser,
+            runtime: runtime
         )
-        guard result.succeeded else {
-            let safeHosts = entries.map(\.host).filter {
-                $0.range(of: "^[A-Za-z0-9.-]+$", options: .regularExpression) != nil
-            }
-            let detail = safeHosts.isEmpty ? "" : ": host=\(safeHosts.joined(separator: ","))"
-            throw CLIError(
-                code: CLIErrorCode.lifecycleFailed,
-                message: "Failed to seed git credentials in the container (exit \(result.exitCode))\(detail)",
-                hint: "Ensure in-container git is installed; the container still works without forwarded credentials"
-            )
+    }
+
+    /// Install the guest helper and approve one credential clone already filled on the host.
+    /// Does not call `fillHTTPS` again. Non-HTTPS URLs are a silent no-op.
+    public func installHTTPSCredential(
+        containerId: String,
+        url: String,
+        credentials: GitHTTPSCredentials,
+        connectionUser: String?,
+        runtime: AppleContainerRuntime
+    ) throws {
+        guard GitURLClassifier.kind(of: url) == .https,
+              let fields = GitURLClassifier.httpsCredentialFields(for: url)
+        else {
+            return
         }
+        try install(
+            containerId: containerId,
+            entries: [
+                Entry(
+                    protocolName: fields.protocolName,
+                    host: fields.host,
+                    username: credentials.username,
+                    password: credentials.password
+                )
+            ],
+            connectionUser: connectionUser,
+            runtime: runtime
+        )
+    }
+
+    /// True only for the Azure DevOps host that keeps the organization in the URL path.
+    public static func isAzureDevOpsHost(_ host: String) -> Bool {
+        host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "dev.azure.com"
     }
 
     /// Unique fetch URLs from `git remote -v` output (`<name>\t<url> (fetch)` lines).
@@ -125,8 +147,9 @@ public struct GuestGitCredentialSeed {
 
     /// The in-container POSIX-sh credential helper (get/store/erase) that the seed
     /// script writes to `$HOME/.adevcontainer/git-credential-adev` (mode 0700) and
-    /// appends via `git config --global --add credential.helper`. `get` matches the
-    /// persisted store by (protocol, host) ignoring the queried username; `store`
+    /// configures via `credential.helper` after an empty reset. `get` matches the
+    /// persisted store by (protocol, host), ignoring the queried username and path
+    /// so `credential.useHttpPath` queries still hit the imported credential; `store`
     /// persists to `$HOME/.adevcontainer/git-credentials` (mode 0600) deduped by
     /// (protocol, host, username); `erase` is a no-op. Store format: one
     /// protocol/host/username/password key block per entry, blank-line terminated
@@ -260,11 +283,13 @@ public struct GuestGitCredentialSeed {
         ].joined(separator: "\n")
     }
 
-    /// One in-container script: write the username-agnostic credential helper to the
-    /// connection user's home, append it via `git config --global --add`, then approve
-    /// one entry per stdin credential block. Entries travel via stdin — never argv or env.
-    static func seedScript() -> String {
-        [
+    /// One in-container script: write the username-agnostic credential helper, then
+    /// approve stdin blocks. `appendGlobalHelper` is the pre-Azure up/rebuild path
+    /// (`git config --global --add`). `configureAzureHost` adds only the
+    /// `dev.azure.com` URL-scoped helper override and `useHttpPath`. Never resets
+    /// the global helper list. Entries travel via stdin — never argv or env.
+    static func seedScript(appendGlobalHelper: Bool = true, configureAzureHost: Bool = false) -> String {
+        var lines = [
             "set -e",
             "uid=\"$(id -u 2>/dev/null)\"",
             "resolved_home=\"\"",
@@ -299,7 +324,19 @@ public struct GuestGitCredentialSeed {
             Self.helperScript(),
             "ADEV_HELPER_EOF",
             "chmod 700 \"$HELPER\" 2>/dev/null",
-            "git config --global --add credential.helper \"$HELPER\" >/dev/null 2>&1",
+        ]
+        if appendGlobalHelper {
+            lines.append("git config --global --add credential.helper \"$HELPER\" >/dev/null 2>&1")
+        }
+        if configureAzureHost {
+            // Empty URL-scoped helper clears inherited helpers for dev.azure.com only.
+            lines += [
+                "git config --global --replace-all credential.https://dev.azure.com.helper \"\" >/dev/null 2>&1",
+                "git config --global --add credential.https://dev.azure.com.helper \"$HELPER\" >/dev/null 2>&1",
+                "git config --global credential.https://dev.azure.com.useHttpPath true >/dev/null 2>&1",
+            ]
+        }
+        lines += [
             "protocol=\"\"",
             "host=\"\"",
             "username=\"\"",
@@ -330,7 +367,42 @@ public struct GuestGitCredentialSeed {
             "  esac",
             "done",
             "approve"
-        ].joined(separator: "\n")
+        ]
+        return lines.joined(separator: "\n")
+    }
+
+    private func install(
+        containerId: String,
+        entries: [Entry],
+        connectionUser: String?,
+        runtime: AppleContainerRuntime
+    ) throws {
+        guard !entries.isEmpty else { return }
+
+        let input = entries.map { entry in
+            "protocol=\(entry.protocolName)\nhost=\(entry.host)\nusername=\(entry.username)\npassword=\(entry.password)\n\n"
+        }.joined()
+
+        let azure = entries.contains { Self.isAzureDevOpsHost($0.host) }
+        let other = entries.contains { !Self.isAzureDevOpsHost($0.host) }
+        let result = try runtime.exec(
+            nameOrId: containerId,
+            command: ["sh", "-c", Self.seedScript(appendGlobalHelper: other, configureAzureHost: azure)],
+            user: connectionUser,
+            env: [:],
+            stdinData: Data(input.utf8)
+        )
+        guard result.succeeded else {
+            let safeHosts = entries.map(\.host).filter {
+                $0.range(of: "^[A-Za-z0-9.-]+$", options: .regularExpression) != nil
+            }
+            let detail = safeHosts.isEmpty ? "" : ": host=\(safeHosts.joined(separator: ","))"
+            throw CLIError(
+                code: CLIErrorCode.lifecycleFailed,
+                message: "Failed to seed git credentials in the container (exit \(result.exitCode))\(detail)",
+                hint: "Ensure in-container git is installed; the container still works without forwarded credentials"
+            )
+        }
     }
 
     private func bindFetchURLs(hostWorkspace: String) -> [String] {
