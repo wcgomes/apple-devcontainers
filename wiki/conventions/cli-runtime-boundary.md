@@ -216,6 +216,8 @@ Helper shape: same image/platform; eligible RW named volumes at private targets;
 
 **Parents:** some Apple rootfs inodes (`/workspaces`) reject `chown` with EPERM even as root. Unmodifiable but traversable ancestors do not fail `up`. Recursive target `chown -R` stays strict. The helper cannot repair the main private rootfs; on the helper/`--read-only` path, parents are probed after start as the connection user (`test -x`).
 
+**Filesystem:** Apple named-volume `volume.img` is raw ext4 (magic `0xEF53` at offset 1080) and can be `e2fsck`'d in place only while unmounted; do not copy the sparse image. `Structure needs cleaning` on chown is ext4 `EUCLEAN`, not a chown-logic bug.
+
 Create `-u` for a non-root connection user (typical official image: OCI USER root + metadata `remoteUser` vscode) stays; ownership exec stays `-u root`.
 
 Contract: [`specs/core.md`](../../specs/core.md) (workspace parents + read-only helper).

@@ -57,9 +57,9 @@ devcontainer.json → Config resolver → [Dockerfile image] → [Features runne
 | Mode | Entry | Workspace storage | Host FS path |
 |------|-------|-------------------|--------------|
 | **Bind** | `up` from host workspace | Host dir via virtiofs (APFS) | Real path on Mac |
-| **Volume** | `clone <git-url>` | Named volume via virtio-blk (`volume.img` ext4) | No durable host checkout; label `local_folder=volume://…` |
+| **Volume** | `clone <git-url>` | Named volume via virtio-blk (`volume.img` raw ext4) | No durable host checkout; label `local_folder=volume://…` |
 
-Volume mode exists for better metadata I/O (git status, node_modules, many small files) vs virtiofs binds. Contract: [`specs/clone.md`](../specs/clone.md) (archived change `20260808-clone-in-volume`).
+Volume mode exists for better metadata I/O (git status, node_modules, many small files) vs virtiofs binds. Apple named-volume `volume.img` is raw ext4 (magic `0xEF53` at offset 1080) and can be `e2fsck`'d in place only while unmounted; do not copy the sparse image. `Structure needs cleaning` on chown is ext4 `EUCLEAN`, not a chown-logic bug. Detail: [gaps — named volume ownership](domain/devcontainer-apple-gaps.md#named-volume-ownership-rootroot). Contract: [`specs/clone.md`](../specs/clone.md) (archived change `20260808-clone-in-volume`).
 
 ## Commands (product surface)
 
