@@ -165,6 +165,100 @@ enum CloneRuntimeMock {
     }
 }
 
+/// Non-interactive identity so volume-decision tests never read the identity prompt.
+private func quietIdentityPrompt() -> IdentityPrompt {
+    IdentityPrompt(isInteractive: false, readLine: { nil }, writeError: { _ in })
+}
+
+/// Injected workspace-volume prompt. Exhausted answers are EOF.
+private final class VolumePromptCapture: @unchecked Sendable {
+    var answers: [String?]
+    var written = ""
+    var reads = 0
+
+    init(answers: [String?]) {
+        self.answers = answers
+    }
+
+    func read() -> String? {
+        reads += 1
+        if answers.isEmpty { return nil }
+        return answers.removeFirst()
+    }
+
+    func write(_ text: String) {
+        written += text
+    }
+
+    var prompt: WorkspaceVolumePrompt {
+        WorkspaceVolumePrompt(readLine: { self.read() }, writeError: { self.write($0) })
+    }
+}
+
+private func volumeDecisionRuntime(
+    volumeName: String,
+    present: Bool,
+    entriesExit: Int32 = 0,
+    startFails: Bool = false,
+    configPathExists: Bool = true,
+    gitExists: Bool = true
+) -> (AppleContainerRuntime, MockProcessRunner) {
+    let mock = MockProcessRunner()
+    let deleted = LockedFlag()
+    mock.handlers = [
+        { args in
+            if args.starts(with: ["volume", "list"]) {
+                let show = present && !deleted.value
+                let items: [[String: Any]] = show ? [["id": volumeName]] : []
+                let data = try! JSONSerialization.data(withJSONObject: items)
+                return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+            }
+            if args.starts(with: ["volume", "delete"]) {
+                deleted.value = true
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            if startFails, args.first == "start" {
+                return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("start failed".utf8))
+            }
+            if args.contains(CloneCommand.workspaceVolumeEntriesToken) {
+                return ProcessResult(exitCode: entriesExit, stdout: Data(), stderr: Data())
+            }
+            if args.first == "exec", args.contains("test"), args.contains("-e") {
+                let path = args.last ?? ""
+                if path.hasSuffix("devcontainer.json") {
+                    return ProcessResult(
+                        exitCode: configPathExists ? 0 : 1,
+                        stdout: Data(),
+                        stderr: Data()
+                    )
+                }
+                if path.hasSuffix("/.git") {
+                    return ProcessResult(
+                        exitCode: gitExists ? 0 : 1,
+                        stdout: Data(),
+                        stderr: Data()
+                    )
+                }
+            }
+            return nil
+        }
+    ] + CloneRuntimeMock.handlers()
+    let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+    return (runtime, mock)
+}
+
+private final class LockedFlag: @unchecked Sendable {
+    var value = false
+}
+
+private func gitCloneCalls(_ mock: MockProcessRunner) -> [MockProcessRunner.MockProcessCall] {
+    mock.calls.filter { $0.arguments.contains { $0.contains("git clone") } }
+}
+
+private func volumeDeleteCalls(_ mock: MockProcessRunner, name: String) -> [MockProcessRunner.MockProcessCall] {
+    mock.calls.filter { $0.arguments == ["volume", "delete", name] }
+}
+
 // MARK: - Identity / CreateRequest unit tests
 
 nonisolated(unsafe) let cloneIdentityTests: [(String, () throws -> Void)] = [
@@ -1061,6 +1155,41 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(help.contains("[--json]"), "clone help lists --json")
         try MiniTest.expect(help.contains("machine-readable"), "clone help describes JSON mode")
         try MiniTest.expect(help.contains("--resume"), "clone help describes resume")
+        try MiniTest.expect(help.contains("--reuse-volume"), "clone help documents --reuse-volume")
+        try MiniTest.expect(help.contains("--replace-volume"), "clone help documents --replace-volume")
+        try MiniTest.expect(help.contains("Reuse it? [Y/n]"), "clone help documents the reuse prompt")
+        try MiniTest.expect(usage.contains("--reuse-volume"), "usage documents --reuse-volume")
+        try MiniTest.expect(usage.contains("--replace-volume"), "usage documents --replace-volume")
+    }),
+    ("cloneVolumeFlagsParseAndAreCloneOnly", {
+        let reuse = try CommandSurface.parseArgs(["https://example.com/r.git", "--reuse-volume"])
+        try MiniTest.expect(reuse.flags.contains("reuse-volume"))
+        try MiniTest.expect(!reuse.flags.contains("replace-volume"))
+        try CommandSurface.enforceWorkspaceGate(subcommand: "clone", parsed: reuse)
+        try MiniTest.expectThrows({
+            try CommandSurface.enforceWorkspaceGate(subcommand: "up", parsed: reuse)
+        }) { error in
+            try MiniTest.expectEqual((error as? CLIError)?.code, CLIErrorCode.usage)
+            try MiniTest.expectEqual((error as? CLIError)?.property, "--reuse-volume")
+        }
+
+        let replace = try CommandSurface.parseArgs(["--replace-volume", "https://example.com/r.git"])
+        try MiniTest.expect(replace.flags.contains("replace-volume"))
+        try MiniTest.expectEqual(replace.passthrough, ["https://example.com/r.git"])
+        try MiniTest.expectThrows({
+            try CommandSurface.enforceWorkspaceGate(subcommand: "rebuild", parsed: replace)
+        }) { error in
+            try MiniTest.expectEqual((error as? CLIError)?.property, "--replace-volume")
+        }
+
+        try MiniTest.expectThrows({
+            _ = try CommandSurface.parseArgs(["--reuse-volume", "--replace-volume", "https://example.com/r.git"])
+        }) { error in
+            let cli = error as? CLIError
+            try MiniTest.expectEqual(cli?.code, CLIErrorCode.usage)
+            try MiniTest.expect(cli?.message.contains("--reuse-volume") == true)
+            try MiniTest.expect(cli?.message.contains("--replace-volume") == true)
+        }
     }),
     ("cloneWithLocalFeaturesDefaultFetcher", {
         let restore = CloneGitFeatureTestSupport.installLiveOverrides()
@@ -3484,13 +3613,22 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
             }
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let prompt = VolumePromptCapture(answers: ["should-not-be-read"])
         let result = try CloneCommand.run(
-            options: CloneOptions(gitURL: "https://github.com/org/reclone.git", skipPull: true),
+            options: CloneOptions(
+                gitURL: "https://github.com/org/reclone.git",
+                skipPull: true,
+                replaceVolume: true
+            ),
             runtime: runtime,
             git: git,
             credentials: MockGitCredential(),
-            localEnv: [:]
+            localEnv: [:],
+            identityPrompt: quietIdentityPrompt(),
+            isTTY: true,
+            volumePrompt: prompt.prompt
         )
+        try MiniTest.expectEqual(prompt.reads, 0, "--replace-volume must not prompt")
         try MiniTest.expectEqual(result.outcome, "success")
         try MiniTest.expectEqual(result.workspaceVolume, wsVol)
         try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "delete", wsVol] })
@@ -3498,6 +3636,630 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
         let deleteIdx = mock.calls.firstIndex { $0.arguments == ["volume", "delete", wsVol] }!
         let createIdx = mock.calls.firstIndex { $0.arguments == ["volume", "create", wsVol] }!
         try MiniTest.expect(deleteIdx < createIdx)
+    }),
+    ("cloneReuseVolumePromptYesKeepsTree", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let gitURL = "https://github.com/org/reuse-yes.git"
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: gitURL,
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: nil
+        )
+        let wsVol = identity.workspaceVolumeName
+        let (runtime, mock) = volumeDecisionRuntime(volumeName: wsVol, present: true, entriesExit: 0)
+        let prompt = VolumePromptCapture(answers: ["Y"])
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20" }"#
+        let result = try CloneCommand.run(
+            options: CloneOptions(gitURL: gitURL, skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:],
+            identityPrompt: quietIdentityPrompt(),
+            isTTY: true,
+            volumePrompt: prompt.prompt
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(prompt.reads, 1)
+        try MiniTest.expect(
+            prompt.written.contains(CloneCommand.workspaceVolumeReusePrompt(volumeName: wsVol))
+        )
+        try MiniTest.expect(volumeDeleteCalls(mock, name: wsVol).isEmpty, "reuse must not delete the volume")
+        try MiniTest.expect(gitCloneCalls(mock).isEmpty, "reuse must not git-clone over an existing tree")
+        try MiniTest.expect(mock.calls.contains {
+            $0.arguments.contains("user.name") && $0.arguments.contains("Test User")
+        }, "reuse still applies author identity when .git exists")
+    }),
+    ("cloneReuseVolumeEmptyEnterAndFlagSkipPrompt", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let gitURL = "https://github.com/org/reuse-empty.git"
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: gitURL,
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: nil
+        )
+        let wsVol = identity.workspaceVolumeName
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20" }"#
+
+        let (runtime, mock) = volumeDecisionRuntime(volumeName: wsVol, present: true, entriesExit: 0)
+        let prompt = VolumePromptCapture(answers: [""])
+        _ = try CloneCommand.run(
+            options: CloneOptions(gitURL: gitURL, skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:],
+            identityPrompt: quietIdentityPrompt(),
+            isTTY: true,
+            volumePrompt: prompt.prompt
+        )
+        try MiniTest.expectEqual(prompt.reads, 1, "empty Enter is an answer")
+        try MiniTest.expect(volumeDeleteCalls(mock, name: wsVol).isEmpty)
+        try MiniTest.expect(gitCloneCalls(mock).isEmpty)
+
+        let (flagRuntime, flagMock) = volumeDecisionRuntime(volumeName: wsVol, present: true, entriesExit: 0)
+        let flagPrompt = VolumePromptCapture(answers: ["n"])
+        _ = try CloneCommand.run(
+            options: CloneOptions(gitURL: gitURL, skipPull: true, reuseVolume: true),
+            runtime: flagRuntime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:],
+            identityPrompt: quietIdentityPrompt(),
+            isTTY: false,
+            volumePrompt: flagPrompt.prompt
+        )
+        try MiniTest.expectEqual(flagPrompt.reads, 0, "--reuse-volume must not prompt")
+        try MiniTest.expect(flagPrompt.written.isEmpty)
+        try MiniTest.expect(volumeDeleteCalls(flagMock, name: wsVol).isEmpty)
+        try MiniTest.expect(gitCloneCalls(flagMock).isEmpty)
+    }),
+    ("cloneReuseEmptyVolumeStillPopulates", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let gitURL = "https://github.com/org/reuse-blank.git"
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: gitURL,
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: nil
+        )
+        let wsVol = identity.workspaceVolumeName
+        let (runtime, mock) = volumeDecisionRuntime(volumeName: wsVol, present: true, entriesExit: 1)
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20" }"#
+        _ = try CloneCommand.run(
+            options: CloneOptions(gitURL: gitURL, skipPull: true, reuseVolume: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:],
+            identityPrompt: quietIdentityPrompt(),
+            isTTY: false
+        )
+        try MiniTest.expect(volumeDeleteCalls(mock, name: wsVol).isEmpty, "empty reuse must not delete")
+        try MiniTest.expect(!gitCloneCalls(mock).isEmpty, "empty reuse may populate")
+    }),
+    ("cloneReplaceVolumePromptNo", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let gitURL = "https://github.com/org/replace-no.git"
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: gitURL,
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: nil
+        )
+        let wsVol = identity.workspaceVolumeName
+        let (runtime, mock) = volumeDecisionRuntime(volumeName: wsVol, present: true)
+        let prompt = VolumePromptCapture(answers: ["no"])
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20" }"#
+        let result = try CloneCommand.run(
+            options: CloneOptions(gitURL: gitURL, skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:],
+            identityPrompt: quietIdentityPrompt(),
+            isTTY: true,
+            volumePrompt: prompt.prompt
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(prompt.reads, 1)
+        try MiniTest.expect(!volumeDeleteCalls(mock, name: wsVol).isEmpty)
+        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "create", wsVol] })
+        let deleteIdx = mock.calls.firstIndex { $0.arguments == ["volume", "delete", wsVol] }!
+        let createIdx = mock.calls.firstIndex { $0.arguments == ["volume", "create", wsVol] }!
+        try MiniTest.expect(deleteIdx < createIdx)
+        try MiniTest.expect(!gitCloneCalls(mock).isEmpty, "replace still populates")
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.contains(CloneCommand.workspaceVolumeEntriesToken) },
+            "replace must not probe the old tree"
+        )
+    }),
+    ("cloneExistingVolumeEOFAborts", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let gitURL = "https://github.com/org/reuse-eof.git"
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: gitURL,
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: nil
+        )
+        let wsVol = identity.workspaceVolumeName
+        let (runtime, mock) = volumeDecisionRuntime(volumeName: wsVol, present: true)
+        let prompt = VolumePromptCapture(answers: [])
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20" }"#
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(gitURL: gitURL, skipPull: true),
+                runtime: runtime,
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:],
+                identityPrompt: quietIdentityPrompt(),
+                isTTY: true,
+                volumePrompt: prompt.prompt
+            )
+        }) { error in
+            let cli = error as? CLIError
+            try MiniTest.expectEqual(cli?.code, CLIErrorCode.usage)
+            try MiniTest.expect(cli?.message.contains("not deleted") == true)
+            try MiniTest.expect(cli?.hint?.contains("--reuse-volume") == true)
+            try MiniTest.expect(cli?.hint?.contains("--replace-volume") == true)
+        }
+        try MiniTest.expectEqual(prompt.reads, 1)
+        try MiniTest.expect(prompt.written.contains("Reuse it? [Y/n]"))
+        try MiniTest.expect(volumeDeleteCalls(mock, name: wsVol).isEmpty, "EOF must not delete")
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" }, "EOF must not create a container")
+    }),
+    ("cloneExistingVolumeNonTTYFailsClosed", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let gitURL = "https://github.com/org/reuse-nontty.git"
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: gitURL,
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: nil
+        )
+        let wsVol = identity.workspaceVolumeName
+        let (runtime, mock) = volumeDecisionRuntime(volumeName: wsVol, present: true)
+        let prompt = VolumePromptCapture(answers: ["n"])
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20" }"#
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(gitURL: gitURL, skipPull: true),
+                runtime: runtime,
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:],
+                identityPrompt: quietIdentityPrompt(),
+                isTTY: false,
+                volumePrompt: prompt.prompt
+            )
+        }) { error in
+            let cli = error as? CLIError
+            try MiniTest.expectEqual(cli?.code, CLIErrorCode.usage)
+            try MiniTest.expect(cli?.message.contains(wsVol) == true)
+            try MiniTest.expect(cli?.hint?.contains("--reuse-volume") == true)
+            try MiniTest.expect(cli?.hint?.contains("--replace-volume") == true)
+        }
+        try MiniTest.expectEqual(prompt.reads, 0, "non-TTY must not prompt")
+        try MiniTest.expect(prompt.written.isEmpty)
+        try MiniTest.expect(volumeDeleteCalls(mock, name: wsVol).isEmpty)
+    }),
+    ("cloneExistingVolumeJSONFailsClosed", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let gitURL = "https://github.com/org/reuse-json.git"
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: gitURL,
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: nil
+        )
+        let wsVol = identity.workspaceVolumeName
+        let (runtime, mock) = volumeDecisionRuntime(volumeName: wsVol, present: true)
+        let prompt = VolumePromptCapture(answers: ["y"])
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20" }"#
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(gitURL: gitURL, skipPull: true, jsonOutput: true),
+                runtime: runtime,
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:],
+                identityPrompt: quietIdentityPrompt(),
+                isTTY: true,
+                volumePrompt: prompt.prompt
+            )
+        }) { error in
+            let cli = error as? CLIError
+            try MiniTest.expect(cli?.hint?.contains("--reuse-volume") == true)
+            try MiniTest.expect(cli?.hint?.contains("--replace-volume") == true)
+        }
+        try MiniTest.expectEqual(prompt.reads, 0, "--json must not prompt")
+        try MiniTest.expect(volumeDeleteCalls(mock, name: wsVol).isEmpty)
+    }),
+    ("cloneReuseVolumeFailureDoesNotDelete", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let gitURL = "https://github.com/org/reuse-fail.git"
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: gitURL,
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: nil
+        )
+        let wsVol = identity.workspaceVolumeName
+        let (runtime, mock) = volumeDecisionRuntime(volumeName: wsVol, present: true, startFails: true)
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20" }"#
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(gitURL: gitURL, skipPull: true, reuseVolume: true),
+                runtime: runtime,
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:],
+                identityPrompt: quietIdentityPrompt(),
+                isTTY: false
+            )
+        }) { _ in }
+        try MiniTest.expect(volumeDeleteCalls(mock, name: wsVol).isEmpty, "failure must not delete a reused volume")
+        try MiniTest.expect(
+            mock.calls.contains { $0.arguments.first == "delete" },
+            "failure still deletes the container this invocation created"
+        )
+        try MiniTest.expect(gitCloneCalls(mock).isEmpty, "start failed before populate")
+    }),
+    ("cloneMissingVolumeDoesNotPrompt", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let gitURL = "https://github.com/org/fresh-vol.git"
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: gitURL,
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: nil
+        )
+        let wsVol = identity.workspaceVolumeName
+        let (runtime, mock) = volumeDecisionRuntime(volumeName: wsVol, present: false)
+        let prompt = VolumePromptCapture(answers: ["n"])
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20" }"#
+        let result = try CloneCommand.run(
+            options: CloneOptions(gitURL: gitURL, skipPull: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:],
+            identityPrompt: quietIdentityPrompt(),
+            isTTY: true,
+            volumePrompt: prompt.prompt
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(prompt.reads, 0, "missing volume must not prompt")
+        try MiniTest.expect(prompt.written.isEmpty)
+        try MiniTest.expect(volumeDeleteCalls(mock, name: wsVol).isEmpty)
+        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "create", wsVol] })
+        try MiniTest.expect(!gitCloneCalls(mock).isEmpty)
+    }),
+    ("cloneBothVolumeFlagsIsStructuredError", {
+        let git = MockGitClient()
+        git.requireGitResult = .failure(CLIError(code: CLIErrorCode.gitMissing, message: "git missing"))
+        let mock = MockProcessRunner()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(
+                    gitURL: "https://github.com/org/both.git",
+                    skipPull: true,
+                    reuseVolume: true,
+                    replaceVolume: true
+                ),
+                runtime: runtime,
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:],
+                identityPrompt: quietIdentityPrompt(),
+                isTTY: true
+            )
+        }) { error in
+            let cli = error as? CLIError
+            try MiniTest.expectEqual(cli?.code, CLIErrorCode.usage)
+            try MiniTest.expect(cli?.message.contains("--reuse-volume") == true)
+            try MiniTest.expect(cli?.message.contains("--replace-volume") == true)
+        }
+        try MiniTest.expect(git.fetchConfigCalls.isEmpty, "conflicting flags fail before git fetch")
+        try MiniTest.expect(mock.calls.isEmpty, "conflicting flags must not touch the runtime")
+    }),
+    ("cloneVolumeListFailureFailsClosed", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let gitURL = "https://github.com/org/list-fail.git"
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: gitURL,
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: nil
+        )
+        let wsVol = identity.workspaceVolumeName
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20" }"#
+
+        func assertNoWorkspaceDelete(_ mock: MockProcessRunner) throws {
+            try MiniTest.expect(volumeDeleteCalls(mock, name: wsVol).isEmpty, "list failure must not delete")
+            try MiniTest.expect(
+                !mock.calls.contains { $0.arguments == ["volume", "create", wsVol] },
+                "list failure must not create a workspace volume"
+            )
+            try MiniTest.expect(
+                !mock.calls.contains { $0.arguments.first == "create" },
+                "list failure must not create a container"
+            )
+        }
+
+        let failedList = MockProcessRunner()
+        failedList.handlers = [
+            { args in
+                if args.starts(with: ["volume", "list"]) {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("volume list failed".utf8))
+                }
+                return nil
+            }
+        ] + CloneRuntimeMock.handlers()
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(gitURL: gitURL, skipPull: true),
+                runtime: AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: failedList),
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:],
+                identityPrompt: quietIdentityPrompt(),
+                isTTY: true
+            )
+        }) { error in
+            let cli = error as? CLIError
+            try MiniTest.expectEqual(cli?.code, CLIErrorCode.runtimeFailed)
+            try MiniTest.expect(cli?.message.contains(wsVol) == true)
+            try MiniTest.expect(cli?.hint?.contains("was not deleted") == true)
+        }
+        try assertNoWorkspaceDelete(failedList)
+
+        let badJSON = MockProcessRunner()
+        badJSON.handlers = [
+            { args in
+                if args.starts(with: ["volume", "list"]) {
+                    return ProcessResult(exitCode: 0, stdout: Data("not-json".utf8), stderr: Data())
+                }
+                return nil
+            }
+        ] + CloneRuntimeMock.handlers()
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(gitURL: gitURL, skipPull: true, replaceVolume: true),
+                runtime: AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: badJSON),
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:],
+                identityPrompt: quietIdentityPrompt(),
+                isTTY: false
+            )
+        }) { error in
+            try MiniTest.expectEqual((error as? CLIError)?.code, CLIErrorCode.runtimeFailed)
+        }
+        try assertNoWorkspaceDelete(badJSON)
+    }),
+    ("cloneEnsureVolumeReuseFailureDoesNotDelete", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let gitURL = "https://github.com/org/ensure-reused.git"
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: gitURL,
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: nil
+        )
+        let wsVol = identity.workspaceVolumeName
+        let mock = MockProcessRunner()
+        let lists = LockedFlag()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["volume", "list"]) {
+                    // Disposition sees a confirmed miss. The later ensureVolume list sees
+                    // the volume and reuses it (created == false).
+                    let show = lists.value
+                    lists.value = true
+                    let items: [[String: Any]] = show ? [["id": wsVol]] : []
+                    let data = try! JSONSerialization.data(withJSONObject: items)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "start" {
+                    return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("start failed".utf8))
+                }
+                return nil
+            }
+        ] + CloneRuntimeMock.handlers()
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20" }"#
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(gitURL: gitURL, skipPull: true),
+                runtime: AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock),
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:],
+                identityPrompt: quietIdentityPrompt(),
+                isTTY: false
+            )
+        }) { _ in }
+        try MiniTest.expect(
+            mock.calls.contains { $0.arguments.first == "create" },
+            "container create ran after ensureVolume reused the volume"
+        )
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments == ["volume", "create", wsVol] },
+            "ensureVolume must reuse rather than create"
+        )
+        try MiniTest.expect(
+            volumeDeleteCalls(mock, name: wsVol).isEmpty,
+            "failure must not delete a volume ensureVolume only reused"
+        )
+    }),
+    ("cloneUnrecognizedVolumeAnswerDoesNotDelete", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let gitURL = "https://github.com/org/reuse-maybe.git"
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: gitURL,
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: nil
+        )
+        let wsVol = identity.workspaceVolumeName
+        let (runtime, mock) = volumeDecisionRuntime(volumeName: wsVol, present: true)
+        let prompt = VolumePromptCapture(answers: ["maybe"])
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20" }"#
+        try MiniTest.expectThrows({
+            _ = try CloneCommand.run(
+                options: CloneOptions(gitURL: gitURL, skipPull: true),
+                runtime: runtime,
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:],
+                identityPrompt: quietIdentityPrompt(),
+                isTTY: true,
+                volumePrompt: prompt.prompt
+            )
+        }) { error in
+            let cli = error as? CLIError
+            try MiniTest.expectEqual(cli?.code, CLIErrorCode.usage)
+            try MiniTest.expect(cli?.hint?.contains("--reuse-volume") == true)
+            try MiniTest.expect(cli?.hint?.contains("--replace-volume") == true)
+        }
+        try MiniTest.expect(volumeDeleteCalls(mock, name: wsVol).isEmpty, "unrecognized answer must not delete")
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+    }),
+    ("cloneReuseSkipsAuthorWhenGitMissing", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let gitURL = "https://github.com/org/reuse-nogit.git"
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: gitURL,
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: nil
+        )
+        let wsVol = identity.workspaceVolumeName
+        let (runtime, mock) = volumeDecisionRuntime(
+            volumeName: wsVol,
+            present: true,
+            entriesExit: 0,
+            gitExists: false
+        )
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{ "image": "alpine:3.20" }"#
+        _ = try CloneCommand.run(
+            options: CloneOptions(gitURL: gitURL, skipPull: true, reuseVolume: true),
+            runtime: runtime,
+            git: git,
+            credentials: MockGitCredential(),
+            localEnv: [:],
+            identityPrompt: quietIdentityPrompt(),
+            isTTY: false
+        )
+        try MiniTest.expect(gitCloneCalls(mock).isEmpty)
+        try MiniTest.expect(volumeDeleteCalls(mock, name: wsVol).isEmpty)
+        try MiniTest.expect(!mock.calls.contains {
+            $0.arguments.contains("user.name")
+        }, "no .git means no author write")
+    }),
+    ("cloneReuseResumeOverlaysExistingConfigOnly", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let gitURL = "https://github.com/org/reuse-resume.git"
+        let identity = ContainerIdentity.volumeModeIdentity(
+            gitURL: gitURL,
+            configRelativePath: ".devcontainer/devcontainer.json",
+            configName: nil
+        )
+        let wsVol = identity.workspaceVolumeName
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clone-reuse-resume-\(UUID().uuidString)", isDirectory: true).path
+        let child = (root as NSString).appendingPathComponent("kept")
+        try FileManager.default.createDirectory(atPath: child, withIntermediateDirectories: true)
+        try "adevcontainer-clone-recovery-v1\n".write(
+            toFile: (child as NSString).appendingPathComponent(".adevcontainer-retained-checkout"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let dc = (child as NSString).appendingPathComponent(".devcontainer")
+        try FileManager.default.createDirectory(atPath: dc, withIntermediateDirectories: true)
+        try #"{ "image": "alpine:3.20", "name": "edited" }"#.write(
+            toFile: (dc as NSString).appendingPathComponent("devcontainer.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        CloneCommand.retainedCheckoutRootOverride = root
+        defer {
+            CloneCommand.retainedCheckoutRootOverride = nil
+            try? FileManager.default.removeItem(atPath: root)
+        }
+
+        func runResume(configExists: Bool) throws -> MockProcessRunner {
+            let (runtime, mock) = volumeDecisionRuntime(
+                volumeName: wsVol,
+                present: true,
+                entriesExit: 0,
+                configPathExists: configExists
+            )
+            // Recreate the checkout if a prior success removed it.
+            if !FileManager.default.fileExists(atPath: child) {
+                try FileManager.default.createDirectory(atPath: child, withIntermediateDirectories: true)
+                try "adevcontainer-clone-recovery-v1\n".write(
+                    toFile: (child as NSString).appendingPathComponent(".adevcontainer-retained-checkout"),
+                    atomically: true,
+                    encoding: .utf8
+                )
+                try FileManager.default.createDirectory(atPath: dc, withIntermediateDirectories: true)
+                try #"{ "image": "alpine:3.20", "name": "edited" }"#.write(
+                    toFile: (dc as NSString).appendingPathComponent("devcontainer.json"),
+                    atomically: true,
+                    encoding: .utf8
+                )
+            }
+            let git = MockGitClient()
+            _ = try CloneCommand.run(
+                options: CloneOptions(
+                    gitURL: gitURL,
+                    skipPull: true,
+                    resumeConfigDir: child,
+                    reuseVolume: true
+                ),
+                runtime: runtime,
+                git: git,
+                credentials: MockGitCredential(),
+                localEnv: [:],
+                identityPrompt: quietIdentityPrompt(),
+                isTTY: false
+            )
+            try MiniTest.expect(git.fetchConfigCalls.isEmpty, "resume must not re-fetch")
+            try MiniTest.expect(gitCloneCalls(mock).isEmpty, "reuse must not re-clone")
+            try MiniTest.expect(volumeDeleteCalls(mock, name: wsVol).isEmpty)
+            return mock
+        }
+
+        let overlaid = try runResume(configExists: true)
+        try MiniTest.expect(
+            overlaid.calls.contains { $0.arguments.contains("adevcontainer-clone-persist") },
+            "resume overlays an edited devcontainer.json that already exists"
+        )
+        let skipped = try runResume(configExists: false)
+        try MiniTest.expect(
+            !skipped.calls.contains { $0.arguments.contains("adevcontainer-clone-persist") },
+            "resume does not create a missing config path in a reused tree"
+        )
     }),
     ("cloneSetsConfigVolumesLabel", {
         let restore = CloneGitFeatureTestSupport.installOverrides()

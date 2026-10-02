@@ -140,6 +140,16 @@ public enum CommandSurface {
                 i += 1
                 continue
             }
+            if a == "--reuse-volume" {
+                flags.insert("reuse-volume")
+                i += 1
+                continue
+            }
+            if a == "--replace-volume" {
+                flags.insert("replace-volume")
+                i += 1
+                continue
+            }
             if a == "--json" {
                 flags.insert("json")
                 i += 1
@@ -223,7 +233,21 @@ public enum CommandSurface {
             i += 1
         }
 
+        if flags.contains("reuse-volume"), flags.contains("replace-volume") {
+            throw conflictingWorkspaceVolumeFlagsError()
+        }
+
         return ParsedArgs(workspace: workspace, name: name, resume: resume, flags: flags, passthrough: passthrough)
+    }
+
+    /// `--reuse-volume` and `--replace-volume` choose opposite workspace-volume actions.
+    public static func conflictingWorkspaceVolumeFlagsError() -> CLIError {
+        CLIError(
+            code: CLIErrorCode.usage,
+            property: "--reuse-volume",
+            message: "--reuse-volume and --replace-volume cannot be used together",
+            hint: "Pass only one: --reuse-volume keeps the existing workspace volume; --replace-volume deletes it and clones fresh"
+        )
     }
 
     /// Subcommand targeted by a `help <command>` invocation, or nil when `args`
@@ -259,6 +283,22 @@ public enum CommandSurface {
                 property: "--resume",
                 message: "--resume is only valid for clone",
                 hint: "Resume a retained checkout with: \(commandPrefix) clone <git-url> --resume <config-dir>"
+            )
+        }
+        if parsed.flags.contains("reuse-volume"), subcommand != "clone" {
+            throw CLIError(
+                code: CLIErrorCode.usage,
+                property: "--reuse-volume",
+                message: "--reuse-volume is only valid for clone",
+                hint: "Keep an existing workspace volume with: \(commandPrefix) clone <git-url> --reuse-volume"
+            )
+        }
+        if parsed.flags.contains("replace-volume"), subcommand != "clone" {
+            throw CLIError(
+                code: CLIErrorCode.usage,
+                property: "--replace-volume",
+                message: "--replace-volume is only valid for clone",
+                hint: "Replace an existing workspace volume with: \(commandPrefix) clone <git-url> --replace-volume"
             )
         }
     }
@@ -332,6 +372,8 @@ public enum CommandSurface {
           -w, --workspace <path>   Workspace root for `up` only (default: cwd)
           --name <container>       Managed container name/id (exec/start/stop/delete/purge/rebuild/inspect)
           --resume <config-dir>    Resume clone from a retained config checkout (clone only)
+          --reuse-volume           Keep an existing clone workspace volume (clone only)
+          --replace-volume         Delete an existing clone workspace volume and clone fresh (clone only)
           --json                   Machine-readable output (up, clone, list, rebuild); on start,
                                    suppresses the interactive recovery prompt
           --skip-pull              Skip image pull on up/clone/rebuild
@@ -370,6 +412,11 @@ public enum CommandSurface {
         Clone notes:
           - Requires host git on PATH (config fetch + HTTPS credential fill)
           - Full clone runs inside the container (volume-mode workspace volume)
+          - Existing workspace volume: a TTY without --json prompts
+            "Workspace volume <name> already exists. Reuse it? [Y/n]" (empty/Y reuses;
+            n/no replaces; EOF aborts and does not delete). Non-TTY and --json require
+            --reuse-volume or --replace-volume and do not delete. Reuse keeps the tree
+            and never deletes that volume, including on later failure.
           - SSH: needs ssh-agent (SSH_AUTH_SOCK); create --ssh for later push
           - HTTPS: host git credential fill one-shot; guest credential.helper store
           - Auto-adds Features git:1 when config lacks git/common-utils
@@ -474,7 +521,7 @@ public enum CommandSurface {
             """
         case "clone":
             return """
-            \(cmd) clone <git-url> [--json] [--skip-pull] [--vscode] [--resume <config-dir>]
+            \(cmd) clone <git-url> [--json] [--skip-pull] [--vscode] [--resume <config-dir>] [--reuse-volume | --replace-volume]
 
             Create a volume-mode managed dev container (workspace on a named volume).
             Host git fetches config only; full clone runs inside the container.
@@ -492,6 +539,25 @@ public enum CommandSurface {
             --resume <config-dir>: skip the host git config fetch and re-resolve from a
             retained config checkout (the path printed by a prior non-TTY failure).
             Used to retry a failed clone after editing the retained devcontainer.json.
+
+            --reuse-volume: keep an existing workspace volume without prompting.
+            --replace-volume: delete an existing workspace volume and clone into a new
+            empty one without prompting. The two flags cannot be combined.
+
+            If the workspace volume already exists and neither flag is set:
+            - A TTY without --json prompts "Workspace volume <name> already exists.
+              Reuse it? [Y/n]". Empty Enter or Y reuses. n/no replaces. EOF aborts
+              and does not delete the volume.
+            - Non-TTY or --json fails without prompting or deleting. The error hint
+              names both --reuse-volume and --replace-volume.
+
+            Reuse mounts the existing volume and does not git-clone over a tree that
+            already has entries (an empty volume, including lost+found only, is still
+            populated). It keeps that tree, applies author identity when .git exists,
+            overlays an edited devcontainer.json on --resume/recovery when that path
+            already exists, and never deletes the volume — including when create,
+            start, ownership, populate, or hooks later fail. Replace deletes then
+            creates; failure cleanup may delete only the volume this invocation created.
 
             --vscode: best-effort open VS Code on the resolved remote folder after
             success (same prereqs/soft-fail as up). postAttach is CLI attach after

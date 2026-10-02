@@ -114,6 +114,7 @@ public enum RebuildCommand {
         recoveryEditor: RecoveryEditor? = nil,
         openEditorPrompt: RecoveryOpenEditorPrompt = .default
     ) throws -> RebuildResult {
+        var volumeResume: VolumeRecoveryResume.State?
         let selected: ContainerInfo
         if let selectedOverride {
             selected = selectedOverride
@@ -125,12 +126,17 @@ public enum RebuildCommand {
                     picker: picker
                 )
             } catch let error as CLIError where error.code == CLIErrorCode.containerNotFound {
-                // Named bind recovery retry after non-TTY retention: container was removed;
-                // resume from retained stamps and the (already edited) host stamped path.
+                // Named recovery retry after the container was removed.
+                // Bind: host stamped path. Volume: retained session, no helper required.
                 if let name = options.name,
                    let resume = try BindRecoveryResume.load(name: name, fileManager: fileManager)
                 {
                     selected = BindRecoveryResume.containerInfo(from: resume)
+                } else if let name = options.name,
+                          let resume = try VolumeRecoveryResume.load(name: name, fileManager: fileManager)
+                {
+                    volumeResume = resume
+                    selected = VolumeRecoveryResume.containerInfo(from: resume)
                 } else {
                     throw error
                 }
@@ -148,13 +154,26 @@ public enum RebuildCommand {
         let bindRecoveryEligible = RecoveryOrchestrator.isBindEligible(labels: labels)
         var recoveryContext = recovery
         var recoveryEndpointID = recoveryHelperID
+        var resumedSession: RecoveryConfigSession?
         var crossedDeleteBoundary = false
         defer {
-        if !crossedDeleteBoundary, let recoveryContext {
-                if recoveryEndpointID == nil {
+            // Pre-delete failures drop an unpublished session. A session already published
+            // under the container name (or any exit after the delete boundary) must stay:
+            // the container may already be gone and no helper was created.
+            if !crossedDeleteBoundary, let recoveryContext, recoveryEndpointID == nil {
+                let publishedID = try? VolumeRecoveryResume.load(
+                    name: selected.name,
+                    fileManager: fileManager
+                )?.sessionID
+                if publishedID != recoveryContext.session.sessionID {
                     try? recoveryContext.session.cleanup()
                 }
             }
+        }
+        if volumeResume != nil {
+            // Container is already gone. A throw from here on must not drop the session,
+            // including a process exit that never reaches RecoveryOrchestrator.recover.
+            crossedDeleteBoundary = true
         }
 
         func retryVolumeRecovery(
@@ -182,11 +201,49 @@ public enum RebuildCommand {
 
         // ═══════════════════════════ PHASE A (non-destructive gate) ═══════════════════════════
 
+        if let volumeResume {
+            do {
+                let directory = try RecoveryConfigSession.directoryURL(
+                    forSessionID: volumeResume.sessionID,
+                    fileManager: fileManager
+                )
+                resumedSession = try RecoveryConfigSession.open(
+                    directoryURL: directory,
+                    fileManager: fileManager
+                )
+            } catch {
+                throw CLIError(
+                    code: CLIErrorCode.recoveryUnavailable,
+                    message: "The retained volume recovery session could not be opened",
+                    hint: "Resume '\(selected.name)' does not create a blank workspace volume. Session \(volumeResume.sessionID) was left in place"
+                )
+            }
+            guard let opened = resumedSession else {
+                throw CLIError(
+                    code: CLIErrorCode.recoveryUnavailable,
+                    message: "The retained volume recovery session could not be opened",
+                    hint: "Resume '\(selected.name)' does not create a blank workspace volume"
+                )
+            }
+            // Fail closed before any create/ensure. A missing volume must not become a blank one.
+            try refuseMissingRecoveryWorkspaceVolume(
+                name: stampedWorkspaceVolume(labels),
+                runtime: runtime,
+                session: opened,
+                helperID: "not-created",
+                selectedName: selected.name,
+                environment: localEnv,
+                helperAvailable: false,
+                message: "The retained recovery workspace volume is no longer present"
+            )
+        }
+
         // Volume mode: the config lives in the volume; a stopped container cannot cat it.
         // Bare runtime start (no lifecycle hooks) is the only pre-delete runtime action
         // allowed on the old container. Named recovery retry also needs the helper up before
         // apply/write — do not run recovery apply above this gate.
-        if isVolumeMode, !selected.isRunning {
+        // A volume resume has no container to start.
+        if isVolumeMode, volumeResume == nil, !selected.isRunning {
             StatusPrinter.status("Starting container")
             try runtime.start(nameOrId: selected.id)
         }
@@ -196,7 +253,8 @@ public enum RebuildCommand {
         // TTY (no --json): open the editor first so a retained broken config is fixed before rebuilding.
         // Non-TTY / --json: apply the current temp bytes (operator already edited offline).
         // openRetry/apply also bounce Apple zombie helpers (list=running, exec rejected).
-        if recoveryContext == nil, RecoveryHelper.isRecoveryHelper(selected) {
+        // A name-indexed volume resume has no helper; do not require one.
+        if recoveryContext == nil, volumeResume == nil, RecoveryHelper.isRecoveryHelper(selected) {
             let opened = try RecoveryOrchestrator.openRetry(
                 helper: selected,
                 runtime: runtime,
@@ -222,7 +280,15 @@ public enum RebuildCommand {
         // the guard is defensive only).
         let volumeRead: ResolvedVolumeConfigRead?
         let resolvedConfig: ResolvedDevContainerConfig
-        if isVolumeMode {
+        if let resumedSession {
+            volumeRead = try resolvedVolumeRead(
+                from: resumedSession,
+                labels: labels,
+                localEnv: localEnv,
+                fileManager: fileManager
+            )
+            resolvedConfig = volumeRead!.config
+        } else if isVolumeMode {
             volumeRead = try ConfigReader.readVolumeWithRaw(
                 labels: labels,
                 containerId: selected.id,
@@ -256,7 +322,10 @@ public enum RebuildCommand {
 
         let localIdentityReader = localIdentityReaderOverride ?? DefaultRebuildLocalIdentityReader()
         let capturedLocalIdentity: GitAuthorIdentity
-        if isVolumeMode {
+        if let volumeResume {
+            // The old container is gone; do not exec into it. Missing identity is not invented.
+            capturedLocalIdentity = volumeResume.identity
+        } else if isVolumeMode {
             capturedLocalIdentity = localIdentityReader.readOldContainerWorkspace(
                 containerId: selected.id,
                 workspaceFolder: resolvedConfig.workspaceFolder,
@@ -269,7 +338,7 @@ public enum RebuildCommand {
             )
         }
 
-        if recoveryContext == nil, RecoveryHelper.isEligible(labels: labels), let volumeRead {
+        if recoveryContext == nil, resumedSession == nil, RecoveryHelper.isEligible(labels: labels), let volumeRead {
             // This is deliberately before host/Features work and before the old-container
             // delete. Preparation failures therefore leave the selected container untouched.
             recoveryContext = try RecoveryOrchestrator.prepare(
@@ -281,7 +350,23 @@ public enum RebuildCommand {
             )
         }
 
-        if recoveryContext == nil && isVolumeMode && RecoveryHelper.isEligible(labels: labels) {
+        if recoveryContext == nil, let resumedSession, RecoveryHelper.isEligible(labels: labels) {
+            // Helper-image preflight must not block resume and must not create a volume.
+            // A later hard failure can still enter recover when preparation succeeds.
+            if let preparation = try? RecoveryHelper.prepare(
+                for: selected,
+                sessionID: resumedSession.sessionID,
+                runtime: runtime,
+                pullIfMissing: !options.skipPull
+            ) {
+                recoveryContext = RecoveryOrchestrator.Prepared(
+                    session: resumedSession,
+                    preparation: preparation
+                )
+            }
+        }
+
+        if recoveryContext == nil && resumedSession == nil && isVolumeMode && RecoveryHelper.isEligible(labels: labels) {
             throw CLIError(
                 code: CLIErrorCode.recoveryUnavailable,
                 message: "Recovery config could not be retained",
@@ -590,52 +675,44 @@ public enum RebuildCommand {
             newLabels[ContainerIdentity.labelConfigVolumes] = configVolumeNames.joined(separator: ",")
         }
 
-        // A retained helper is only a write endpoint for the exact pre-existing workspace
-        // volume. Recheck before deleting it; recovery must never manufacture a blank volume.
-        if isVolumeMode, let recovery = recoveryContext {
-            let present: Bool
-            do {
-                present = try runtime.volumeExists(
-                    stampedWorkspaceVolume(labels),
-                    requireObjectEntries: true
-                )
-            } catch {
-                throw RecoveryOrchestrator.retainedUnavailableFailure(
-                    session: recovery.session,
-                    helperID: recoveryEndpointID ?? selected.id,
-                    selectedName: selected.name,
-                    failure: error,
-                    environment: localEnv,
-                    helperAvailable: recoveryEndpointID != nil
-                )
-            }
-            guard present else {
-                let missing = CLIError(
-                    code: CLIErrorCode.recoveryUnavailable,
-                    message: "The retained recovery workspace volume is no longer present",
-                    hint: "Recovery refuses to create a blank replacement volume"
-                )
-                throw RecoveryOrchestrator.retainedUnavailableFailure(
-                    session: recovery.session,
-                    helperID: recoveryEndpointID ?? selected.id,
-                    selectedName: selected.name,
-                    failure: missing,
-                    environment: localEnv,
-                    helperAvailable: recoveryEndpointID != nil
-                )
-            }
+        // A retained helper or name-indexed session is only a write endpoint for the exact
+        // pre-existing workspace volume. Recheck before deleting; never manufacture a blank volume.
+        if isVolumeMode, let session = recoveryContext?.session ?? resumedSession {
+            try refuseMissingRecoveryWorkspaceVolume(
+                name: stampedWorkspaceVolume(labels),
+                runtime: runtime,
+                session: session,
+                helperID: recoveryEndpointID ?? selected.id,
+                selectedName: selected.name,
+                environment: localEnv,
+                helperAvailable: recoveryEndpointID != nil,
+                message: "The retained recovery workspace volume is no longer present"
+            )
         }
 
         // ═══════════════════════════ PHASE B (destructive create path) ═══════════════════════════
 
+        // Publish the session under the container name BEFORE delete. A process exit after
+        // the container is gone must still be resumable by `rebuild --name` without a helper.
+        if isVolumeMode, let session = recoveryContext?.session ?? resumedSession {
+            try VolumeRecoveryResume.retain(
+                container: selected,
+                sessionID: session.sessionID,
+                authorName: capturedLocalIdentity.trimmedName,
+                authorEmail: capturedLocalIdentity.trimmedEmail,
+                fileManager: fileManager
+            )
+        }
+
         // Container-only delete of the OLD container (never volumes/images).
-        // Bind recovery resume / same-process retry may already have no live container.
+        // Bind recovery resume / volume session resume / same-process retry may already
+        // have no live container.
         if let existing = try runtime.findByName(selected.id)
             ?? (selected.name != selected.id ? try runtime.findByName(selected.name) : nil)
         {
             StatusPrinter.status("Deleting container", item: existing.id)
             try runtime.delete(nameOrId: existing.id, force: true)
-        } else if selectedOverride != nil || bindRecoveryEligible {
+        } else if selectedOverride != nil || bindRecoveryEligible || volumeResume != nil {
             StatusPrinter.status("Old container already removed; continuing rebuild")
         } else {
             StatusPrinter.status("Deleting container", item: selected.id)
@@ -671,38 +748,18 @@ public enum RebuildCommand {
         // (never delete; missing config volumes created on demand).
         do {
             if isVolumeMode {
-                if let recovery = recoveryContext {
-                    let present: Bool
-                    do {
-                        present = try runtime.volumeExists(
-                            stampedWorkspaceVolume(labels),
-                            requireObjectEntries: true
-                        )
-                    } catch {
-                        throw RecoveryOrchestrator.retainedUnavailableFailure(
-                            session: recovery.session,
-                            helperID: recoveryEndpointID ?? selected.id,
-                            selectedName: selected.name,
-                            failure: error,
-                            environment: localEnv,
-                            helperAvailable: false
-                        )
-                    }
-                    guard present else {
-                        let missing = CLIError(
-                            code: CLIErrorCode.recoveryUnavailable,
-                            message: "The retained recovery workspace volume disappeared before replacement create",
-                            hint: "Recovery refuses to create a blank replacement volume"
-                        )
-                        throw RecoveryOrchestrator.retainedUnavailableFailure(
-                            session: recovery.session,
-                            helperID: recoveryEndpointID ?? selected.id,
-                            selectedName: selected.name,
-                            failure: missing,
-                            environment: localEnv,
-                            helperAvailable: false
-                        )
-                    }
+                if let session = recoveryContext?.session ?? resumedSession {
+                    // Never ensureVolume the workspace here: a miss must not create a blank volume.
+                    try refuseMissingRecoveryWorkspaceVolume(
+                        name: stampedWorkspaceVolume(labels),
+                        runtime: runtime,
+                        session: session,
+                        helperID: recoveryEndpointID ?? "not-created",
+                        selectedName: selected.name,
+                        environment: localEnv,
+                        helperAvailable: false,
+                        message: "The retained recovery workspace volume disappeared before replacement create"
+                    )
                 } else {
                     try runtime.ensureVolume(name: stampedWorkspaceVolume(labels))
                 }
@@ -713,13 +770,14 @@ public enum RebuildCommand {
         } catch let error as CLIError where error.recovery != nil {
             throw error
         } catch {
+            // Spec: volume ensure does not create a recovery helper. The session published
+            // before delete stays so `rebuild --name` can resume without one.
             StatusPrinter.warning("Old container '\(selected.name)' was already removed; rebuild failed while ensuring named volumes")
-            try? recoveryContext?.session.cleanup()
             throw CLIError(
                 code: CLIErrorCode.runtimeFailed,
                 property: "volumes",
                 message: "Failed to ensure rebuild volumes: \(error.localizedDescription)",
-                hint: "Existing volumes were preserved"
+                hint: "Existing volumes were preserved. Run '\(CommandSurface.commandPrefix) rebuild --name \(selected.name)' to resume; recovery will not create a blank workspace volume"
             )
         }
         StatusPrinter.status("Creating container", item: replacementName)
@@ -1057,9 +1115,10 @@ public enum RebuildCommand {
             return try handleCreatePathFailure(error)
         }
         if let readyError {
-            // Open/postAttach failures are terminal non-recovery outcomes. Do not leak the
-            // prepared session after the delete boundary.
+            // Open/postAttach failures are terminal non-recovery outcomes. The replacement
+            // container exists, so the name-indexed session is no longer the resume path.
             if let recoveryContext { try? recoveryContext.session.cleanup() }
+            try? VolumeRecoveryResume.cleanup(name: selected.name, fileManager: fileManager)
             throw readyError
         }
         guard let result else {
@@ -1121,8 +1180,12 @@ public enum RebuildCommand {
                 )
             }
         }
-        // Bind recovery resume is only needed while the managed container is missing.
+        // Bind / volume recovery resume is only needed while the managed container is missing.
+        if recoveryContext == nil {
+            try? resumedSession?.cleanup()
+        }
         try? BindRecoveryResume.cleanup(name: selected.name, fileManager: fileManager)
+        try? VolumeRecoveryResume.cleanup(name: selected.name, fileManager: fileManager)
         // Connection hints: entry point after human outcome digest / JSON.
         return result
     }
@@ -1652,6 +1715,72 @@ public enum RebuildCommand {
 
     private static func shellQuote(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Resolve a retained volume session with the same basename rules as the strict reader.
+    /// Does not exec into a container and does not create a volume.
+    private static func resolvedVolumeRead(
+        from session: RecoveryConfigSession,
+        labels: [String: String],
+        localEnv: [String: String],
+        fileManager: FileManager
+    ) throws -> ResolvedVolumeConfigRead {
+        let bytes = try session.readTempBytes()
+        let location = try ConfigReader.volumeConfigLocation(labels: labels)
+        let raw = RawVolumeConfig(
+            bytes: bytes,
+            pathInContainer: location.pathInContainer,
+            workspaceFolder: location.workspaceFolder,
+            workspaceFolderBasename: location.workspaceFolderBasename
+        )
+        let resolved = try ConfigReader.resolveVolumeFile(
+            at: session.tempFileURL.path,
+            labels: labels,
+            localEnv: localEnv,
+            fileManager: fileManager
+        )
+        return ResolvedVolumeConfigRead(config: resolved.config, raw: raw)
+    }
+
+    /// Workspace volume must already exist. Never calls `ensureVolume` / `volume create`.
+    private static func refuseMissingRecoveryWorkspaceVolume(
+        name: String,
+        runtime: AppleContainerRuntime,
+        session: RecoveryConfigSession,
+        helperID: String,
+        selectedName: String,
+        environment: [String: String],
+        helperAvailable: Bool,
+        message: String
+    ) throws {
+        let present: Bool
+        do {
+            present = try runtime.volumeExists(name, requireObjectEntries: true)
+        } catch {
+            throw RecoveryOrchestrator.retainedUnavailableFailure(
+                session: session,
+                helperID: helperID,
+                selectedName: selectedName,
+                failure: error,
+                environment: environment,
+                helperAvailable: helperAvailable
+            )
+        }
+        guard present else {
+            let missing = CLIError(
+                code: CLIErrorCode.recoveryUnavailable,
+                message: message,
+                hint: "Recovery refuses to create a blank replacement volume"
+            )
+            throw RecoveryOrchestrator.retainedUnavailableFailure(
+                session: session,
+                helperID: helperID,
+                selectedName: selectedName,
+                failure: missing,
+                environment: environment,
+                helperAvailable: helperAvailable
+            )
+        }
     }
 
     /// Persist a collision rename into the live config this rebuild is reading.

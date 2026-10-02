@@ -116,7 +116,9 @@ struct AdevcontainerMain {
                 skipPull: parsed.flags.contains("skip-pull"),
                 openVSCode: parsed.flags.contains("vscode"),
                 jsonOutput: parsed.flags.contains("json"),
-                resumeConfigDir: parsed.resume
+                resumeConfigDir: parsed.resume,
+                reuseVolume: parsed.flags.contains("reuse-volume"),
+                replaceVolume: parsed.flags.contains("replace-volume")
             )
             let result = try CloneCommand.run(options: opts, runtime: runtime)
             if opts.jsonOutput {

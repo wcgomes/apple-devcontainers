@@ -159,7 +159,16 @@ See also: [core.md](core.md) **Deterministic identity and labels** for shared sa
 
 On `clone` create, the CLI MUST:
 
-1. **Workspace volume freshness (re-clone) — `clone` only:** If the workspace named volume already exists, `clone` MUST **delete it and create it empty** before mount. MUST NOT reuse a dirty existing workspace volume tree. (Config `type=volume` mounts remain list-then-create/reuse per Named volume reuse policy — only the clone workspace `*-ws` volume is delete-and-create.)
+1. **Workspace volume freshness (re-clone) — `clone` only:** If the workspace named volume does not exist, `clone` MUST create it and MUST NOT prompt. If it already exists, `clone` MUST NOT delete it unless the operator explicitly chooses replace.
+
+   - **TTY, no `--json`, neither flag:** prompt on stderr (not QUIET-silenced): `Workspace volume <name> already exists. Reuse it? [Y/n]`. Empty Enter or `Y`/`yes` reuses. `n`/`no` replaces (delete, then create empty). EOF aborts without deleting. An unrecognized answer aborts without deleting.
+   - **`--reuse-volume`:** reuse without prompting.
+   - **`--replace-volume`:** replace without prompting (delete, then create empty).
+   - **Both flags:** structured error; MUST NOT delete.
+   - **Non-TTY or `--json`, neither flag:** fail closed with a structured error. MUST NOT prompt. MUST NOT delete. The hint MUST name both `--reuse-volume` and `--replace-volume`.
+   - **Reuse:** MUST NOT delete that workspace volume, including failure cleanup after create, start, ownership, populate, or hooks. MUST NOT run in-container git clone populate over an existing tree. If the mounted volume has no object entries other than `lost+found`, populate is allowed. If it has entries, skip populate and keep the tree; still apply author identity when `.git` exists; still overlay an edited `devcontainer.json` on `--resume`/recovery when that path already exists.
+   - **Replace:** delete-then-create. Failure cleanup MAY delete only the volume this invocation created after the operator chose replace.
+   - Config `type=volume` mounts remain list-then-create/reuse per Named volume reuse policy — no prompt. `rebuild` MUST remain unable to delete `*-ws`.
 2. **`rebuild` carve-out:** `rebuild` of a volume-mode managed container MUST **reuse** the existing `*-ws` volume tree with its data and MUST NOT delete, replace, or re-populate it; MUST NOT run git re-clone or `git pull` inside it. The freshness rule applies to `clone` only.
 3. Mount that volume as the **container workspace folder** (the implicit workspace mount). MUST NOT bind-mount a durable host project directory as the workspace for clone-created containers.
 4. **Existing occupant of the create name:** classify per **Create-name occupancy classification**. Same-workspace same-name MUST fail closed (MUST NOT silently reuse, replace, or attach; MUST NOT offer rename-to-duplicate). Foreign occupant MUST follow **Foreign create-name collision offer**. Same-workspace different-name MUST fail with a delete-hint.
@@ -190,9 +199,45 @@ Additional existing labels MAY be set. Discovery of managed containers for `list
 - When labels are inspected
 - Then `devcontainer.managed` is `adevcontainer`, `devcontainer.workspace_mode` is `volume`, `devcontainer.workspace_volume` matches the volume name, and `devcontainer.git_url` is present (normalized)
 
-#### Scenario: Re-clone deletes and creates a fresh workspace volume
+#### Scenario: Missing workspace volume is created without a prompt
+- Given the workspace volume name does not exist
+- When the user runs `adevcontainer clone` for that identity
+- Then the CLI creates the volume, does not prompt, and does not delete a pre-existing volume
+
+#### Scenario: TTY reuses an existing workspace volume by default
+- Given a workspace volume that already exists with residual files, stdin is a TTY, `--json` is not set, and neither volume flag is set
+- When the user runs `adevcontainer clone` and presses Enter or answers Y
+- Then the CLI prompts on stderr `Workspace volume <name> already exists. Reuse it? [Y/n]`, does not delete the volume, mounts it, and does not run in-container git clone over that tree
+
+#### Scenario: TTY replace deletes and creates a fresh workspace volume
+- Given a workspace volume that already exists with residual files, stdin is a TTY, and `--json` is not set
+- When the user runs `adevcontainer clone` and answers n or no
+- Then the CLI deletes that volume, creates it empty, and mounts the fresh volume (MUST NOT mount the dirty pre-existing tree)
+
+#### Scenario: EOF aborts without deleting
+- Given an existing workspace volume and the TTY reuse prompt
+- When stdin hits EOF
+- Then clone fails structured and does not delete the volume
+
+#### Scenario: Volume flags choose without prompting
+- Given an existing workspace volume
+- When the user passes `--reuse-volume` or `--replace-volume`
+- Then clone does not prompt; reuse keeps the volume and replace deletes then creates an empty volume
+- And passing both flags is a structured error and MUST NOT delete
+
+#### Scenario: Non-TTY and --json fail closed
+- Given an existing workspace volume and neither volume flag
+- When stdin is not a TTY, or `--json` is set
+- Then clone fails structured, does not prompt, does not delete the volume, and the hint names `--reuse-volume` and `--replace-volume`
+
+#### Scenario: Reuse failure does not delete the workspace volume
+- Given clone reused an existing workspace volume and a later create, start, ownership, populate, or hook step fails
+- When clone returns failure
+- Then that workspace volume is not deleted
+
+#### Scenario: Re-clone with --replace-volume deletes and creates a fresh workspace volume
 - Given a workspace volume name `adev-{base}-{hash12}-ws` that already exists (e.g. after a prior container-only delete) with residual files
-- When the user runs `adevcontainer clone` for the same URL/config identity
+- When the user runs `adevcontainer clone --replace-volume` for the same URL/config identity
 - Then the CLI deletes that volume, creates it empty, and mounts the fresh volume (MUST NOT mount the dirty pre-existing tree)
 
 #### Scenario: rebuild reuses the workspace volume instead of replacing it
@@ -219,7 +264,7 @@ Additional existing labels MAY be set. Discovery of managed containers for `list
 
 ### Requirement: In-container full clone populate (auth by URL scheme)
 
-After the container is created and started (and Features have ensured in-container git), `clone` MUST populate the workspace volume with a **full git clone inside the container** into `workspaceFolder` (volume mount), **before** create-path lifecycle hooks.
+After the container is created and started (and Features have ensured in-container git), `clone` MUST populate the workspace volume with a **full git clone inside the container** into `workspaceFolder` (volume mount), **before** create-path lifecycle hooks — except when reusing a workspace volume that already has object entries (see **Workspace volume freshness**). That reuse path MUST skip in-container git clone and keep the tree. An empty reused volume (no object entries other than `lost+found`) MUST still be populated.
 
 **Populate steps — MUST**
 
@@ -247,9 +292,9 @@ The host-side HTTPS acquisition (`git credential fill` with `GIT_TERMINAL_PROMPT
 If start, populate, or create-path lifecycle hooks fail after the workspace volume and/or container have been created, `clone` MUST:
 
 1. Delete the managed dev container (force as needed), and
-2. Delete the workspace volume (`*-ws`),
+2. Delete the workspace volume (`*-ws`) **only when this invocation created it** (it did not exist, or the operator chose replace and this invocation created the replacement),
 
-before returning the structured failure. (Create-path hook runners that already delete the container still require workspace volume deletion on this path.) Temp dirs remain subject to always-clean rules below. Tests MUST assert no successful outcome and no leftover clone container/workspace volume on these failures.
+before returning the structured failure. A reused pre-existing workspace volume MUST NOT be deleted on these failures. (Create-path hook runners that already delete the container still require workspace volume deletion on this path when this invocation created that volume.) Temp dirs remain subject to always-clean rules below. Tests MUST assert no successful outcome and no leftover clone container on these failures, and no leftover workspace volume when this invocation created it. A reused volume MUST still exist.
 
 #### Scenario: Populate uses in-container git clone with verify
 - Given a resolved clone create with container started and in-container git available
@@ -287,9 +332,10 @@ before returning the structured failure. (Create-path hook runners that already 
 - Then clone fails structured (populate failed) and MUST NOT report success
 
 #### Scenario: Populate failure deletes container and workspace volume
-- Given the container and workspace volume were created and populate then fails
+- Given the container and workspace volume were created by this invocation (fresh or replace) and populate then fails
 - When clone returns failure
 - Then the managed container is deleted and the workspace `*-ws` volume is deleted
+- And a reused pre-existing workspace volume is not deleted
 
 #### Scenario: No GCM-in-guest product integration
 - Given any clone URL
@@ -319,7 +365,7 @@ At the start of `clone`, when a host checkout exists, the CLI MUST run host `ini
 `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand`
 
 - In-container hooks run via AppleContainerRuntime exec (not baked into the image).
-- Non-zero exit of any create-path hook MUST fail `clone` and MUST delete the container **and** the workspace volume before returning failure.
+- Non-zero exit of any create-path hook MUST fail `clone` and MUST delete the container before returning failure. It MUST also delete the workspace volume when this invocation created it. A reused pre-existing workspace volume MUST NOT be deleted.
 - `postAttachCommand` follows [vscode.md](vscode.md) **postAttachCommand policy (CLI-only)** (CLI attach at the end of successful `clone`; not `--vscode`-gated; failure fails `clone` but MUST NOT delete container/volume solely due to postAttach failure).
 - `waitFor` applies as on `up` fresh create.
 
@@ -345,9 +391,10 @@ At the start of `clone`, when a host checkout exists, the CLI MUST run host `ini
 - Then config-fetch temp directories are removed (or a stderr warning is emitted if removal failed)
 
 #### Scenario: Hook failure deletes container and workspace volume
-- Given populate succeeded and `postCreateCommand` exits non-zero
+- Given this invocation created the workspace volume, populate succeeded, and `postCreateCommand` exits non-zero
 - When clone runs
 - Then clone fails structured, the managed dev container is deleted, the workspace `*-ws` volume is deleted, and temps are cleaned up
+- And a reused pre-existing workspace volume is not deleted
 
 See also: [core.md](core.md) **Up lifecycle** and [lifecycle-hooks.md](lifecycle-hooks.md) for the shared create-path hook matrix; [vscode.md](vscode.md) for postAttach policy.
 
