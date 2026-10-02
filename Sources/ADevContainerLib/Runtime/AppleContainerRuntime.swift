@@ -680,6 +680,23 @@ public struct AppleContainerRuntime: Sendable {
         return false
     }
 
+    /// Whether `name` is in a successful `volume list`. Throws if the list command fails
+    /// or its JSON cannot be parsed. Unlike `volumeExists`, that is not treated as absence.
+    public func volumePresence(_ name: String) throws -> Bool {
+        let list = try invoke(["volume", "list", "--format", "json"])
+        guard list.succeeded else {
+            throw mapFailure(list, action: "volume list")
+        }
+        let arr = try parseJSONArray(list.stdout)
+        for item in arr {
+            if let id = item["id"] as? String, id == name { return true }
+            if let n = item["name"] as? String, n == name { return true }
+            if let cfg = item["configuration"] as? [String: Any],
+               let n = cfg["name"] as? String, n == name { return true }
+        }
+        return false
+    }
+
     public func deleteVolume(name: String) throws {
         let result = try invoke(["volume", "delete", name], streamStderr: false)
         try ensureSuccess(result, action: "volume delete \(name)")
@@ -697,11 +714,14 @@ public struct AppleContainerRuntime: Sendable {
     public func create(
         request: CreateRequest,
         ensureVolumes: Bool = true,
-        initializeConfigVolumes: Bool = false
+        initializeConfigVolumes: Bool = false,
+        workspaceVolumeEnsured: ((Bool) -> Void)? = nil
     ) throws -> String {
-        // Ensure workspace named volume (clone / volume-mode)
+        // Ensure workspace named volume (clone / volume-mode).
+        // `true` means this call created it; `false` means it already existed and was reused.
         if ensureVolumes, request.workspaceMountMode == .volume {
-            try ensureVolume(name: request.workspaceBindHost)
+            let created = try ensureVolume(name: request.workspaceBindHost)
+            workspaceVolumeEnsured?(created)
         }
         // Ensure named volumes from config mounts
         var newConfigVolumes: [MountSpec] = []

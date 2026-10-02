@@ -114,7 +114,9 @@ The `start`, `exec`, `stop`, `delete`, `purge`, `rebuild`, and `inspect` command
 | `adevcontainer clone <git-url> [--vscode] [--resume <config-dir>]` | Clone a repository into a named volume and start its dev container |
 | `adevcontainer exec [-it] [--name <name>] [--] [cmd…]` | Open a shell or run a command in a running managed container |
 | `adevcontainer list [--json]` | List managed dev containers |
-| `adevcontainer start [--name <name>] [--vscode] [--json] \| stop \| inspect [--name <name>]` | Manage a container by name or with the interactive picker |
+| `adevcontainer start [--name <name>] [--vscode] [--json]` | Start a container by name or with the interactive picker |
+| `adevcontainer stop [--name <name>]` | Stop a container by name or with the interactive picker |
+| `adevcontainer inspect [--name <name>]` | Inspect a container by name or with the interactive picker |
 | `adevcontainer delete [--name <name>]` | Remove a container, keeping its managed volumes |
 | `adevcontainer purge [--name <name>]` | Remove a container, its managed volumes, and the image |
 | `adevcontainer rebuild [--name <name>] [--vscode]` | Rebuild a managed container from its current configuration |

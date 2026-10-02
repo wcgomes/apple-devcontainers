@@ -631,7 +631,8 @@ public enum RecoveryOrchestrator {
                         throw error
                     }
                     if let cli = error as? CLIError, cli.property == "volumes" {
-                        try? prepared.session.cleanup()
+                        // The retry already deleted the helper. Keep the published session so
+                        // `rebuild --name` can resume without manufacturing a blank volume.
                         throw error
                     }
                     guard isRetryableHardFailure(error) else {

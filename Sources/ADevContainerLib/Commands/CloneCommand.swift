@@ -10,19 +10,45 @@ public struct CloneOptions: Sendable {
     /// Retained config-only checkout directory for a non-interactive `--resume` retry.
     /// When set, clone skips the host git config fetch and re-resolves from this checkout.
     public var resumeConfigDir: String?
+    /// Keep an existing workspace volume without prompting.
+    public var reuseVolume: Bool
+    /// Delete an existing workspace volume and clone into a new empty one without prompting.
+    public var replaceVolume: Bool
 
     public init(
         gitURL: String,
         skipPull: Bool = false,
         openVSCode: Bool = false,
         jsonOutput: Bool = false,
-        resumeConfigDir: String? = nil
+        resumeConfigDir: String? = nil,
+        reuseVolume: Bool = false,
+        replaceVolume: Bool = false
     ) {
         self.gitURL = gitURL
         self.skipPull = skipPull
         self.openVSCode = openVSCode
         self.jsonOutput = jsonOutput
         self.resumeConfigDir = resumeConfigDir
+        self.reuseVolume = reuseVolume
+        self.replaceVolume = replaceVolume
+    }
+}
+
+/// stderr Y/n for an existing clone workspace volume. Not QUIET-gated.
+public struct WorkspaceVolumePrompt: Sendable {
+    public var readLine: @Sendable () -> String?
+    public var writeError: @Sendable (String) -> Void
+
+    public init(
+        readLine: @escaping @Sendable () -> String?,
+        writeError: @escaping @Sendable (String) -> Void = { FileHandle.standardError.write(Data($0.utf8)) }
+    ) {
+        self.readLine = readLine
+        self.writeError = writeError
+    }
+
+    public static var `default`: WorkspaceVolumePrompt {
+        WorkspaceVolumePrompt(readLine: { Swift.readLine() })
     }
 }
 
@@ -48,8 +74,12 @@ public enum CloneCommand {
         identityPrompt: IdentityPrompt = .default,
         isTTY: Bool = AppleContainerConfig.stdinIsTTY(),
         openEditorPrompt: RecoveryOpenEditorPrompt = .default,
-        editor: RecoveryEditor? = nil
+        editor: RecoveryEditor? = nil,
+        volumePrompt: WorkspaceVolumePrompt = .default
     ) throws -> CloneResult {
+        if options.reuseVolume && options.replaceVolume {
+            throw CommandSurface.conflictingWorkspaceVolumeFlagsError()
+        }
         // 1. Require host git before any work (config-only fetch + HTTPS credential fill).
         _ = try git.requireGit()
 
@@ -166,7 +196,9 @@ public enum CloneCommand {
                 localEnv: localEnv,
                 hostResources: hostResources,
                 fileManager: fileManager,
-                persistEditedConfig: persistEditedConfig
+                persistEditedConfig: persistEditedConfig,
+                isTTY: isTTY,
+                volumePrompt: volumePrompt
             )
         }
 
@@ -268,7 +300,9 @@ public enum CloneCommand {
         localEnv: [String: String],
         hostResources: any HostResourceProviding,
         fileManager: FileManager,
-        persistEditedConfig: Bool
+        persistEditedConfig: Bool,
+        isTTY: Bool,
+        volumePrompt: WorkspaceVolumePrompt
     ) throws -> CloneResult {
         let configPath = (checkoutDir as NSString).appendingPathComponent(configRelPath)
 
@@ -331,6 +365,24 @@ public enum CloneCommand {
             throw BringUpRecovery.eligible(
                 ContainerIdentity.nameInUseError(name: identity.containerName)
             )
+        }
+
+        // Ask before Features so a refused or cancelled choice does not pull images,
+        // and so a Features failure cannot follow a replace-delete.
+        let volumeDisposition = try Self.resolveWorkspaceVolumeDisposition(
+            name: identity.workspaceVolumeName,
+            options: options,
+            runtime: runtime,
+            isTTY: isTTY,
+            prompt: volumePrompt
+        )
+        // Set only when this invocation's ensureVolume returns true on replace or a
+        // confirmed-missing create. A reused volume, or one ensureVolume only reused,
+        // is never deleted — including when the pre-check could not see it.
+        var createdWorkspaceVolume = false
+        func cleanupCreatedWorkspaceVolume() {
+            guard createdWorkspaceVolume else { return }
+            try? runtime.deleteVolume(name: identity.workspaceVolumeName)
         }
 
         var effectiveConfig = resolved.config
@@ -467,8 +519,12 @@ public enum CloneCommand {
             enableSSHForward: enableSSHForward
         )
 
-        // Fresh workspace tree: volume may remain after container-only delete.
-        if try runtime.volumeExists(identity.workspaceVolumeName) {
+        switch volumeDisposition {
+        case .createFresh:
+            break
+        case .reuse:
+            StatusPrinter.status("Reusing workspace volume", item: identity.workspaceVolumeName)
+        case .replace:
             StatusPrinter.status("Replacing workspace volume", item: identity.workspaceVolumeName)
             try runtime.deleteVolume(name: identity.workspaceVolumeName)
         }
@@ -477,12 +533,15 @@ public enum CloneCommand {
         StatusPrinter.status("Creating container", item: identity.containerName)
         let id: String
         do {
-            id = try runtime.create(request: request)
+            id = try runtime.create(request: request, workspaceVolumeEnsured: { created in
+                if volumeDisposition != .reuse {
+                    createdWorkspaceVolume = created
+                }
+            })
         } catch {
-            // `runtime.create` ensures the clone workspace volume before invoking the
-            // container create operation. Remove that empty/partial workspace before recovery
-            // so a later retry starts from the same clean clone semantics as a fresh invocation.
-            try? runtime.deleteVolume(name: identity.workspaceVolumeName)
+            // Delete only the workspace volume ensureVolume just created. A reused
+            // volume, or one this call did not create, stays.
+            cleanupCreatedWorkspaceVolume()
             throw BringUpRecovery.eligible(error)
         }
 
@@ -507,7 +566,7 @@ public enum CloneCommand {
                 )
             } catch {
                 try? runtime.delete(nameOrId: id, force: true)
-                try? runtime.deleteVolume(name: identity.workspaceVolumeName)
+                cleanupCreatedWorkspaceVolume()
                 throw BringUpRecovery.eligible(error)
             }
         }
@@ -518,7 +577,7 @@ public enum CloneCommand {
             try runtime.start(nameOrId: id)
         } catch {
             try? runtime.delete(nameOrId: id, force: true)
-            try? runtime.deleteVolume(name: identity.workspaceVolumeName)
+            cleanupCreatedWorkspaceVolume()
             throw BringUpRecovery.eligible(error)
         }
 
@@ -541,72 +600,123 @@ public enum CloneCommand {
                 )
             } catch {
                 try? runtime.delete(nameOrId: id, force: true)
-                try? runtime.deleteVolume(name: identity.workspaceVolumeName)
+                cleanupCreatedWorkspaceVolume()
                 throw BringUpRecovery.eligible(error)
             }
         }
 
-        // 10. Full clone INSIDE container (guest git + host-resolved auth for HTTPS)
-        StatusPrinter.status("Populating workspace volume")
-        do {
-            try populateInContainer(
-                url: url,
-                urlKind: urlKind,
-                containerId: id,
-                workspaceFolder: effectiveConfig.workspaceFolder,
-                remoteUser: connectionUser,
-                containerEnv: effectiveConfig.containerEnv,
-                credentials: credentials,
-                runtime: runtime
-            )
-        } catch {
-            try? runtime.delete(nameOrId: id, force: true)
-            try? runtime.deleteVolume(name: identity.workspaceVolumeName)
-            if let cli = error as? CLIError {
-                throw BringUpRecovery.eligible(cli)
-            }
-            throw BringUpRecovery.eligible(CLIError(
-                code: CLIErrorCode.populateFailed,
-                message: "Failed to populate workspace volume: \(error.localizedDescription)",
-                hint: "Check git access for the repository URL and that in-container git is available"
-            ))
-        }
-
-        // 10a. Recovery/`--resume`: populate cloned the original remote config; overlay
-        // the retained/edited host bytes at the same relative path so a later open
-        // does not need to re-apply the recovery edit.
-        if persistEditedConfig {
+        // 10. Full clone INSIDE container, unless reuse is keeping an existing tree.
+        let keepExistingTree: Bool
+        if volumeDisposition == .reuse {
             do {
-                try persistEditedConfigIntoWorkspace(
-                    hostConfigPath: configPath,
+                keepExistingTree = try workspaceHasObjectEntries(
                     containerId: id,
                     workspaceFolder: effectiveConfig.workspaceFolder,
-                    configRelPath: configRelPath,
-                    remoteUser: connectionUser,
+                    volumeName: identity.workspaceVolumeName,
                     runtime: runtime
                 )
             } catch {
                 try? runtime.delete(nameOrId: id, force: true)
-                try? runtime.deleteVolume(name: identity.workspaceVolumeName)
+                cleanupCreatedWorkspaceVolume()
+                throw BringUpRecovery.eligible(error)
+            }
+        } else {
+            keepExistingTree = false
+        }
+
+        if keepExistingTree {
+            StatusPrinter.status("Keeping existing workspace tree", item: identity.workspaceVolumeName)
+        } else {
+            StatusPrinter.status("Populating workspace volume")
+            do {
+                try populateInContainer(
+                    url: url,
+                    urlKind: urlKind,
+                    containerId: id,
+                    workspaceFolder: effectiveConfig.workspaceFolder,
+                    remoteUser: connectionUser,
+                    containerEnv: effectiveConfig.containerEnv,
+                    credentials: credentials,
+                    runtime: runtime
+                )
+            } catch {
+                try? runtime.delete(nameOrId: id, force: true)
+                cleanupCreatedWorkspaceVolume()
                 if let cli = error as? CLIError {
                     throw BringUpRecovery.eligible(cli)
                 }
                 throw BringUpRecovery.eligible(CLIError(
                     code: CLIErrorCode.populateFailed,
-                    message: "Failed to persist edited devcontainer.json into the workspace: \(error.localizedDescription)",
-                    hint: "The recovery edit could not be written after populate"
+                    message: "Failed to populate workspace volume: \(error.localizedDescription)",
+                    hint: "Check git access for the repository URL and that in-container git is available"
                 ))
             }
         }
 
-        // 10b. Local git author identity inside the volume clone (both or neither).
-        applyAuthorIdentityInContainer(
-            identity: authorIdentity,
-            containerId: id,
-            workspaceFolder: effectiveConfig.workspaceFolder,
-            remoteUser: connectionUser,
-            runtime: runtime
-        )
+        // 10a. Recovery/`--resume`: overlay the retained/edited host bytes when the
+        // destination already exists. Fresh populate always has that path; a reused
+        // tree is overlaid only when the path is already there.
+        if persistEditedConfig {
+            let dest = (effectiveConfig.workspaceFolder as NSString)
+                .appendingPathComponent(configRelPath)
+            let overlay: Bool
+            do {
+                overlay = keepExistingTree
+                    ? try runtime.pathExistsInContainer(containerId: id, path: dest)
+                    : true
+            } catch {
+                try? runtime.delete(nameOrId: id, force: true)
+                cleanupCreatedWorkspaceVolume()
+                throw BringUpRecovery.eligible(error)
+            }
+            if overlay {
+                do {
+                    try persistEditedConfigIntoWorkspace(
+                        hostConfigPath: configPath,
+                        containerId: id,
+                        workspaceFolder: effectiveConfig.workspaceFolder,
+                        configRelPath: configRelPath,
+                        remoteUser: connectionUser,
+                        runtime: runtime
+                    )
+                } catch {
+                    try? runtime.delete(nameOrId: id, force: true)
+                    cleanupCreatedWorkspaceVolume()
+                    if let cli = error as? CLIError {
+                        throw BringUpRecovery.eligible(cli)
+                    }
+                    throw BringUpRecovery.eligible(CLIError(
+                        code: CLIErrorCode.populateFailed,
+                        message: "Failed to persist edited devcontainer.json into the workspace: \(error.localizedDescription)",
+                        hint: "The recovery edit could not be written after populate"
+                    ))
+                }
+            }
+        }
+
+        // 10b. Local git author identity. On a kept tree, only when `.git` already exists.
+        let applyAuthor: Bool
+        if keepExistingTree {
+            let gitDir = (effectiveConfig.workspaceFolder as NSString).appendingPathComponent(".git")
+            do {
+                applyAuthor = try runtime.pathExistsInContainer(containerId: id, path: gitDir)
+            } catch {
+                try? runtime.delete(nameOrId: id, force: true)
+                cleanupCreatedWorkspaceVolume()
+                throw BringUpRecovery.eligible(error)
+            }
+        } else {
+            applyAuthor = true
+        }
+        if applyAuthor {
+            applyAuthorIdentityInContainer(
+                identity: authorIdentity,
+                containerId: id,
+                workspaceFolder: effectiveConfig.workspaceFolder,
+                remoteUser: connectionUser,
+                runtime: runtime
+            )
+        }
 
         // 11. Create-path lifecycle hooks (same matrix as up), split at waitFor.
         do {
@@ -617,7 +727,7 @@ public enum CloneCommand {
             )
         } catch {
             // LifecycleRunner already deletes container on create-path failure
-            try? runtime.deleteVolume(name: identity.workspaceVolumeName)
+            cleanupCreatedWorkspaceVolume()
             throw BringUpRecovery.eligible(error)
         }
 
@@ -677,11 +787,165 @@ public enum CloneCommand {
                 runtime: runtime
             )
         } catch {
-            try? runtime.deleteVolume(name: identity.workspaceVolumeName)
+            cleanupCreatedWorkspaceVolume()
             throw BringUpRecovery.eligible(error)
         }
         if let readyError { throw readyError }
         return result
+    }
+
+    // MARK: - Workspace volume reuse / replace
+
+    /// stderr prompt. Trailing space matches other `[Y/n]` prompts. Not QUIET-gated.
+    public static func workspaceVolumeReusePrompt(volumeName: String) -> String {
+        "Workspace volume \(volumeName) already exists. Reuse it? [Y/n] "
+    }
+
+    /// argv token for the in-container empty-vs-populated probe.
+    static let workspaceVolumeEntriesToken = "adevcontainer-volume-entries"
+
+    /// `volume list` does not report filesystem contents (`requireObjectEntries` is JSON
+    /// strictness). Probe the mounted workspace after start. `lost+found` alone is empty.
+    private static let workspaceVolumeEntriesScript = """
+    set -eu
+    ws="$1"
+    [ -d "$ws" ] || exit 2
+    for entry in "$ws"/* "$ws"/.[!.]* "$ws"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      base="${entry##*/}"
+      case "$base" in
+        '*'|'.[!.]*'|'..?*'|lost+found) continue ;;
+      esac
+      exit 0
+    done
+    exit 1
+    """
+
+    private enum WorkspaceVolumeDisposition {
+        case createFresh
+        case reuse
+        case replace
+    }
+
+    private enum WorkspaceVolumeAnswer {
+        case reuse
+        case replace
+        case eof
+        case unrecognized(String)
+    }
+
+    private static func classifyWorkspaceVolumeAnswer(_ line: String?) -> WorkspaceVolumeAnswer {
+        guard let line else { return .eof }
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return .reuse }
+        let token = trimmed.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+        switch token.lowercased() {
+        case "y", "yes":
+            return .reuse
+        case "n", "no":
+            return .replace
+        default:
+            return .unrecognized(token)
+        }
+    }
+
+    /// Decide before any delete. Missing volume creates as today and does not prompt.
+    /// An existing volume is deleted only when the operator chooses replace.
+    private static func resolveWorkspaceVolumeDisposition(
+        name: String,
+        options: CloneOptions,
+        runtime: AppleContainerRuntime,
+        isTTY: Bool,
+        prompt: WorkspaceVolumePrompt
+    ) throws -> WorkspaceVolumeDisposition {
+        if options.reuseVolume && options.replaceVolume {
+            throw CommandSurface.conflictingWorkspaceVolumeFlagsError()
+        }
+        let exists: Bool
+        do {
+            exists = try runtime.volumePresence(name)
+        } catch {
+            let detail = (error as? CLIError)?.message ?? error.localizedDescription
+            throw CLIError(
+                code: CLIErrorCode.runtimeFailed,
+                message: "Could not tell whether workspace volume '\(name)' exists: \(detail)",
+                hint: "Refusing to treat a failed or unparsable volume list as a missing volume. The workspace volume was not deleted"
+            )
+        }
+        guard exists else {
+            return .createFresh
+        }
+        if options.replaceVolume { return .replace }
+        if options.reuseVolume { return .reuse }
+
+        guard isTTY, !options.jsonOutput else {
+            throw CLIError(
+                code: CLIErrorCode.usage,
+                message: "Workspace volume '\(name)' already exists",
+                hint: "Pass --reuse-volume to keep it, or --replace-volume to delete it and clone fresh"
+            )
+        }
+
+        prompt.writeError(workspaceVolumeReusePrompt(volumeName: name))
+        switch classifyWorkspaceVolumeAnswer(prompt.readLine()) {
+        case .reuse:
+            return .reuse
+        case .replace:
+            return .replace
+        case .eof:
+            throw CLIError(
+                code: CLIErrorCode.usage,
+                message: "Clone cancelled; workspace volume '\(name)' was not deleted",
+                hint: "Re-run and answer Y to reuse or n to replace, or pass --reuse-volume or --replace-volume"
+            )
+        case .unrecognized(let token):
+            throw CLIError(
+                code: CLIErrorCode.usage,
+                message: "Unrecognized answer '\(token)' for workspace volume '\(name)'",
+                hint: "Enter Y to reuse or n to replace, or pass --reuse-volume or --replace-volume. The volume was not deleted"
+            )
+        }
+    }
+
+    /// True when the mounted workspace has an entry other than `lost+found`.
+    /// Exit 1 (no entries) allows populate. Any other failure refuses to clobber or delete.
+    private static func workspaceHasObjectEntries(
+        containerId: String,
+        workspaceFolder: String,
+        volumeName: String,
+        runtime: AppleContainerRuntime
+    ) throws -> Bool {
+        let result: ProcessResult
+        do {
+            result = try runtime.exec(
+                nameOrId: containerId,
+                command: [
+                    "sh", "-c",
+                    workspaceVolumeEntriesScript,
+                    workspaceVolumeEntriesToken,
+                    workspaceFolder
+                ],
+                workdir: workspaceFolder
+            )
+        } catch {
+            throw CLIError(
+                code: CLIErrorCode.populateFailed,
+                message: "Could not inspect workspace volume '\(volumeName)'",
+                hint: "Refusing to git-clone over it or delete it. Re-run when the container can list \(workspaceFolder), or pass --replace-volume to clone fresh"
+            )
+        }
+        switch result.exitCode {
+        case 0:
+            return true
+        case 1:
+            return false
+        default:
+            throw CLIError(
+                code: CLIErrorCode.populateFailed,
+                message: "Could not inspect workspace volume '\(volumeName)' (exit \(result.exitCode))",
+                hint: "Refusing to git-clone over it or delete it. Re-run when the container can list \(workspaceFolder), or pass --replace-volume to clone fresh"
+            )
+        }
     }
 
     // MARK: - Recovery wiring

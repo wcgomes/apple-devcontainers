@@ -42,6 +42,8 @@ final class RebuildScenario {
     var createFails = false
     var volumeCreateFails = false
     var buildFails = false
+    /// Invoked when the mock handles `delete`, before the result is returned.
+    var onDelete: (() -> Void)?
     var newContainerId = "new-id-created"
     /// exec script substrings that should exit non-zero.
     var failingExecSubstrings: [String] = []
@@ -153,6 +155,7 @@ final class RebuildScenario {
             return startFails ? fail("start failed") : ok(Data())
         }
         if args.first == "delete" {
+            onDelete?()
             return deleteFails ? fail("delete failed") : ok(Data())
         }
         if args.first == "build" {
@@ -2089,6 +2092,14 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         s.volumeConfigText = #"{"image":"alpine:3.20","mounts":[{"type":"volume","source":"missing-config","target":"/data"}]}"#
         s.volumeCreateFails = true
         s.install()
+        defer {
+            if let resume = try? VolumeRecoveryResume.load(name: info.name) {
+                if let dir = try? RecoveryConfigSession.directoryURL(forSessionID: resume.sessionID) {
+                    try? FileManager.default.removeItem(at: dir)
+                }
+            }
+            try? VolumeRecoveryResume.cleanup(name: info.name)
+        }
         try withRebuildVolumeOverrides {
             try MiniTest.expectThrows({
                 _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
@@ -2098,6 +2109,244 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         }
         try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "create" }, "no replacement or recovery helper after ensure failure")
         try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.contains("adevcontainer-recovery-write") }, "no recovery write after ensure failure")
+    }),
+
+    ("rebuildVolumePostDeleteExitResumesWithoutHelper", {
+        // Incident: delete crossed the boundary, the process exited with the secure session
+        // still on disk, and no helper was created. openRetry cannot run. A later
+        // `rebuild --name` must resume that session and must not create a blank workspace volume.
+        let name = "plantsuite"
+        defer {
+            if let resume = try? VolumeRecoveryResume.load(name: name) {
+                if let dir = try? RecoveryConfigSession.directoryURL(forSessionID: resume.sessionID) {
+                    try? FileManager.default.removeItem(at: dir)
+                }
+            }
+            try? VolumeRecoveryResume.cleanup(name: name)
+        }
+
+        let pre = RebuildScenario()
+        let preInfo = RebuildScenario.container(id: name, labels: pre.volumeLabels())
+        pre.containers = [preInfo]
+        pre.volumeConfigText = "{ not valid json"
+        pre.install()
+        try withRebuildVolumeOverrides {
+            try MiniTest.expectThrows({
+                _ = try RebuildCommand.run(
+                    options: RebuildOptions(name: name, skipPull: true, jsonOutput: true),
+                    runtime: pre.runtime,
+                    isTTY: false
+                )
+            }) { error in
+                try MiniTest.expectEqual((error as? CLIError)?.code, CLIErrorCode.configParse)
+            }
+        }
+        try MiniTest.expect(!pre.mock.calls.contains { $0.arguments.first == "delete" }, "pre-delete failure leaves the old container")
+        try MiniTest.expect(try VolumeRecoveryResume.load(name: name) == nil, "pre-delete failure does not publish a resume")
+
+        let failed = RebuildScenario()
+        let info = RebuildScenario.container(id: name, labels: failed.volumeLabels())
+        failed.containers = [info]
+        failed.volumeConfigText = #"{"image":"alpine:3.20","mounts":[{"type":"volume","source":"missing-config","target":"/data"}]}"#
+        failed.volumeCreateFails = true
+        var resumePublishedBeforeDelete = false
+        failed.onDelete = {
+            resumePublishedBeforeDelete = (try? VolumeRecoveryResume.load(name: name)) != nil
+        }
+        failed.install()
+        try withRebuildVolumeOverrides {
+            try MiniTest.expectThrows({
+                _ = try RebuildCommand.run(
+                    options: RebuildOptions(name: name, skipPull: true, jsonOutput: true),
+                    runtime: failed.runtime,
+                    isTTY: false
+                )
+            }) { error in
+                let cli = error as? CLIError
+                try MiniTest.expectEqual(cli?.property, "volumes")
+                try MiniTest.expect(cli?.hint?.contains("rebuild --name \(name)") == true)
+                try MiniTest.expect(cli?.recovery == nil, "volume ensure does not offer a helper recovery session")
+            }
+        }
+        try MiniTest.expect(resumePublishedBeforeDelete, "resume index is on disk before delete returns")
+        try MiniTest.expect(failed.mock.calls.contains { $0.arguments.first == "delete" }, "old container was deleted")
+        try MiniTest.expect(!failed.mock.calls.contains { $0.arguments.first == "create" }, "no replacement or helper after the post-delete exit")
+        let published = try VolumeRecoveryResume.load(name: name)
+        try MiniTest.expect(published != nil, "name-indexed session survives the process exit")
+        if let published {
+            let dir = try RecoveryConfigSession.directoryURL(forSessionID: published.sessionID)
+            try MiniTest.expect(FileManager.default.fileExists(atPath: dir.path), "secure session still on disk")
+        }
+
+        // Container gone, workspace volume still present. Resume must not need a helper.
+        let resume = RebuildScenario()
+        resume.volumes = ["adev-repo-ws"]
+        resume.existingImages = [RecoveryHelper.helperImageReference]
+        resume.containers = []
+        resume.install()
+        try withRebuildVolumeOverrides {
+            _ = try RebuildCommand.run(
+                options: RebuildOptions(name: name, skipPull: true, jsonOutput: true),
+                runtime: resume.runtime,
+                isTTY: false
+            )
+        }
+        try MiniTest.expect(!resume.mock.calls.contains {
+            $0.arguments.starts(with: ["volume", "create"]) && $0.arguments.contains("adev-repo-ws")
+        }, "resume must not manufacture a blank workspace volume")
+        try MiniTest.expect(resume.mock.calls.contains { call in
+            call.arguments.first == "create" && !call.arguments.contains(RecoveryHelper.helperImageReference)
+        }, "resume creates the replacement without a live helper")
+        try MiniTest.expect(!resume.mock.calls.contains {
+            $0.arguments.first == "create" && $0.arguments.contains(RecoveryHelper.helperImageReference)
+        }, "resume does not require a recovery helper")
+        try MiniTest.expect(try VolumeRecoveryResume.load(name: name) == nil, "successful resume clears the name index")
+    }),
+
+    ("rebuildVolumeDeleteThrowBeforeBoundaryKeepsResume", {
+        // retain() runs before delete. If delete throws the Apple stale-exec diagnostic,
+        // crossedDeleteBoundary is never set. The published session must stay, and a later
+        // rebuild --name must resume without a helper and refuse a blank workspace volume.
+        let name = "plantsuite-delete-throw"
+        let configToken = "adev-delete-throw-config-token"
+        let configText = #"{"image":"alpine:3.20","postCreateCommand":"echo \#(configToken)"}"#
+        defer {
+            if let resume = try? VolumeRecoveryResume.load(name: name) {
+                if let dir = try? RecoveryConfigSession.directoryURL(forSessionID: resume.sessionID) {
+                    try? FileManager.default.removeItem(at: dir)
+                }
+            }
+            try? VolumeRecoveryResume.cleanup(name: name)
+        }
+
+        let failed = RebuildScenario()
+        let info = RebuildScenario.container(id: name, labels: failed.volumeLabels())
+        failed.containers = [info]
+        failed.volumeConfigText = configText
+        failed.install()
+        let staleExec = """
+        Error: an unknown error occurred
+        caused by: internalError: failed to delete container
+        caused by: deleteProcess: exec 8F2A9C1B-4D3E-4A10-9B2C-1D2E3F4A5B6C does not exist in container \(name)
+        """
+        failed.mock.handlers.insert({ args in
+            guard args.first == "delete" else { return nil }
+            return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data(staleExec.utf8))
+        }, at: 0)
+        try withRebuildVolumeOverrides {
+            try MiniTest.expectThrows({
+                _ = try RebuildCommand.run(
+                    options: RebuildOptions(name: name, skipPull: true, jsonOutput: true),
+                    runtime: failed.runtime,
+                    isTTY: false
+                )
+            }) { error in
+                let cli = error as? CLIError
+                try MiniTest.expectEqual(cli?.code, CLIErrorCode.runtimeFailed)
+                try MiniTest.expect(
+                    cli?.message.contains("deleteProcess") == true
+                        && cli?.message.contains("does not exist in container") == true,
+                    "delete throws the Apple diagnostic before crossedDeleteBoundary"
+                )
+            }
+        }
+        try MiniTest.expect(failed.mock.calls.contains { $0.arguments.first == "delete" }, "delete was invoked")
+        try MiniTest.expect(!failed.mock.calls.contains { $0.arguments.first == "create" }, "throw is before replacement create")
+
+        let published = try VolumeRecoveryResume.load(name: name)
+        try MiniTest.expect(published != nil, "published resume survives a delete throw before the boundary")
+        guard let published else { return }
+        let sessionDir = try RecoveryConfigSession.directoryURL(forSessionID: published.sessionID)
+        try MiniTest.expect(
+            FileManager.default.fileExists(atPath: sessionDir.path),
+            "session directory was not cleaned up"
+        )
+        let stateURL = try VolumeRecoveryResume.directoryURL(forName: name)
+            .appendingPathComponent("state.json")
+        let stateText = try String(contentsOf: stateURL, encoding: .utf8)
+        try MiniTest.expect(!stateText.contains(configToken), "state.json must not contain devcontainer config bytes")
+        try MiniTest.expect(!stateText.contains(configText), "state.json must not contain the raw config document")
+        let stateObject = try JSONSerialization.jsonObject(with: Data(stateText.utf8)) as? [String: Any]
+        let forbidden = ["rawConfig", "raw", "config", "configBytes", "devcontainerJSON", "tempFile"]
+        for key in forbidden {
+            try MiniTest.expect(stateObject?[key] == nil, "state.json must not have a raw config field \(key)")
+        }
+
+        let resume = RebuildScenario()
+        resume.containers = []
+        resume.volumes = []
+        resume.existingImages = [RecoveryHelper.helperImageReference]
+        resume.install()
+        try withRebuildVolumeOverrides {
+            try MiniTest.expectThrows({
+                _ = try RebuildCommand.run(
+                    options: RebuildOptions(name: name, skipPull: true, jsonOutput: true),
+                    runtime: resume.runtime,
+                    isTTY: false
+                )
+            }) { error in
+                let cli = error as? CLIError
+                try MiniTest.expectEqual(cli?.code, CLIErrorCode.recoveryUnavailable)
+                try MiniTest.expectEqual(cli?.recovery?.sessionID, published.sessionID, "resume opened the published session")
+                try MiniTest.expectEqual(cli?.recovery?.helperAvailable, false)
+                try MiniTest.expect(cli?.message.contains("could not be opened") != true, "session was not cleaned up")
+            }
+        }
+        try MiniTest.expect(!resume.mock.calls.contains {
+            $0.arguments.starts(with: ["volume", "create"])
+        }, "absent workspace volume is not created")
+        try MiniTest.expect(!resume.mock.calls.contains {
+            $0.arguments.first == "create"
+        }, "resume does not create a helper or a replacement when the workspace volume is absent")
+        try MiniTest.expect(try VolumeRecoveryResume.load(name: name) != nil, "refusing a blank volume keeps the resume")
+    }),
+
+    ("rebuildVolumeResumeRefusesBlankWorkspaceVolume", {
+        let name = "plantsuite-missing-ws"
+        let labels = RebuildScenario().volumeLabels()
+        let info = RebuildScenario.container(id: name, labels: labels)
+        let raw = RawVolumeConfig(
+            bytes: Data(#"{"image":"alpine:3.20"}"#.utf8),
+            pathInContainer: "/workspaces/edge/.devcontainer/devcontainer.json",
+            workspaceFolder: "/workspaces/edge",
+            workspaceFolderBasename: "edge"
+        )
+        let session = try RecoveryConfigSession.capture(
+            rawVolumeConfig: raw,
+            container: info,
+            sessionID: "missing-ws-\(String(UUID().uuidString.prefix(8)).lowercased())"
+        )
+        defer {
+            try? session.cleanup()
+            try? VolumeRecoveryResume.cleanup(name: name)
+        }
+        try VolumeRecoveryResume.retain(
+            container: info,
+            sessionID: session.sessionID,
+            authorName: nil,
+            authorEmail: nil
+        )
+        let s = RebuildScenario()
+        s.containers = []
+        s.volumes = []
+        s.existingImages = [RecoveryHelper.helperImageReference]
+        s.install()
+        try withRebuildVolumeOverrides {
+            try MiniTest.expectThrows({
+                _ = try RebuildCommand.run(
+                    options: RebuildOptions(name: name, skipPull: true, jsonOutput: true),
+                    runtime: s.runtime,
+                    isTTY: false
+                )
+            }) { error in
+                let cli = error as? CLIError
+                try MiniTest.expectEqual(cli?.code, CLIErrorCode.recoveryUnavailable)
+                try MiniTest.expectEqual(cli?.recovery?.helperAvailable, false)
+            }
+        }
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.starts(with: ["volume", "create"]) }, "missing workspace volume is not created")
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "create" }, "no replacement or helper when the workspace volume is gone")
+        try MiniTest.expect(try VolumeRecoveryResume.load(name: name) != nil, "refusing a blank volume keeps the resumable session")
     }),
 
     ("rebuildCreatesNewlyDeclaredConfigVolume", {
