@@ -418,7 +418,7 @@ public enum CommandSurface {
             --reuse-volume or --replace-volume and do not delete. Reuse keeps the tree
             and never deletes that volume, including on later failure.
           - SSH: needs ssh-agent (SSH_AUTH_SOCK); create --ssh for later push
-          - HTTPS: host git credential fill one-shot; guest credential.helper store
+          - HTTPS: host git credential fill one-shot; non-Azure guest credential.helper store; dev.azure.com uses a URL-scoped helper and useHttpPath
           - Auto-adds Features git:1 when config lacks git/common-utils
           - No --branch / PAT CLI / GCM-in-guest
           - Bring-up recovery: on an eligible failure (resolve/create/start/ownership/

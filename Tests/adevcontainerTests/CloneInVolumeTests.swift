@@ -1616,7 +1616,10 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(result.outcome, "success")
         let createCall = mock.calls.first { $0.arguments.first == "create" }!
         try MiniTest.expect(createCall.arguments.contains("--ssh"))
-        // SSH path does not call HTTPS credential fill
+        // SSH path does not call HTTPS credential fill or seed a guest helper.
+        try MiniTest.expect(!mock.calls.contains {
+            $0.arguments.last?.contains("git-credential-adev") == true
+        }, "SSH clone must not seed HTTPS credentials")
         try MiniTest.expect(git.fullCloneCalls.isEmpty)
         try MiniTest.expect(mock.calls.contains {
             $0.arguments.first == "exec" && $0.arguments.contains("-c")
@@ -1641,6 +1644,9 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expectEqual(result.outcome, "success")
         try MiniTest.expectEqual(creds.fillCalls.count, 1)
+        try MiniTest.expect(!mock.calls.contains {
+            $0.arguments.last?.contains("git-credential-adev") == true
+        }, "nil fill must not seed")
         try MiniTest.expect(git.fullCloneCalls.isEmpty)
     }),
     ("cloneHTTPSCloneFailWithoutCredsHintsCredentials", {
@@ -2184,7 +2190,10 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         )
         let configCalls = mock.calls.filter {
             $0.arguments.first == "exec"
-                && ($0.arguments.contains("--local") || $0.arguments.last?.contains("git config --global") == true)
+                && (
+                    $0.arguments.contains("--local")
+                    || $0.arguments.last?.contains("git config --global --replace-all user.name") == true
+                )
         }
         try MiniTest.expectEqual(configCalls.count, 3, "complete identity writes local and global pairs")
         let firstGlobal = configCalls.firstIndex { $0.arguments.last?.contains("--global") == true }
@@ -2220,7 +2229,9 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
             $0.arguments.first == "exec" && $0.arguments.contains("config") && $0.arguments.contains("--local")
         }
         try MiniTest.expect(configCalls.isEmpty)
-        try MiniTest.expect(!mock.calls.contains { $0.arguments.last?.contains("git config --global") == true })
+        try MiniTest.expect(!mock.calls.contains {
+            $0.arguments.last?.contains("git config --global --replace-all user.name") == true
+        })
     }),
     ("cloneGlobalAuthorFailureWarnsAndRunsHook", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
@@ -2291,7 +2302,9 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expectEqual(result.outcome, "success")
         try MiniTest.expectEqual(warnings.count, 1)
-        try MiniTest.expect(!mock.calls.contains { $0.arguments.last?.contains("git config --global") == true })
+        try MiniTest.expect(!mock.calls.contains {
+            $0.arguments.last?.contains("git config --global --replace-all user.name") == true
+        })
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
         try MiniTest.expect(mock.calls.contains { $0.arguments.last?.contains("local-author-hook") == true })
     }),
@@ -2750,11 +2763,12 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
     }),
-    ("cloneNeverRunsCredentialSeeding", {
+    ("cloneHTTPSNonAzureKeepsLocalStore", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
         let git = MockGitClient()
         git.configJSONToWrite = #"{"name":"CloneApp","image":"alpine:3.20"}"#
+        let creds = MockGitCredential()
         let mock = MockProcessRunner()
         mock.handlers = CloneRuntimeMock.handlers()
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
@@ -2762,22 +2776,69 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
             options: CloneOptions(gitURL: "https://github.com/org/clone-app.git", skipPull: true),
             runtime: runtime,
             git: git,
-            credentials: MockGitCredential(),
+            credentials: creds,
             localEnv: [:]
         )
         try MiniTest.expectEqual(result.outcome, "success")
-        try MiniTest.expect(
-            !mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("git-credential-adev") == true },
-            "clone must not run a seeding exec"
+        try MiniTest.expectEqual(creds.fillCalls.count, 1, "clone does not fill twice")
+        try MiniTest.expect(!mock.calls.contains {
+            $0.arguments.last?.contains("git-credential-adev") == true
+        }, "non-Azure clone must not install the product helper")
+        try MiniTest.expect(!mock.calls.contains {
+            $0.arguments.last?.contains("useHttpPath") == true
+        })
+        try MiniTest.expect(!mock.calls.contains {
+            $0.arguments.last?.contains("git config --global --replace-all credential.helper") == true
+        })
+        let cloneScripts = mock.calls.filter {
+            $0.arguments.first == "exec" && $0.arguments.last?.contains("git clone") == true
+        }
+        try MiniTest.expectEqual(cloneScripts.count, 1)
+        let script = cloneScripts[0].arguments.last ?? ""
+        try MiniTest.expect(script.contains("git -C \"$WS\" config credential.helper store"))
+        try MiniTest.expect(script.contains("git -C \"$WS\" credential approve"))
+        try MiniTest.expect(!script.contains("secret-token"), "password stays off the exec command")
+    }),
+    ("cloneHTTPSAzureUsesURLScopedHelper", {
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        let git = MockGitClient()
+        git.configJSONToWrite = #"{"name":"CloneApp","image":"alpine:3.20"}"#
+        let creds = MockGitCredential()
+        let mock = MockProcessRunner()
+        mock.handlers = CloneRuntimeMock.handlers()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try CloneCommand.run(
+            options: CloneOptions(
+                gitURL: "https://dev.azure.com/plantsuite/PlantSuite/_git/PlantSuite",
+                skipPull: true
+            ),
+            runtime: runtime,
+            git: git,
+            credentials: creds,
+            localEnv: [:]
         )
-        try MiniTest.expect(
-            !mock.calls.contains { $0.arguments.contains("credential.helper") },
-            "clone must not run the store+approve seeding script"
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(creds.fillCalls.count, 1, "Azure clone does not fill twice")
+        let seeds = mock.calls.filter {
+            $0.arguments.first == "exec" && $0.arguments.last?.contains("git-credential-adev") == true
+        }
+        try MiniTest.expectEqual(seeds.count, 1, "Azure clone seeds the URL-scoped helper once")
+        let script = seeds[0].arguments.last ?? ""
+        try MiniTest.expect(script.contains("credential.https://dev.azure.com.helper"))
+        try MiniTest.expect(script.contains("credential.https://dev.azure.com.useHttpPath true"))
+        try MiniTest.expect(!script.contains("git config --global --replace-all credential.helper"))
+        try MiniTest.expect(!script.contains("git config --global --add credential.helper"))
+        try MiniTest.expect(!script.contains("credential.helper store"))
+        try MiniTest.expect(!script.contains("secret-token"))
+        try MiniTest.expectEqual(
+            String(data: seeds[0].stdinData ?? Data(), encoding: .utf8) ?? "",
+            "protocol=https\nhost=dev.azure.com\nusername=user\npassword=secret-token\n\n"
         )
-        try MiniTest.expect(
-            !mock.calls.contains { $0.arguments.contains("--global") },
-            "clone must not touch the guest global git config"
-        )
+        let cloneScripts = mock.calls.filter {
+            $0.arguments.first == "exec" && $0.arguments.last?.contains("git clone") == true
+        }
+        try MiniTest.expect(!cloneScripts.contains { $0.arguments.last?.contains("credential.helper store") == true })
     }),
     ("cloneInDirectoryDockerfileBuilds", {
         let restore = CloneGitFeatureTestSupport.installOverrides()

@@ -6669,15 +6669,42 @@ func makeSeedScriptFixture() throws -> (root: URL, home: URL, inheritedHome: URL
     try """
     #!/bin/sh
     CONFIG="$HOME/git-config"
-    if [ "$1" = "config" ] && [ "$2" = "--global" ] && [ "$3" = "--add" ]; then
-      printf '%s=%s\\n' "$4" "$5" >> "$CONFIG"
-    elif [ "$1" = "config" ] && [ "$2" = "--global" ] && [ "$3" = "--get-all" ]; then
-      [ -f "$CONFIG" ] && awk -F= '$1 == "credential.helper" { print $2 }' "$CONFIG"
-    elif [ "$1" = "config" ] && [ "$2" = "--global" ] && [ "$3" = "--list" ]; then
-      [ -f "$CONFIG" ] && cat "$CONFIG"
-    elif [ "$1" = "credential" ] && [ "$2" = "approve" ]; then
+    touch "$CONFIG"
+    if [ "$1" = "config" ] && [ "$2" = "--global" ]; then
+      shift 2
+      if [ "$1" = "--replace-all" ]; then
+        key="$2"
+        val="$3"
+        awk -F= -v k="$key" '$1 != k' "$CONFIG" > "$CONFIG.tmp"
+        printf '%s=%s\\n' "$key" "$val" >> "$CONFIG.tmp"
+        mv "$CONFIG.tmp" "$CONFIG"
+        exit 0
+      fi
+      if [ "$1" = "--add" ]; then
+        printf '%s=%s\\n' "$2" "$3" >> "$CONFIG"
+        exit 0
+      fi
+      if [ "$1" = "--unset-all" ]; then
+        key="$2"
+        awk -F= -v k="$key" '$1 != k' "$CONFIG" > "$CONFIG.tmp"
+        mv "$CONFIG.tmp" "$CONFIG"
+        exit 0
+      fi
+      if [ "$1" = "--get-all" ]; then
+        awk -F= -v k="$2" '$1 == k { print substr($0, length(k)+2) }' "$CONFIG"
+        exit 0
+      fi
+      if [ "$1" = "--list" ]; then
+        cat "$CONFIG"
+        exit 0
+      fi
+      printf '%s=%s\\n' "$1" "$2" >> "$CONFIG"
+      exit 0
+    fi
+    if [ "$1" = "credential" ] && [ "$2" = "approve" ]; then
       printf 'approve\\n' >> "$HOME/approve-calls"
       "$HOME/.adevcontainer/git-credential-adev" store
+      exit 0
     fi
     exit 0
     """.write(to: git, atomically: true, encoding: .utf8)
@@ -6846,6 +6873,11 @@ nonisolated(unsafe) let guestGitCredentialSeedTests: [(String, () throws -> Void
                 + "protocol=https\nhost=example.com\nusername=alice\npassword=c\n\n"
         )
         try MiniTest.expect(!args.contains(where: { $0.contains("ADEV_SEED") }))
+        let script = args.last ?? ""
+        try MiniTest.expect(script.contains("git config --global --add credential.helper"), "non-Azure host still appends")
+        try MiniTest.expect(script.contains("credential.https://dev.azure.com.helper"), "Azure host is URL-scoped")
+        try MiniTest.expect(script.contains("credential.https://dev.azure.com.useHttpPath true"))
+        try MiniTest.expect(!script.contains("git config --global --replace-all credential.helper"))
     }),
     ("guestSeedBindSSHOnlySkipsSilently", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
@@ -6937,7 +6969,10 @@ nonisolated(unsafe) let guestGitCredentialSeedTests: [(String, () throws -> Void
         try MiniTest.expect(call.environment?.values.contains(password) != true)
         try MiniTest.expect(!args.contains("-e"))
         let script = args.last ?? ""
-        try MiniTest.expect(script.contains("git config --global --add credential.helper"))
+        try MiniTest.expect(script.contains("credential.https://dev.azure.com.helper"))
+        try MiniTest.expect(script.contains("credential.https://dev.azure.com.useHttpPath true"))
+        try MiniTest.expect(!script.contains("git config --global --replace-all credential.helper"))
+        try MiniTest.expect(!script.contains("git config --global --add credential.helper"))
         try MiniTest.expect(script.contains("git credential approve"))
         try MiniTest.expect(script.contains("printf 'protocol=%s\\nhost=%s\\nusername=%s\\npassword=%s\\n\\n'"))
         try MiniTest.expect(!script.contains(password))
@@ -7081,6 +7116,51 @@ nonisolated(unsafe) let guestGitCredentialSeedTests: [(String, () throws -> Void
         try MiniTest.expect(!args.contains(where: { $0.contains("ghp_seed") }))
         try MiniTest.expect(call.environment?.values.contains("ghp_seed") != true)
         try MiniTest.expect(args.contains("-u") && args.contains("root"))
+        let script = args.last ?? ""
+        try MiniTest.expect(script.contains("git config --global --add credential.helper"))
+        try MiniTest.expect(!script.contains("useHttpPath"), "GitHub seed must not set Azure useHttpPath")
+        try MiniTest.expect(!script.contains("credential.https://dev.azure.com.helper"))
+        try MiniTest.expect(!script.contains("git config --global --replace-all credential.helper"))
+    }),
+    ("guestSeedInstallHTTPSCredentialDoesNotRefill", {
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let creds = SeedMockCredential()
+        creds.defaultResult = .success(GitHTTPSCredentials(username: "should-not-fill", password: "nope"))
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let seed = GuestGitCredentialSeed(
+            credentials: creds,
+            runner: mock,
+            gitPathOverride: .some("/usr/bin/mock-git")
+        )
+        try seed.installHTTPSCredential(
+            containerId: "ctr",
+            url: "https://dev.azure.com/plantsuite/PlantSuite/_git/PlantSuite",
+            credentials: GitHTTPSCredentials(username: "plantsuite", password: "already-filled"),
+            connectionUser: "vscode",
+            runtime: runtime
+        )
+        try MiniTest.expect(creds.fillCalls.isEmpty, "prepared install must not fill again")
+        let execs = mock.calls.filter { $0.arguments.first == "exec" }
+        try MiniTest.expectEqual(execs.count, 1)
+        let script = execs[0].arguments.last ?? ""
+        try MiniTest.expect(script.contains("credential.https://dev.azure.com.useHttpPath true"))
+        try MiniTest.expect(script.contains("credential.https://dev.azure.com.helper"))
+        try MiniTest.expect(!script.contains("git config --global --replace-all credential.helper"))
+        try MiniTest.expect(!script.contains("git config --global --add credential.helper"))
+        try MiniTest.expect(!script.contains("already-filled"), "password stays off argv")
+        try MiniTest.expectEqual(
+            String(data: execs[0].stdinData ?? Data(), encoding: .utf8) ?? "",
+            "protocol=https\nhost=dev.azure.com\nusername=plantsuite\npassword=already-filled\n\n"
+        )
+        try MiniTest.expect(!script.contains("_git"), "approve entries carry no path component")
     }),
     ("guestSeedVolumeMissingOrEmptyGitURLSkips", {
         let mock = MockProcessRunner()
@@ -7175,11 +7255,29 @@ nonisolated(unsafe) let guestGitCredentialSeedTests: [(String, () throws -> Void
         let script = GuestGitCredentialSeed.seedScript()
         try MiniTest.expect(script.contains("set -e"))
         try MiniTest.expect(script.contains("git config --global --add credential.helper"))
+        try MiniTest.expect(!script.contains("git config --global --replace-all credential.helper"))
+        try MiniTest.expect(!script.contains("useHttpPath"))
         try MiniTest.expect(script.contains("git credential approve"))
         try MiniTest.expect(script.contains("while IFS= read -r line"))
         try MiniTest.expect(!script.contains("ADEV_SEED"), "seed script must not read credential env")
-        try MiniTest.expect(!script.contains("https://"), "script must not embed any URL")
+        try MiniTest.expect(!script.contains("https://"), "default script must not embed a URL")
         try MiniTest.expect(!script.contains("ADEV_SEED_0_"), "script must not embed any env value")
+        let azure = GuestGitCredentialSeed.seedScript(appendGlobalHelper: false, configureAzureHost: true)
+        try MiniTest.expect(!azure.contains("git config --global --replace-all credential.helper"))
+        try MiniTest.expect(!azure.contains("git config --global --add credential.helper"))
+        try MiniTest.expect(azure.contains("git config --global --replace-all credential.https://dev.azure.com.helper \"\""))
+        try MiniTest.expect(azure.contains("git config --global --add credential.https://dev.azure.com.helper"))
+        try MiniTest.expect(azure.contains("credential.https://dev.azure.com.useHttpPath true"))
+        guard let reset = azure.range(of: "credential.https://dev.azure.com.helper \"\"")?.lowerBound,
+              let added = azure.range(of: "git config --global --add credential.https://dev.azure.com.helper")?.lowerBound,
+              let usePath = azure.range(of: "credential.https://dev.azure.com.useHttpPath")?.lowerBound,
+              let approve = azure.range(of: "git credential approve")?.lowerBound
+        else {
+            throw MiniTest.Failure(message: "Azure seed script is missing the URL-scoped helper")
+        }
+        try MiniTest.expect(reset < added, "empty URL-scoped helper precedes the product helper")
+        try MiniTest.expect(added < usePath, "product helper is configured before useHttpPath")
+        try MiniTest.expect(usePath < approve, "useHttpPath is set before approve")
     }),
     ("guestSeedScriptResolvesPasswdHomeBeforeCredentialSetup", {
         let script = GuestGitCredentialSeed.seedScript()
@@ -7337,6 +7435,14 @@ nonisolated(unsafe) let guestGitCredentialSeedTests: [(String, () throws -> Void
         try MiniTest.expect(out.contains("username=Y"), "queried username wins over stored")
         try MiniTest.expect(!out.contains("username=X"), "stored username not emitted when the query carries one")
         try MiniTest.expect(out.contains("password=sec:ret@1"), "stored password returned on username-agnostic match")
+        // useHttpPath queries include path; the imported credential must still match.
+        let withPath = try runCredentialHelper(
+            helperPath: helperPath.path, action: "get", home: home,
+            input: "protocol=https\nhost=dev.azure.com\npath=plantsuite/PlantSuite/_git/PlantSuite\n\n"
+        )
+        try MiniTest.expect(withPath.succeeded, "path-scoped get exits 0")
+        try MiniTest.expect(withPath.stdoutString.contains("password=sec:ret@1"), "path is ignored so useHttpPath queries match")
+        try MiniTest.expect(withPath.stdoutString.contains("username=X"), "stored username returned when the path query has none")
     }),
     ("guestSeedHelperGetExactMatchAndStoredUsernameFallback", {
         let helper = GuestGitCredentialSeed.helperScript()
@@ -7524,7 +7630,9 @@ nonisolated(unsafe) let guestGitCredentialSeedTests: [(String, () throws -> Void
     }),
     ("guestSeedScriptConfigAppendsHelperAndDropsStore", {
         let script = GuestGitCredentialSeed.seedScript()
-        try MiniTest.expect(script.contains("git config --global --add credential.helper"), "helper appended via --add")
+        try MiniTest.expect(script.contains("git config --global --add credential.helper"), "non-Azure helper is appended")
+        try MiniTest.expect(!script.contains("git config --global --replace-all credential.helper"), "global helper list is not replaced")
+        try MiniTest.expect(!script.contains("useHttpPath"), "non-Azure script does not set Azure useHttpPath")
         try MiniTest.expect(script.contains("$HOME/.adevcontainer/git-credential-adev"), "absolute helper path")
         try MiniTest.expect(script.contains("chmod 700 \"$HELPER\""), "helper written 0700")
         try MiniTest.expect(script.contains("#!/bin/sh"), "helper has a shebang")
@@ -7533,7 +7641,7 @@ nonisolated(unsafe) let guestGitCredentialSeedTests: [(String, () throws -> Void
         try MiniTest.expect(script.contains("git credential approve"), "approve loop kept")
         try MiniTest.expect(script.contains("while IFS= read -r line"))
     }),
-    ("guestSeedScriptPreservesPreExistingGlobalCredentialHelper", {
+    ("guestSeedScriptKeepsGlobalHelperAndScopesAzure", {
         let fixture = try makeSeedScriptFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let configPath = fixture.home.appendingPathComponent("git-config")
@@ -7549,13 +7657,34 @@ nonisolated(unsafe) let guestGitCredentialSeedTests: [(String, () throws -> Void
         )
         try MiniTest.expect(result.succeeded, "seed script configures the helper")
         let config = try String(contentsOf: configPath, encoding: .utf8)
-        guard let existing = config.range(of: "credential.helper=pre-existing")?.lowerBound,
-              let seeded = config.range(of: "credential.helper=\(fixture.home.path)/.adevcontainer/git-credential-adev")?.lowerBound
+        let lines = config.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard let existing = lines.firstIndex(of: "credential.helper=pre-existing"),
+              let seeded = lines.firstIndex(of: "credential.helper=\(fixture.home.path)/.adevcontainer/git-credential-adev")
         else {
             throw MiniTest.Failure(message: "global git config lost or omitted a credential helper")
         }
-        try MiniTest.expect(existing < seeded, "--add preserves the pre-existing helper order")
-        try MiniTest.expect(config.contains("core.askpass=keep"), "unrelated global config remains")
+        try MiniTest.expect(existing < seeded, "--add preserves the pre-existing helper")
+        try MiniTest.expect(!config.contains("useHttpPath"))
+        try MiniTest.expect(lines.contains("core.askpass=keep"), "unrelated global config remains")
+
+        let azure = try FoundationProcessRunner().run(
+            executable: "/bin/sh",
+            arguments: ["-c", GuestGitCredentialSeed.seedScript(appendGlobalHelper: false, configureAzureHost: true)],
+            environment: fixture.environment,
+            currentDirectory: nil,
+            stdinData: Data("protocol=https\nhost=dev.azure.com\nusername=u\npassword=p\n\n".utf8)
+        )
+        try MiniTest.expect(azure.succeeded, "Azure seed script configures the URL-scoped helper")
+        let azureLines = try String(contentsOf: configPath, encoding: .utf8)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        try MiniTest.expect(azureLines.contains("credential.helper=pre-existing"), "Azure seed leaves the global helper")
+        try MiniTest.expect(azureLines.contains("credential.https://dev.azure.com.helper="))
+        try MiniTest.expect(azureLines.contains(
+            "credential.https://dev.azure.com.helper=\(fixture.home.path)/.adevcontainer/git-credential-adev"
+        ))
+        try MiniTest.expect(azureLines.contains("credential.https://dev.azure.com.useHttpPath=true"))
+        try MiniTest.expect(!azureLines.contains("credential.helper="), "Azure seed does not empty the global helper")
     }),
     ("guestSeedHelperReadsTrailingBlockAndEraseKeepsIt", {
         let helper = GuestGitCredentialSeed.helperScript()
