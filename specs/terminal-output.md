@@ -239,7 +239,7 @@ On `clone`, after the container is created and started, the **in-container full 
 4. Keep host stdout pure under `--json`.
 5. Under `ADEVCONTAINER_QUIET=1`, still emit framed tool body; only the product populate status/info lines are silenced.
 
-This requirement extends presentation only; populate auth matrix, verify `.git`, and failure cleanup remain as in [clone.md](clone.md).
+This requirement extends presentation only; populate auth by URL scheme, verify `.git`, and failure cleanup remain as in [clone.md](clone.md) **In-container full clone populate (auth by URL scheme)**.
 
 #### Scenario: Clone populate streams live framed tool output
 - Given a clone path whose in-container git clone prints progress lines to stdout/stderr and quiet mode unset

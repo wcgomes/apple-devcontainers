@@ -32,7 +32,7 @@ Parse these paths from machine JSON (not human tables). Shape documented against
 
 - Resolver owns JSONC + substitution subset: `${localWorkspaceFolder}`, `${localWorkspaceFolderBasename}`, `${localEnv:*}`, `${containerWorkspaceFolder}`, `${devcontainerId}` (see below). Unknown tokens → structured error.
 - Resolver emits a runtime request DTO; runtime maps DTO → argv + env for `container`.
-- Unsupported props/flags fail in resolver or runtime admission — **fail closed**, no drop-on-floor.
+- Unsupported props/flags fail in resolver or runtime admission — **fail closed**; do not silently discard them.
 - Nested `build` xor `image` is representable. Compose and top-level `dockerFile`/`dockerfile`/`context` stay blocked. Contract: [`specs/core.md`](../../specs/core.md).
 
 ### Dockerfile image (nested `build`)
@@ -91,7 +91,7 @@ Fixtures may use directory binds already (`~/.kube`); configs that still use fil
   - `--cpus`/`-c`, `--memory`/`-m` — **merge into** create `-c`/`-m` (no duplicate tokens); hostRequirements wins when set for that dimension
   - `--network=NAME` — **named networks only** (host/bridge/none/container:* warn-skipped)
   - `--rosetta`, `--ssh`, `--read-only` (rootfs flag, not volume `:ro`; selects ownership helper — see [ownership](#named-volumes-ensure--reuse--ownership))
-- **Not via runArgs** (first-class props; hard-error if smuggled): `-e`/`-u`/`-w`/`-p`/`-v`/`--mount`/`--name`/`--label`/`-i`/`-t`/`-d`/`--rm`/`--entrypoint`.
+- **Not via runArgs** (first-class properties; hard-error even if the matching property is unset): `-e`/`-u`/`-w`/`-p`/`-v`/`--mount`/`--name`/`--label`/`-i`/`-t`/`-d`/`--rm`/`--entrypoint`.
 - **Warn-skip** (not applied): `--privileged`, `--device=…` (incl. `/dev/net/tun`), `--security-opt`, `--gpus`, `--ipc`, `--pid`, `--userns`, `--cgroupns`, `--hostname`, `--add-host`, `--sysctl`, `--group-add`, `--runtime`, Docker-only network modes. See [0003](../decisions/0003-warn-skip-apple-incompatibles.md).
 - Unknown or incomplete entries (e.g. bare `--cap-add` with no name) → structured error naming the entry.
 
@@ -260,7 +260,7 @@ After ownership, before create-path hooks, `up` fresh create (bind) and `rebuild
 
 - `list [--json]`: client-side filter to `devcontainer.managed=adevcontainer` only.
 - `start` / `exec` / `stop` / `delete` / `purge` / `rebuild` / `inspect`: `--name` or picker among managed; no host workspace path required.
-- `start`: runtime start of a managed container. **Real start** (bind+volume): host `initializeCommand` when a host workspace exists (volume start without host path skips+warns) → `postStartCommand` + feature remelt → CLI-attach postAttach. **Already-running:** no initialize/postStart; postAttach only after successful `--vscode` open. **Never applies** settings/extensions. **No** create-name occupancy classification. Start failure: TTY recovery delegates to `rebuild --name` (does **not** re-run start or open an editor); non-TTY/`--json`/decline → original error + hint `adevcontainer rebuild --name <name>`.
+- `start`: runtime start of a managed container. **Real start** (bind+volume): host `initializeCommand` when a host workspace exists (volume start without host path skips+warns) → `postStartCommand` + feature remelt (re-merge and run feature-contributed postStart on this start) → CLI-attach postAttach. **Already-running:** no initialize/postStart; postAttach only after successful `--vscode` open. **Never applies** settings/extensions. **No** create-name occupancy classification. Start failure: TTY recovery delegates to `rebuild --name` (does **not** re-run start or open an editor); non-TTY/`--json`/decline → original error + hint `adevcontainer rebuild --name <name>`.
 - `exec`: user/workdir from labels `devcontainer.remote_user` / `devcontainer.workspace_folder` when set (both modes stamp workdir; new creates always stamp non-empty `remote_user` incl. `root`; empty label = legacy omit `-u` — see [Connection user](#connection-user-remoteuser--containeruser)).
 
 ### InteractivePicker (multi-container)
@@ -368,7 +368,7 @@ Apple `container` does **not** expand `${PATH}` / `$PATH` in env values. Product
 
 ## Progress / tee
 
-Presentation stack (StatusPrinter + TerminalStyle, tool `| ` framing, QUIET/color matrix, connectionHint info weight, clone populate `streamOutput`): **[terminal-output.md](terminal-output.md)**. Runtime-boundary facts that stay here:
+Presentation stack (StatusPrinter + TerminalStyle, tool `| ` framing, QUIET and color rules, connectionHint info weight, clone populate `streamOutput`): **[terminal-output.md](terminal-output.md)**. Runtime-boundary facts that stay here:
 
 - Long ops emit product phases on stderr (pull/create/start/stop/delete/volume create; Features Resolving/Fetching/Building/Reusing; build.rosetta when changing; lifecycle `==> Running <property>`; related steps). StatusPrinter only — not hook/tool body I/O.
 - After successful `up`/`clone`/`start`/`rebuild` without originating `--vscode`, connection hints (info, not `==> `) on stderr; `--vscode` suppresses both; never on stdout/`--json`.

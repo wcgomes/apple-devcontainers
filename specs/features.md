@@ -94,8 +94,8 @@ Warnings MUST be actionable via `StatusPrinter.warning` (or equivalent stderr pa
 - When features are resolved for `up`
 - Then the CLI does **not** fail solely for privileged/securityOpt; emits a warning; does not apply privileged/securityOpt to create; and MAY still install the feature
 
-#### Scenario: Non-ood feature is not rejected solely as features-unsupported
-- Given only `ghcr.io/devcontainers/features/node:1` in `features` (no ood)
+#### Scenario: Non-docker-outside-of-docker feature is not rejected solely as features-unsupported
+- Given only `ghcr.io/devcontainers/features/node:1` in `features` (no docker-outside-of-docker ref)
 - When config is validated at the admission layer
 - Then the CLI does **not** fail with the legacy “any features entry rejected / features runner post-MVP” policy
 
@@ -497,7 +497,7 @@ Privileged / `securityOpt` contributions are warn-stripped and not applied to cr
 #### Scenario: up finish still has base-image postAttach after remelt
 - Given Features apply already unioned base-image `postAttach` into the create config
 - When `up` finish remelts feature postAttach from image metadata that is features-only
-- Then the base-image postAttach still runs (remelt unions, does not replace-away)
+- Then the base-image postAttach still runs (remelt unions; it does not drop the base-image hook)
 
 #### Scenario: devcontainer.metadata label merge when present
 - Given a base image with a parseable `devcontainer.metadata` label
@@ -528,7 +528,7 @@ Privileged / `securityOpt` contributions are warn-stripped and not applied to cr
 
 ### Requirement: Feature postStart remelt on resume
 
-On every path that MUST run `postStartCommand` after a successful start of a previously stopped container (`up` start-stopped and bare `adevcontainer start` in bind and volume modes), the CLI MUST remelt feature-contributed `postStart` commands for that invocation. The CLI MUST run the config `postStartCommand` when present, then feature-contributed postStart commands, in the same merge/order spirit as create-path feature lifecycle hooks.
+On every path that MUST run `postStartCommand` after a successful start of a previously stopped container (`up` start-stopped and bare `adevcontainer start` in bind and volume modes), the CLI MUST remelt feature-contributed `postStart` commands for that invocation — re-merge and run them again on this start, not only on the original create. The CLI MUST run the config `postStartCommand` when present, then feature-contributed postStart commands, in the same merge/order spirit as create-path feature lifecycle hooks.
 
 Resume MUST NOT drop feature-contributed postStart solely because the container was created earlier. Feature onCreate / updateContent / postCreate MUST remain create-path only. A non-zero remelted feature postStart on resume MUST fail the command and MUST NOT delete the container.
 
@@ -591,7 +591,7 @@ The repository MUST provide:
 
 | Path | Content |
 |------|---------|
-| `Tests/Fixtures/features-node.json` | Valid image-based config with **only** a non-ood OCI feature suitable for Node (e.g. `ghcr.io/devcontainers/features/node` with a pinned tag) and options if needed |
+| `Tests/Fixtures/features-node.json` | Valid image-based config with **only** an OCI feature that is not docker-outside-of-docker, suitable for Node (e.g. `ghcr.io/devcontainers/features/node` with a pinned tag) and options if needed |
 | `Tests/Fixtures/features-local.json` | Valid image-based config with local path features `./.devcontainer/features/sample-a` and `sample-b` (options as needed) |
 | `Tests/Fixtures/features-sample/` | On-disk sample feature packages (`sample-a`, `sample-b`, `sample-privileged`) for unit + local E2E |
 

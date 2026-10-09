@@ -2,7 +2,7 @@
 
 ## Status
 
-**Superseded in part** by [0003](0003-warn-skip-apple-incompatibles.md). Optional incompatibles (docker-* features, privileged/device/security runArgs, feature privileged/securityOpt metadata) are now **warn-skip**. Compose, unknown runArgs, and first-class smuggling remain fail-closed as below.
+**Superseded in part** by [0003](0003-warn-skip-apple-incompatibles.md). Optional incompatibles (docker-* features, privileged/device/security runArgs, feature privileged/securityOpt metadata) are now **warn-skip**. Compose, unknown runArgs, and first-class collisions (runArgs flags for first-class properties, even if that property is unset) remain fail-closed as below.
 
 ## Context
 

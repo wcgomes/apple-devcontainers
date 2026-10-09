@@ -24,7 +24,7 @@ Multi-platform `devcontainer.json` files often include Docker-oriented features 
 
 - Docker Compose keys
 - Unknown runArgs (not allowlisted and not in the warn-skip family)
-- First-class smuggling via runArgs (`-e`, `-u`, `-w`, `-p`, `-v`, …)
+- First-class collisions via runArgs (`-e`, `-u`, `-w`, `-p`, `-v`, …)
 - Unknown top-level dangerous properties, missing `image`, invalid feature option shapes, hostRequirements shortfalls, unsupported substitutions
 
 **Semantics:**
