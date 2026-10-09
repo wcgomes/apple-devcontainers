@@ -6627,14 +6627,31 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
 
 /// Runs the generated credential helper via `sh` (Linux test env) with HOME pinned
 /// to a scratch dir, feeding `input` on stdin like git's credential protocol.
-func runCredentialHelper(helperPath: String, action: String, home: String, input: String) throws -> ProcessResult {
-    try FoundationProcessRunner().run(
+func runCredentialHelper(
+    helperPath: String,
+    action: String,
+    home: String,
+    input: String,
+    path: String? = nil
+) throws -> ProcessResult {
+    let resolvedPath = path ?? ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
+    return try FoundationProcessRunner().run(
         executable: "/bin/sh",
         arguments: [helperPath, action],
-        environment: ["HOME": home],
+        environment: ["HOME": home, "PATH": resolvedPath],
         currentDirectory: nil,
         stdinData: Data(input.utf8)
     )
+}
+
+func credentialJWT(payloadJSON: String) -> String {
+    func b64(_ text: String) -> String {
+        Data(text.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+    return "\(b64(#"{"alg":"none"}"#)).\(b64(payloadJSON)).sig"
 }
 
 func makeSeedScriptFixture() throws -> (root: URL, home: URL, inheritedHome: URL, environment: [String: String]) {
@@ -7265,17 +7282,19 @@ nonisolated(unsafe) let guestGitCredentialSeedTests: [(String, () throws -> Void
         let azure = GuestGitCredentialSeed.seedScript(appendGlobalHelper: false, configureAzureHost: true)
         try MiniTest.expect(!azure.contains("git config --global --replace-all credential.helper"))
         try MiniTest.expect(!azure.contains("git config --global --add credential.helper"))
-        try MiniTest.expect(azure.contains("git config --global --replace-all credential.https://dev.azure.com.helper \"\""))
-        try MiniTest.expect(azure.contains("git config --global --add credential.https://dev.azure.com.helper"))
+        try MiniTest.expect(!azure.contains("credential.https://dev.azure.com.helper \"\""), "Azure seed must not write an empty helper reset")
+        try MiniTest.expect(!azure.contains("credential.https://dev.azure.com.helper ''"))
+        try MiniTest.expect(azure.contains("git config --global --unset-all \"$azure_key\""), "empty URL-scoped helper values are removed")
+        try MiniTest.expect(azure.contains("git config --global --add \"$azure_key\" \"$HELPER\""))
         try MiniTest.expect(azure.contains("credential.https://dev.azure.com.useHttpPath true"))
-        guard let reset = azure.range(of: "credential.https://dev.azure.com.helper \"\"")?.lowerBound,
-              let added = azure.range(of: "git config --global --add credential.https://dev.azure.com.helper")?.lowerBound,
+        guard let removed = azure.range(of: "git config --global --unset-all \"$azure_key\"")?.lowerBound,
+              let added = azure.range(of: "git config --global --add \"$azure_key\" \"$HELPER\"")?.lowerBound,
               let usePath = azure.range(of: "credential.https://dev.azure.com.useHttpPath")?.lowerBound,
               let approve = azure.range(of: "git credential approve")?.lowerBound
         else {
             throw MiniTest.Failure(message: "Azure seed script is missing the URL-scoped helper")
         }
-        try MiniTest.expect(reset < added, "empty URL-scoped helper precedes the product helper")
+        try MiniTest.expect(removed < added, "empty helper removal precedes ensuring the product helper")
         try MiniTest.expect(added < usePath, "product helper is configured before useHttpPath")
         try MiniTest.expect(usePath < approve, "useHttpPath is set before approve")
     }),
@@ -7619,14 +7638,22 @@ nonisolated(unsafe) let guestGitCredentialSeedTests: [(String, () throws -> Void
                 "stdout carries only credential-protocol lines: \(line)"
             )
         }
-        // Erase is a silent no-op.
+        // Erase removes the matching protocol+host entry and stays silent.
         let erase = try runCredentialHelper(
             helperPath: helperPath.path, action: "erase", home: home,
-            input: "protocol=https\nhost=h.example\n\n"
+            input: "protocol=https\nhost=h.example\nusername=other\npath=ignored\n\n"
         )
         try MiniTest.expect(erase.succeeded)
         try MiniTest.expect(erase.stdoutString.isEmpty)
         try MiniTest.expect(erase.stderrString.isEmpty)
+        try MiniTest.expect(!erase.stdoutString.contains("hunter2@secret"))
+        let after = try runCredentialHelper(
+            helperPath: helperPath.path, action: "get", home: home,
+            input: "protocol=https\nhost=h.example\n\n"
+        )
+        try MiniTest.expect(after.succeeded)
+        try MiniTest.expect(after.stdoutString.isEmpty, "erase removed the matching store entry")
+        try MiniTest.expect(!((try? String(contentsOf: dir.appendingPathComponent(".adevcontainer/git-credentials"), encoding: .utf8)) ?? "").contains("hunter2@secret"))
     }),
     ("guestSeedScriptConfigAppendsHelperAndDropsStore", {
         let script = GuestGitCredentialSeed.seedScript()
@@ -7679,10 +7706,9 @@ nonisolated(unsafe) let guestGitCredentialSeedTests: [(String, () throws -> Void
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
         try MiniTest.expect(azureLines.contains("credential.helper=pre-existing"), "Azure seed leaves the global helper")
-        try MiniTest.expect(azureLines.contains("credential.https://dev.azure.com.helper="))
-        try MiniTest.expect(azureLines.contains(
-            "credential.https://dev.azure.com.helper=\(fixture.home.path)/.adevcontainer/git-credential-adev"
-        ))
+        try MiniTest.expect(!azureLines.contains("credential.https://dev.azure.com.helper="), "Azure seed does not write an empty helper")
+        let productHelper = "credential.https://dev.azure.com.helper=\(fixture.home.path)/.adevcontainer/git-credential-adev"
+        try MiniTest.expectEqual(azureLines.filter { $0 == productHelper }.count, 1, "product helper is present once")
         try MiniTest.expect(azureLines.contains("credential.https://dev.azure.com.useHttpPath=true"))
         try MiniTest.expect(!azureLines.contains("credential.helper="), "Azure seed does not empty the global helper")
     }),
@@ -7711,10 +7737,206 @@ nonisolated(unsafe) let guestGitCredentialSeedTests: [(String, () throws -> Void
             input: "protocol=https\nhost=trailing.example\n\n"
         )
         try MiniTest.expect(erase.succeeded, "erase exits 0")
-        try MiniTest.expectEqual(
-            try String(contentsOf: storePath, encoding: .utf8), stored,
-            "erase leaves stored credentials intact"
+        try MiniTest.expect(erase.stdoutString.isEmpty)
+        try MiniTest.expect(erase.stderrString.isEmpty)
+        let after = try String(contentsOf: storePath, encoding: .utf8)
+        try MiniTest.expect(!after.contains("p@ss:raw"), "erase removes the trailing protocol+host block")
+        let mode = try FileManager.default.attributesOfItem(atPath: storePath.path)
+        try MiniTest.expectEqual((mode[.posixPermissions] as? NSNumber)?.intValue, 0o600, "erase rewrite is 0600")
+    }),
+    ("guestSeedHelperExpiredJWTIsMissAndRemoved", {
+        let helper = GuestGitCredentialSeed.helperScript()
+        let dir = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let helperPath = dir.appendingPathComponent("git-credential-adev")
+        try Data(helper.utf8).write(to: helperPath)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helperPath.path)
+        let home = dir.path
+        let expired = credentialJWT(payloadJSON: #"{"exp":1000,"sub":"x"}"#)
+        let skew = credentialJWT(payloadJSON: "{\"exp\":\(Int(Date().timeIntervalSince1970) + 30)}")
+        let valid = credentialJWT(payloadJSON: "{\"exp\":\(Int(Date().timeIntervalSince1970) + 3600)}")
+        let noExp = credentialJWT(payloadJSON: #"{"sub":"x"}"#)
+        _ = try runCredentialHelper(
+            helperPath: helperPath.path, action: "store", home: home,
+            input: "protocol=https\nhost=dev.azure.com\nusername=X\npassword=\(expired)\n\n"
         )
+        _ = try runCredentialHelper(
+            helperPath: helperPath.path, action: "store", home: home,
+            input: "protocol=https\nhost=github.com\nusername=alice\npassword=keep-me\n\n"
+        )
+        let miss = try runCredentialHelper(
+            helperPath: helperPath.path, action: "get", home: home,
+            input: "protocol=https\nhost=dev.azure.com\nusername=Y\npath=org/proj/_git/repo\n\n"
+        )
+        try MiniTest.expect(miss.succeeded)
+        try MiniTest.expect(miss.stdoutString.isEmpty, "expired JWT is a miss")
+        try MiniTest.expect(miss.stderrString.isEmpty)
+        try MiniTest.expect(!miss.stdoutString.contains(expired))
+        let store = try String(contentsOf: dir.appendingPathComponent(".adevcontainer/git-credentials"), encoding: .utf8)
+        try MiniTest.expect(!store.contains(expired), "expired entry is removed")
+        try MiniTest.expect(store.contains("password=keep-me"), "other host remains")
+        _ = try runCredentialHelper(
+            helperPath: helperPath.path, action: "store", home: home,
+            input: "protocol=https\nhost=dev.azure.com\nusername=X\npassword=\(skew)\n\n"
+        )
+        let skewGet = try runCredentialHelper(
+            helperPath: helperPath.path, action: "get", home: home,
+            input: "protocol=https\nhost=dev.azure.com\n\n"
+        )
+        try MiniTest.expect(skewGet.stdoutString.isEmpty, "exp within 60 seconds is expired")
+        try MiniTest.expect(skewGet.stderrString.isEmpty)
+        _ = try runCredentialHelper(
+            helperPath: helperPath.path, action: "store", home: home,
+            input: "protocol=https\nhost=dev.azure.com\nusername=X\npassword=\(valid)\n\n"
+        )
+        let kept = try runCredentialHelper(
+            helperPath: helperPath.path, action: "get", home: home,
+            input: "protocol=https\nhost=dev.azure.com\nusername=Y\n\n"
+        )
+        try MiniTest.expect(kept.stdoutString.contains("username=Y"))
+        try MiniTest.expect(kept.stdoutString.contains("password=\(valid)"), "future exp is returned")
+        try MiniTest.expect(kept.stderrString.isEmpty)
+        for line in kept.stdoutString.split(whereSeparator: \.isNewline) where !line.isEmpty {
+            try MiniTest.expect(
+                line.hasPrefix("protocol=") || line.hasPrefix("host=")
+                    || line.hasPrefix("username=") || line.hasPrefix("password="),
+                "password stays inside the credential protocol"
+            )
+        }
+        _ = try runCredentialHelper(
+            helperPath: helperPath.path, action: "store", home: home,
+            input: "protocol=https\nhost=other.example\nusername=u\npassword=\(noExp)\n\n"
+        )
+        let missingExp = try runCredentialHelper(
+            helperPath: helperPath.path, action: "get", home: home,
+            input: "protocol=https\nhost=other.example\n\n"
+        )
+        try MiniTest.expect(missingExp.stdoutString.contains("password=\(noExp)"), "missing exp returns the password")
+        for password in ["plain-token", "foo.bar", "a.b.c.d", "aaa.!!!.bbb"] {
+            _ = try runCredentialHelper(
+                helperPath: helperPath.path, action: "store", home: home,
+                input: "protocol=https\nhost=literal.example\nusername=u\npassword=\(password)\n\n"
+            )
+            let literal = try runCredentialHelper(
+                helperPath: helperPath.path, action: "get", home: home,
+                input: "protocol=https\nhost=literal.example\nusername=queried\n\n"
+            )
+            try MiniTest.expect(literal.stdoutString.contains("password=\(password)"), "non-JWT \(password) is returned")
+            try MiniTest.expect(literal.stderrString.isEmpty)
+        }
+        _ = try runCredentialHelper(
+            helperPath: helperPath.path, action: "store", home: home,
+            input: "protocol=https\nhost=nob64.example\nusername=u\npassword=\(expired)\n\n"
+        )
+        let noBase64 = try runCredentialHelper(
+            helperPath: helperPath.path, action: "get", home: home,
+            input: "protocol=https\nhost=nob64.example\n\n",
+            path: "/bin"
+        )
+        try MiniTest.expect(noBase64.stdoutString.contains("password=\(expired)"), "unavailable base64 returns the password")
+        try MiniTest.expect(noBase64.stderrString.isEmpty)
+    }),
+    ("guestSeedHelperEraseRemovesHostAndKeepsOthers", {
+        let helper = GuestGitCredentialSeed.helperScript()
+        let dir = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let helperPath = dir.appendingPathComponent("git-credential-adev")
+        let storePath = dir.appendingPathComponent(".adevcontainer/git-credentials")
+        try Data(helper.utf8).write(to: helperPath)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helperPath.path)
+        let home = dir.path
+        for input in [
+            "protocol=https\nhost=dev.azure.com\nusername=one\npassword=p1\n\n",
+            "protocol=https\nhost=dev.azure.com\nusername=two\npassword=p2\n\n",
+            "protocol=https\nhost=github.com\nusername=alice\npassword=keep\n\n"
+        ] {
+            let stored = try runCredentialHelper(
+                helperPath: helperPath.path, action: "store", home: home, input: input
+            )
+            try MiniTest.expect(stored.succeeded)
+        }
+        let erase = try runCredentialHelper(
+            helperPath: helperPath.path, action: "erase", home: home,
+            input: "protocol=https\nhost=dev.azure.com\nusername=nobody\npath=org/proj/_git/repo\n\n"
+        )
+        try MiniTest.expect(erase.succeeded)
+        try MiniTest.expect(erase.stdoutString.isEmpty)
+        try MiniTest.expect(erase.stderrString.isEmpty)
+        let left = try String(contentsOf: storePath, encoding: .utf8)
+        try MiniTest.expect(!left.contains("dev.azure.com"))
+        try MiniTest.expect(!left.contains("password=p1"))
+        try MiniTest.expect(!left.contains("password=p2"))
+        try MiniTest.expect(left.contains("host=github.com"))
+        try MiniTest.expect(left.contains("password=keep"))
+        let mode = try FileManager.default.attributesOfItem(atPath: storePath.path)
+        try MiniTest.expectEqual((mode[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        let noMatch = try runCredentialHelper(
+            helperPath: helperPath.path, action: "erase", home: home,
+            input: "protocol=https\nhost=example.com\n\n"
+        )
+        try MiniTest.expect(noMatch.succeeded)
+        try MiniTest.expectEqual(try String(contentsOf: storePath, encoding: .utf8), left, "no-match erase leaves the store")
+    }),
+    ("guestSeedAzureChainDropsEmptyHelperAndKeepsOneProductHelper", {
+        let fixture = try makeSeedScriptFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let configPath = fixture.home.appendingPathComponent("git-config")
+        let helper = "\(fixture.home.path)/.adevcontainer/git-credential-adev"
+        try """
+        credential.helper=osxkeychain
+        credential.https://dev.azure.com.helper=
+        credential.https://dev.azure.com.helper=/opt/vscode/git-credential
+        credential.https://dev.azure.com.helper=\(helper)
+        credential.https://dev.azure.com.helper=\(helper)
+        core.askpass=keep
+        """.write(to: configPath, atomically: true, encoding: .utf8)
+        let script = GuestGitCredentialSeed.seedScript(appendGlobalHelper: false, configureAzureHost: true)
+        for _ in 0..<2 {
+            let result = try FoundationProcessRunner().run(
+                executable: "/bin/sh",
+                arguments: ["-c", script],
+                environment: fixture.environment,
+                currentDirectory: nil,
+                stdinData: Data("protocol=https\nhost=dev.azure.com\nusername=u\npassword=p\n\n".utf8)
+            )
+            try MiniTest.expect(result.succeeded, "Azure chain cleanup succeeds")
+            try MiniTest.expect(!result.stdoutString.contains("password=p"))
+            try MiniTest.expect(!result.stderrString.contains("password=p"))
+        }
+        let lines = try String(contentsOf: configPath, encoding: .utf8)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        try MiniTest.expect(lines.contains("credential.helper=osxkeychain"), "global helper list is not reset")
+        try MiniTest.expect(!lines.contains("credential.helper="))
+        try MiniTest.expect(!lines.contains("credential.https://dev.azure.com.helper="), "empty helper reset is removed")
+        try MiniTest.expect(lines.contains("credential.https://dev.azure.com.helper=/opt/vscode/git-credential"))
+        try MiniTest.expectEqual(
+            lines.filter { $0 == "credential.https://dev.azure.com.helper=\(helper)" }.count,
+            1,
+            "product helper is present exactly once"
+        )
+        try MiniTest.expect(lines.contains("credential.https://dev.azure.com.useHttpPath=true"))
+        try MiniTest.expect(lines.contains("core.askpass=keep"))
+        try MiniTest.expect(
+            !FileManager.default.fileExists(atPath: fixture.home.appendingPathComponent(".adevcontainer/.azure-helper-values").path),
+            "helper-list temp file is removed"
+        )
+    }),
+    ("guestCredentialSourcesBindVsVolume", {
+        let (bindWorkspace, bindURL) = GuestGitCredentialSeed.credentialSources(from: [
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeBind,
+            ContainerIdentity.labelLocalFolder: "/work/app",
+            ContainerIdentity.labelGitURL: "https://example.com/ignored.git"
+        ])
+        try MiniTest.expectEqual(bindWorkspace, "/work/app")
+        try MiniTest.expectEqual(bindURL, nil)
+        let (volumeWorkspace, volumeURL) = GuestGitCredentialSeed.credentialSources(from: [
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
+            ContainerIdentity.labelLocalFolder: "volume://adev-app-ws",
+            ContainerIdentity.labelGitURL: "https://dev.azure.com/org/proj/_git/repo"
+        ])
+        try MiniTest.expectEqual(volumeWorkspace, nil)
+        try MiniTest.expectEqual(volumeURL, "https://dev.azure.com/org/proj/_git/repo")
     })
 ]
 

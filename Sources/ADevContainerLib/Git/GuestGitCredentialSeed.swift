@@ -11,10 +11,13 @@ import Foundation
 /// In-container failures throw (callers soft-fail with a warning).
 ///
 /// The guest helper matches protocol+host and ignores path, so a later `git fetch`
-/// still hits the imported credential when the query includes a path.
-/// Non-Azure hosts keep the previous append-only global helper. `dev.azure.com`
-/// only gets a URL-scoped helper override and `useHttpPath`, so other hosts are
-/// unchanged and an inherited GCM cannot abort that host.
+/// still hits the imported credential when the query includes a path. An expired
+/// JWT is a miss and is removed so it is not replayed. `erase` removes the matching
+/// protocol+host entries.
+/// Non-Azure hosts keep the append-only global helper. `dev.azure.com` gets a
+/// URL-scoped helper (empty values removed, product helper exactly once) and
+/// `useHttpPath`, so other hosts are unchanged and an inherited GCM cannot abort
+/// that host. Host `credential.helper` is never copied into the guest.
 public struct GuestGitCredentialSeed {
     public var credentials: any GitCredentialProviding
     public var runner: any ProcessRunning
@@ -33,13 +36,15 @@ public struct GuestGitCredentialSeed {
 
     /// Seed the store in `containerId` as `connectionUser`. `hostWorkspace` and `gitURL`
     /// select bind vs volume discovery (exactly one is provided by callers).
+    /// Returns false on a silent skip (no URL, no fill); throws only on exec failure.
+    @discardableResult
     public func seed(
         containerId: String,
         hostWorkspace: String?,
         gitURL: String?,
         connectionUser: String?,
         runtime: AppleContainerRuntime
-    ) throws {
+    ) throws -> Bool {
         let urls: [String]
         let workspace = hostWorkspace?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let stamped = gitURL?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -48,7 +53,7 @@ public struct GuestGitCredentialSeed {
         } else if !stamped.isEmpty {
             urls = [stamped]
         } else {
-            return
+            return false
         }
 
         var entries: [Entry] = []
@@ -81,12 +86,87 @@ public struct GuestGitCredentialSeed {
                 entries.append(entry)
             }
         }
+        guard !entries.isEmpty else { return false }
         try install(
             containerId: containerId,
             entries: entries,
             connectionUser: connectionUser,
             runtime: runtime
         )
+        return true
+    }
+
+    /// Bind uses the host workspace; volume uses the stamped git URL.
+    /// A `volume://` local folder is not a host path.
+    public static func credentialSources(
+        from labels: [String: String]
+    ) -> (hostWorkspace: String?, gitURL: String?) {
+        let mode = labels[ContainerIdentity.labelWorkspaceMode]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let gitURL = nonEmpty(labels[ContainerIdentity.labelGitURL])
+        if mode == ContainerIdentity.workspaceModeVolume {
+            return (nil, gitURL)
+        }
+        let folder = labels[ContainerIdentity.labelLocalFolder]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if folder.isEmpty || folder.hasPrefix("volume://") {
+            return (nil, gitURL)
+        }
+        return (folder, nil)
+    }
+
+    public static func connectionUser(from labels: [String: String]) -> String? {
+        nonEmpty(labels[ContainerIdentity.labelRemoteUser])
+    }
+
+    /// Re-seed a running container. Does not start, stop, fetch, pull, or push.
+    @discardableResult
+    public func seedFromLabels(
+        containerId: String,
+        labels: [String: String],
+        connectionUser: String?,
+        runtime: AppleContainerRuntime
+    ) throws -> Bool {
+        let sources = Self.credentialSources(from: labels)
+        return try seed(
+            containerId: containerId,
+            hostWorkspace: sources.hostWorkspace,
+            gitURL: sources.gitURL,
+            connectionUser: connectionUser,
+            runtime: runtime
+        )
+    }
+
+    /// Soft-fail refresh for a real start and `up` start-stopped.
+    /// Never deletes the container, fails the caller, or enters recovery.
+    public static func refreshSoft(
+        containerId: String,
+        labels: [String: String],
+        connectionUser: String?,
+        runtime: AppleContainerRuntime,
+        credentials: any GitCredentialProviding
+    ) {
+        do {
+            try GuestGitCredentialSeed(
+                credentials: credentials,
+                runner: LifecycleRunner.hostProcessRunnerOverride ?? FoundationProcessRunner()
+            ).seedFromLabels(
+                containerId: containerId,
+                labels: labels,
+                connectionUser: connectionUser,
+                runtime: runtime
+            )
+        } catch {
+            let detail = (error as? CLIError)?.message ?? error.localizedDescription
+            StatusPrinter.warning(
+                "Git credential refresh failed; continuing without forwarded credentials: \(detail)"
+            )
+        }
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// Install the guest helper and approve one credential clone already filled on the host.
@@ -145,15 +225,153 @@ public struct GuestGitCredentialSeed {
         return result
     }
 
+    /// POSIX-sh helpers injected ahead of the action `case`. Expired-JWT removal and
+    /// erase share one atomic rewrite. Decode failures stay silent and are not a miss.
+    static func helperSupportScript() -> String {
+        #"""
+drop_blocks() {
+  mode="$1"
+  dproto="$2"
+  dhost="$3"
+  duser="${4-}"
+  [ -f "$STORE" ] || return 0
+  mkdir -p "$DIR"
+  tmp="$STORE.tmp"
+  : > "$tmp"
+  chmod 600 "$tmp"
+  dp=""
+  dh=""
+  du=""
+  dpw=""
+  flush_drop() {
+    [ -n "$dp" ] || [ -n "$dh" ] || return 0
+    drop=0
+    if [ "$dp" = "$dproto" ] && [ "$dh" = "$dhost" ]; then
+      if [ "$mode" = "host" ] || [ "$du" = "$duser" ]; then
+        drop=1
+      fi
+    fi
+    if [ "$drop" -eq 0 ]; then
+      printf 'protocol=%s\nhost=%s\nusername=%s\npassword=%s\n\n' "$dp" "$dh" "$du" "$dpw" >> "$tmp"
+    fi
+    dp=""
+    dh=""
+    du=""
+    dpw=""
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+    "")
+      flush_drop
+      ;;
+    *=*)
+      key=${line%%=*}
+      val=${line#*=}
+      case "$key" in
+      protocol) dp="$val" ;;
+      host) dh="$val" ;;
+      username) du="$val" ;;
+      password) dpw="$val" ;;
+      esac
+      ;;
+    esac
+  done < "$STORE"
+  flush_drop
+  chmod 600 "$tmp"
+  mv "$tmp" "$STORE"
+}
+jwt_expired() {
+  pw=$1
+  case "$pw" in
+  *.*.*) ;;
+  *) return 1 ;;
+  esac
+  seg1=${pw%%.*}
+  rest=${pw#*.}
+  seg2=${rest%%.*}
+  seg3=${rest#*.}
+  [ -n "$seg1" ] && [ -n "$seg2" ] && [ -n "$seg3" ] || return 1
+  case "$seg3" in
+  *.*) return 1 ;;
+  esac
+  payload=$(printf '%s' "$seg2" | LC_ALL=C tr '_-' '/+' 2>/dev/null) || return 1
+  case $(( ${#payload} % 4 )) in
+    2) payload="${payload}==" ;;
+    3) payload="${payload}=" ;;
+    1) return 1 ;;
+  esac
+  json=""
+  if command -v base64 >/dev/null 2>&1; then
+    if probe=$(printf 'YQ==' | base64 -d 2>/dev/null) && [ "$probe" = "a" ]; then
+      json=$(printf '%s' "$payload" | base64 -d 2>/dev/null) || json=""
+    elif probe=$(printf 'YQ==' | base64 -D 2>/dev/null) && [ "$probe" = "a" ]; then
+      json=$(printf '%s' "$payload" | base64 -D 2>/dev/null) || json=""
+    fi
+  fi
+  if [ -z "$json" ] && command -v openssl >/dev/null 2>&1; then
+    if probe=$(printf 'YQ==' | openssl base64 -d -A 2>/dev/null) && [ "$probe" = "a" ]; then
+      json=$(printf '%s' "$payload" | openssl base64 -d -A 2>/dev/null) || json=""
+    fi
+  fi
+  [ -n "$json" ] || return 1
+  rest=$(printf '%s' "$json" | LC_ALL=C tr -d '\n' 2>/dev/null) || return 1
+  exp=""
+  while :; do
+    case "$rest" in
+    *'"exp"'*) rest=${rest#*'"exp"'} ;;
+    *) break ;;
+    esac
+    while :; do
+      case "$rest" in
+      [[:space:]]*) rest=${rest#?} ;;
+      *) break ;;
+      esac
+    done
+    case "$rest" in
+    ':'*) rest=${rest#:} ;;
+    *) continue ;;
+    esac
+    while :; do
+      case "$rest" in
+      [[:space:]]*) rest=${rest#?} ;;
+      *) break ;;
+      esac
+    done
+    exp=""
+    while :; do
+      case "$rest" in
+      [0-9]*)
+        exp="${exp}${rest%"${rest#?}"}"
+        rest=${rest#?}
+        ;;
+      *) break ;;
+      esac
+    done
+    [ -n "$exp" ] && break
+  done
+  [ -n "$exp" ] || return 1
+  now=$(date +%s 2>/dev/null) || return 1
+  case "$now" in
+  ''|*[!0-9]*) return 1 ;;
+  esac
+  if [ "$exp" -le "$((now + 60))" ]; then
+    return 0
+  fi
+  return 1
+}
+"""#
+    }
+
     /// The in-container POSIX-sh credential helper (get/store/erase) that the seed
-    /// script writes to `$HOME/.adevcontainer/git-credential-adev` (mode 0700) and
-    /// configures via `credential.helper` after an empty reset. `get` matches the
-    /// persisted store by (protocol, host), ignoring the queried username and path
-    /// so `credential.useHttpPath` queries still hit the imported credential; `store`
-    /// persists to `$HOME/.adevcontainer/git-credentials` (mode 0600) deduped by
-    /// (protocol, host, username); `erase` is a no-op. Store format: one
-    /// protocol/host/username/password key block per entry, blank-line terminated
-    /// (git's own credential protocol shape), so raw values round-trip losslessly.
+    /// script writes to `$HOME/.adevcontainer/git-credential-adev` (mode 0700).
+    /// `get` matches the persisted store by (protocol, host), ignoring the queried
+    /// username and path so `credential.useHttpPath` queries still hit the imported
+    /// credential. A JWT whose `exp` is within 60 seconds is a miss and that store
+    /// entry is removed; non-JWTs and undecodable tokens are returned as stored.
+    /// `store` persists to `$HOME/.adevcontainer/git-credentials` (mode 0600) deduped
+    /// by (protocol, host, username). `erase` removes protocol+host entries with an
+    /// atomic rewrite (mode 0600). Store format: one protocol/host/username/password
+    /// key block per entry, blank-line terminated, so raw values round-trip.
     static func helperScript() -> String {
         [
             "#!/bin/sh",
@@ -187,6 +405,10 @@ public struct GuestGitCredentialSeed {
             "  su=\"\"",
             "  spw=\"\"",
             "  emit() {",
+            "    if jwt_expired \"$spw\" 2>/dev/null; then",
+            "      drop_blocks user \"$sp\" \"$sh\" \"$su\"",
+            "      exit 0",
+            "    fi",
             "    if [ -n \"$quser\" ]; then",
             "      outuser=\"$quser\"",
             "    else",
@@ -276,18 +498,26 @@ public struct GuestGitCredentialSeed {
             "  exit 0",
             "  ;;",
             "erase)",
+            "  [ -n \"$qproto\" ] && [ -n \"$qhost\" ] || exit 0",
+            "  [ -f \"$STORE\" ] || exit 0",
+            "  drop_blocks host \"$qproto\" \"$qhost\"",
             "  exit 0",
             "  ;;",
             "esac",
             "exit 0"
         ].joined(separator: "\n")
+            .replacingOccurrences(
+                of: "done\ncase \"${1:-}\" in",
+                with: "done\n\(Self.helperSupportScript())\ncase \"${1:-}\" in"
+            )
     }
 
     /// One in-container script: write the username-agnostic credential helper, then
-    /// approve stdin blocks. `appendGlobalHelper` is the pre-Azure up/rebuild path
-    /// (`git config --global --add`). `configureAzureHost` adds only the
-    /// `dev.azure.com` URL-scoped helper override and `useHttpPath`. Never resets
-    /// the global helper list. Entries travel via stdin — never argv or env.
+    /// approve stdin blocks. `appendGlobalHelper` is the non-Azure path
+    /// (`git config --global --add`). `configureAzureHost` ensures the product helper
+    /// is the only empty-free `dev.azure.com` URL-scoped helper and sets `useHttpPath`.
+    /// Never writes an empty URL-scoped helper and never resets the global helper list.
+    /// Entries travel via stdin — never argv or env.
     static func seedScript(appendGlobalHelper: Bool = true, configureAzureHost: Bool = false) -> String {
         var lines = [
             "set -e",
@@ -329,10 +559,32 @@ public struct GuestGitCredentialSeed {
             lines.append("git config --global --add credential.helper \"$HELPER\" >/dev/null 2>&1")
         }
         if configureAzureHost {
-            // Empty URL-scoped helper clears inherited helpers for dev.azure.com only.
+            // Drop an empty URL-scoped helper (it resets the chain) and keep every
+            // other value. The product helper is present exactly once. Do not reset
+            // the global credential.helper list.
             lines += [
-                "git config --global --replace-all credential.https://dev.azure.com.helper \"\" >/dev/null 2>&1",
-                "git config --global --add credential.https://dev.azure.com.helper \"$HELPER\" >/dev/null 2>&1",
+                "azure_key=\"credential.https://dev.azure.com.helper\"",
+                "azure_list=\"$HOME/.adevcontainer/.azure-helper-values\"",
+                ": > \"$azure_list\"",
+                "chmod 600 \"$azure_list\"",
+                "git config --global --get-all \"$azure_key\" > \"$azure_list\" 2>/dev/null || true",
+                "git config --global --unset-all \"$azure_key\" >/dev/null 2>&1 || true",
+                "azure_seen=0",
+                "while IFS= read -r azure_value || [ -n \"$azure_value\" ]; do",
+                "  [ -n \"$azure_value\" ] || continue",
+                "  if [ \"$azure_value\" = \"$HELPER\" ]; then",
+                "    if [ \"$azure_seen\" -eq 0 ]; then",
+                "      git config --global --add \"$azure_key\" \"$azure_value\" >/dev/null 2>&1",
+                "      azure_seen=1",
+                "    fi",
+                "    continue",
+                "  fi",
+                "  git config --global --add \"$azure_key\" \"$azure_value\" >/dev/null 2>&1",
+                "done < \"$azure_list\"",
+                "rm -f \"$azure_list\"",
+                "if [ \"$azure_seen\" -eq 0 ]; then",
+                "  git config --global --add \"$azure_key\" \"$HELPER\" >/dev/null 2>&1",
+                "fi",
                 "git config --global credential.https://dev.azure.com.useHttpPath true >/dev/null 2>&1",
             ]
         }

@@ -153,6 +153,20 @@ struct AdevcontainerMain {
             )
             return 0
 
+        case "refresh-credentials":
+            guard parsed.passthrough.isEmpty else {
+                throw CLIError(
+                    code: CLIErrorCode.usage,
+                    message: "refresh-credentials does not accept positional arguments",
+                    hint: "Usage: \(CommandSurface.commandPrefix) refresh-credentials [--name <name>]"
+                )
+            }
+            try RefreshCredentialsCommand.run(
+                name: parsed.name,
+                runtime: runtime
+            )
+            return 0
+
         case "exec":
             let command = parsed.passthrough
             let interactive =
