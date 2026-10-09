@@ -31,7 +31,8 @@ public enum StartCommand {
         picker: InteractivePicker = .default,
         isTTY: Bool = AppleContainerConfig.stdinIsTTY(),
         openEditorPrompt: RecoveryOpenEditorPrompt = .default,
-        localEnv: [String: String] = ProcessInfo.processInfo.environment
+        localEnv: [String: String] = ProcessInfo.processInfo.environment,
+        credentials: any GitCredentialProviding = HostGitCredential()
     ) throws {
         let info = try ManagedContainers.resolveSelection(
             name: options.name,
@@ -82,6 +83,15 @@ public enum StartCommand {
             )
             return
         }
+        // Stopped → running only. Already-running returned above. Soft-fail: a bad
+        // refresh must not fail start, delete the container, or enter recovery.
+        GuestGitCredentialSeed.refreshSoft(
+            containerId: info.id,
+            labels: info.labels,
+            connectionUser: GuestGitCredentialSeed.connectionUser(from: info.labels),
+            runtime: runtime,
+            credentials: credentials
+        )
         // Remelt after start for postStart/postAttach. Never run initialize here:
         // volume config becoming readable must not violate initialize-before-start.
         if hooksConfig == nil {

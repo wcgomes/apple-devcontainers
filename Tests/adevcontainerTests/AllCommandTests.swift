@@ -974,7 +974,21 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
             }
         ]
         let creds = SeedMockCredential()
-        creds.defaultResult = .success(GitHTTPSCredentials(username: "u", password: "p"))
+        creds.defaultResult = .success(GitHTTPSCredentials(username: "u", password: "reuse-secret"))
+        let host = RecordingHostProcessRunner()
+        let folder = resolved.labels[ContainerIdentity.labelLocalFolder] ?? workspace.path
+        host.handler = { call in
+            if call.arguments == ["-C", folder, "remote", "-v"] {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: Data("origin\thttps://dev.azure.com/org/proj/_git/repo (fetch)\n".utf8),
+                    stderr: Data()
+                )
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restore = RecordingHostProcessRunner.install(host)
+        defer { restore() }
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         let result = try UpCommand.run(
             options: UpOptions(workspacePath: workspace.path, skipPull: true),
@@ -984,13 +998,16 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expectEqual(result.outcome, "success")
         try MiniTest.expect(creds.fillCalls.isEmpty, "reuse must not fill")
+        try MiniTest.expect(host.calls.isEmpty, "reuse must not ask host git")
         try MiniTest.expect(
-            !mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("credential.helper") == true },
+            !mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("git-credential-adev") == true },
             "reuse must not run a seeding exec"
         )
     }),
-    ("upStartStoppedSeedsNothing", {
-        let workspace = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+    ("upStartStoppedRefreshesCredentials", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: """
+        { "image": "alpine:3.20", "remoteUser": "vscode", "postStartCommand": "echo postStart" }
+        """)
         defer { try? FileManager.default.removeItem(at: workspace) }
         let mock = MockProcessRunner()
         let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
@@ -1005,27 +1022,526 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
                     let data = try! JSONSerialization.data(withJSONObject: [entry])
                     return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
                 }
-                if args.first == "start" {
+                if args.first == "start" || args.first == "exec" || args.first == "inspect" {
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
                 return nil
             }
         ]
+        let folder = resolved.labels[ContainerIdentity.labelLocalFolder] ?? workspace.path
+        let password = "refresh-secret-token"
+        let host = RecordingHostProcessRunner()
+        host.handler = { call in
+            if call.arguments == ["-C", folder, "remote", "-v"] {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: Data("origin\thttps://dev.azure.com/org/proj/_git/repo (fetch)\n".utf8),
+                    stderr: Data()
+                )
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restore = RecordingHostProcessRunner.install(host)
+        defer { restore() }
         let creds = SeedMockCredential()
-        creds.defaultResult = .success(GitHTTPSCredentials(username: "u", password: "p"))
+        creds.results["https://dev.azure.com/org/proj/_git/repo"] = .success(
+            GitHTTPSCredentials(username: "plantsuite", password: password)
+        )
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         let result = try UpCommand.run(
             options: UpOptions(workspacePath: workspace.path, skipPull: true),
             runtime: runtime,
             localEnv: [:],
+            isTTY: false,
             credentials: creds
         )
         try MiniTest.expectEqual(result.outcome, "success")
-        try MiniTest.expect(creds.fillCalls.isEmpty, "start-stopped must not fill")
-        try MiniTest.expect(
-            !mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("credential.helper") == true },
-            "start-stopped must not run a seeding exec"
+        try MiniTest.expectEqual(creds.fillCalls, ["https://dev.azure.com/org/proj/_git/repo"])
+        let seeds = mock.calls.filter {
+            $0.arguments.first == "exec" && $0.arguments.last?.contains("git-credential-adev") == true
+        }
+        try MiniTest.expectEqual(seeds.count, 1, "start-stopped refreshes once")
+        let script = seeds[0].arguments.last ?? ""
+        try MiniTest.expect(script.contains("credential.https://dev.azure.com.useHttpPath true"))
+        try MiniTest.expect(!script.contains("credential.https://dev.azure.com.helper \"\""))
+        try MiniTest.expect(!script.contains(password))
+        try MiniTest.expect(seeds[0].environment?.values.contains(password) != true)
+        try MiniTest.expectEqual(
+            String(data: seeds[0].stdinData ?? Data(), encoding: .utf8) ?? "",
+            "protocol=https\nhost=dev.azure.com\nusername=plantsuite\npassword=\(password)\n\n"
         )
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+        let calls = mock.calls.map(\.arguments)
+        let seedIdx = calls.firstIndex { $0.first == "exec" && $0.last?.contains("git-credential-adev") == true }
+        let hookIdx = calls.firstIndex { $0.last?.contains("echo postStart") == true }
+        try MiniTest.expect(seedIdx != nil && hookIdx != nil && seedIdx! < hookIdx!, "refresh before postStart")
+    }),
+    ("upStartStoppedRefreshSoftFails", {
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20", "postStartCommand": "echo postStart" }"#)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName,
+            state: "stopped",
+            labels: resolved.labels
+        )
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "exec", args.last?.contains("git-credential-adev") == true {
+                    return ProcessResult(
+                        exitCode: 1,
+                        stdout: Data(),
+                        stderr: Data("password=super-secret-leak https://user:tok@dev.azure.com/x\n".utf8)
+                    )
+                }
+                if args.first == "start" || args.first == "exec" || args.first == "inspect" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return nil
+            }
+        ]
+        let folder = resolved.labels[ContainerIdentity.labelLocalFolder] ?? workspace.path
+        let host = RecordingHostProcessRunner()
+        host.handler = { call in
+            if call.arguments == ["-C", folder, "remote", "-v"] {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: Data("origin\thttps://github.com/org/repo.git (fetch)\n".utf8),
+                    stderr: Data()
+                )
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restore = RecordingHostProcessRunner.install(host)
+        defer { restore() }
+        let creds = SeedMockCredential()
+        creds.results["https://github.com/org/repo.git"] = .success(
+            GitHTTPSCredentials(username: "u", password: "super-secret-leak")
+        )
+        var warnings: [String] = []
+        let prev = StatusPrinter.onWarning
+        StatusPrinter.onWarning = { warnings.append($0) }
+        defer { StatusPrinter.onWarning = prev }
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            isTTY: false,
+            credentials: creds
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expect(!warnings.isEmpty, "soft-fail warns")
+        try MiniTest.expect(!warnings.joined().contains("super-secret-leak"))
+        try MiniTest.expect(!warnings.joined().contains("user:tok"))
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" }, "soft-fail must not delete")
+        try MiniTest.expect(mock.calls.contains { $0.arguments.last?.contains("echo postStart") == true })
+    })
+]
+
+nonisolated(unsafe) let credentialRefreshCommandTests: [(String, () throws -> Void)] = [
+    ("startStoppedRefreshesCredentials", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "image": "alpine:3.20", "remoteUser": "vscode", "postStartCommand": "echo start-postStart" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        var labels = resolved.labels
+        labels[ContainerIdentity.labelManaged] = ContainerIdentity.managedValue
+        labels[ContainerIdentity.labelRemoteUser] = "vscode"
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName, state: "stopped", labels: labels, image: "alpine:3.20"
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) || args.first == "inspect" {
+                    let payload: Any = args.first == "list" ? [entry] as Any : entry as Any
+                    let data = try! JSONSerialization.data(withJSONObject: payload)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "start" || args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let folder = labels[ContainerIdentity.labelLocalFolder] ?? ws.path
+        let password = "start-refresh-secret"
+        let host = RecordingHostProcessRunner()
+        host.handler = { call in
+            if call.arguments == ["-C", folder, "remote", "-v"] {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: Data("origin\thttps://dev.azure.com/org/proj/_git/repo (fetch)\n".utf8),
+                    stderr: Data()
+                )
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restore = RecordingHostProcessRunner.install(host)
+        defer { restore() }
+        let creds = SeedMockCredential()
+        creds.results["https://dev.azure.com/org/proj/_git/repo"] = .success(
+            GitHTTPSCredentials(username: "plantsuite", password: password)
+        )
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try StartCommand.run(
+            options: StartOptions(name: resolved.containerName),
+            runtime: runtime,
+            isTTY: false,
+            credentials: creds
+        )
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "start" })
+        let seeds = mock.calls.filter {
+            $0.arguments.first == "exec" && $0.arguments.last?.contains("git-credential-adev") == true
+        }
+        try MiniTest.expectEqual(seeds.count, 1)
+        try MiniTest.expect(seeds[0].arguments.contains("-u") && seeds[0].arguments.contains("vscode"))
+        try MiniTest.expect(!seeds[0].arguments.contains { $0.contains(password) })
+        try MiniTest.expect(seeds[0].environment?.values.contains(password) != true)
+        try MiniTest.expectEqual(
+            String(data: seeds[0].stdinData ?? Data(), encoding: .utf8) ?? "",
+            "protocol=https\nhost=dev.azure.com\nusername=plantsuite\npassword=\(password)\n\n"
+        )
+        try MiniTest.expect(!(seeds[0].arguments.last ?? "").contains("helper \"\""))
+        let calls = mock.calls.map(\.arguments)
+        let seedIdx = calls.firstIndex { $0.last?.contains("git-credential-adev") == true }
+        let hookIdx = calls.firstIndex { $0.last?.contains("echo start-postStart") == true }
+        try MiniTest.expect(seedIdx != nil && hookIdx != nil && seedIdx! < hookIdx!)
+        try MiniTest.expect(!host.calls.contains { $0.arguments.contains("fetch") || $0.arguments.contains("pull") || $0.arguments.contains("push") })
+    }),
+    ("startAlreadyRunningDoesNotRefreshCredentials", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        var labels = resolved.labels
+        labels[ContainerIdentity.labelManaged] = ContainerIdentity.managedValue
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName, state: "running", labels: labels
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) || args.first == "inspect" {
+                    let payload: Any = args.first == "list" ? [entry] as Any : entry as Any
+                    let data = try! JSONSerialization.data(withJSONObject: payload)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let host = RecordingHostProcessRunner()
+        host.handler = { _ in
+            ProcessResult(
+                exitCode: 0,
+                stdout: Data("origin\thttps://github.com/org/repo.git (fetch)\n".utf8),
+                stderr: Data()
+            )
+        }
+        let restore = RecordingHostProcessRunner.install(host)
+        defer { restore() }
+        let creds = SeedMockCredential()
+        creds.defaultResult = .success(GitHTTPSCredentials(username: "u", password: "should-not-fill"))
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try StartCommand.run(
+            options: StartOptions(name: resolved.containerName),
+            runtime: runtime,
+            isTTY: false,
+            credentials: creds
+        )
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "start" })
+        try MiniTest.expect(creds.fillCalls.isEmpty)
+        try MiniTest.expect(host.calls.isEmpty)
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.last?.contains("git-credential-adev") == true })
+    }),
+    ("startRefreshSoftFailsAndContinues", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        { "image": "alpine:3.20", "postStartCommand": "echo start-postStart" }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        var labels = resolved.labels
+        labels[ContainerIdentity.labelManaged] = ContainerIdentity.managedValue
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName, state: "stopped", labels: labels
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) || args.first == "inspect" {
+                    let payload: Any = args.first == "list" ? [entry] as Any : entry as Any
+                    let data = try! JSONSerialization.data(withJSONObject: payload)
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "exec", args.last?.contains("git-credential-adev") == true {
+                    return ProcessResult(
+                        exitCode: 1,
+                        stdout: Data(),
+                        stderr: Data("password=super-secret-leak https://user:tok@example.com/x\n".utf8)
+                    )
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let folder = labels[ContainerIdentity.labelLocalFolder] ?? ws.path
+        let host = RecordingHostProcessRunner()
+        host.handler = { call in
+            if call.arguments == ["-C", folder, "remote", "-v"] {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: Data("origin\thttps://github.com/org/repo.git (fetch)\n".utf8),
+                    stderr: Data()
+                )
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restore = RecordingHostProcessRunner.install(host)
+        defer { restore() }
+        var rebuilt = false
+        StartCommand.rebuildOverride = { _ in
+            rebuilt = true
+            return RebuildResult(
+                outcome: "success",
+                containerId: resolved.containerName,
+                remoteUser: "root",
+                remoteWorkspaceFolder: "/workspaces/app",
+                containerName: resolved.containerName
+            )
+        }
+        defer { StartCommand.rebuildOverride = nil }
+        let creds = SeedMockCredential()
+        creds.results["https://github.com/org/repo.git"] = .success(
+            GitHTTPSCredentials(username: "u", password: "super-secret-leak")
+        )
+        var warnings: [String] = []
+        let prev = StatusPrinter.onWarning
+        StatusPrinter.onWarning = { warnings.append($0) }
+        defer { StatusPrinter.onWarning = prev }
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try StartCommand.run(
+            options: StartOptions(name: resolved.containerName),
+            runtime: runtime,
+            isTTY: false,
+            credentials: creds
+        )
+        try MiniTest.expect(!rebuilt, "credential refresh must not enter start recovery")
+        try MiniTest.expect(!warnings.joined().contains("super-secret-leak"))
+        try MiniTest.expect(!warnings.joined().contains("user:tok"))
+        try MiniTest.expect(!warnings.isEmpty)
+        try MiniTest.expect(mock.calls.contains { $0.arguments.last?.contains("echo start-postStart") == true })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
+    }),
+    ("refreshCredentialsRunningUsesStdin", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20", "remoteUser": "vscode" }"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
+        var labels = resolved.labels
+        labels[ContainerIdentity.labelManaged] = ContainerIdentity.managedValue
+        labels[ContainerIdentity.labelRemoteUser] = "vscode"
+        let entry = MockProcessRunner.containerListJSON(
+            id: resolved.containerName, state: "running", labels: labels
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let folder = labels[ContainerIdentity.labelLocalFolder] ?? ws.path
+        let password = "cmd-refresh-secret"
+        let host = RecordingHostProcessRunner()
+        host.handler = { call in
+            if call.arguments == ["-C", folder, "remote", "-v"] {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: Data("origin\thttps://dev.azure.com/org/proj/_git/repo (fetch)\n".utf8),
+                    stderr: Data()
+                )
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restore = RecordingHostProcessRunner.install(host)
+        defer { restore() }
+        let creds = SeedMockCredential()
+        creds.results["https://dev.azure.com/org/proj/_git/repo"] = .success(
+            GitHTTPSCredentials(username: "plantsuite", password: password)
+        )
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try RefreshCredentialsCommand.run(
+            name: resolved.containerName,
+            runtime: runtime,
+            credentials: creds
+        )
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "start" || $0.arguments.first == "stop" })
+        let seeds = mock.calls.filter {
+            $0.arguments.first == "exec" && $0.arguments.last?.contains("git-credential-adev") == true
+        }
+        try MiniTest.expectEqual(seeds.count, 1)
+        try MiniTest.expect(!seeds[0].arguments.contains { $0.contains(password) })
+        try MiniTest.expect(seeds[0].environment?.values.contains(password) != true)
+        try MiniTest.expect((seeds[0].arguments.last ?? "").contains("useHttpPath true"))
+        try MiniTest.expect(!(seeds[0].arguments.last ?? "").contains("helper \"\""))
+        try MiniTest.expectEqual(
+            String(data: seeds[0].stdinData ?? Data(), encoding: .utf8) ?? "",
+            "protocol=https\nhost=dev.azure.com\nusername=plantsuite\npassword=\(password)\n\n"
+        )
+        try MiniTest.expect(!host.calls.contains {
+            $0.arguments.contains("fetch") || $0.arguments.contains("pull") || $0.arguments.contains("push")
+        })
+    }),
+    ("refreshCredentialsVolumeUsesStampedGitURL", {
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
+            ContainerIdentity.labelLocalFolder: "volume://adev-app-ws",
+            ContainerIdentity.labelGitURL: "https://dev.azure.com/org/proj/_git/repo",
+            ContainerIdentity.labelRemoteUser: "vscode"
+        ]
+        let entry = MockProcessRunner.containerListJSON(
+            id: "vol-app", state: "running", labels: labels
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let host = RecordingHostProcessRunner()
+        host.handler = { _ in
+            ProcessResult(exitCode: 0, stdout: Data("should-not-run".utf8), stderr: Data())
+        }
+        let restore = RecordingHostProcessRunner.install(host)
+        defer { restore() }
+        let creds = SeedMockCredential()
+        creds.results["https://dev.azure.com/org/proj/_git/repo"] = .success(
+            GitHTTPSCredentials(username: "plantsuite", password: "vol-secret")
+        )
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try RefreshCredentialsCommand.run(name: "vol-app", runtime: runtime, credentials: creds)
+        try MiniTest.expect(host.calls.isEmpty, "volume refresh must not enumerate host remotes")
+        try MiniTest.expectEqual(creds.fillCalls, ["https://dev.azure.com/org/proj/_git/repo"])
+        try MiniTest.expect(mock.calls.contains { $0.arguments.last?.contains("git-credential-adev") == true })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.contains { $0.contains("vol-secret") } })
+    }),
+    ("refreshCredentialsStoppedDoesNotStart", {
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelLocalFolder: "/work/app"
+        ]
+        let entry = MockProcessRunner.containerListJSON(
+            id: "stopped-app", state: "stopped", labels: labels
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            try RefreshCredentialsCommand.run(name: "stopped-app", runtime: runtime)
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expectEqual(err.code, CLIErrorCode.containerNotRunning)
+            try MiniTest.expect(err.hint?.contains("start --name stopped-app") == true)
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "start" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "stop" })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "exec" })
+    }),
+    ("refreshCredentialsExecFailureIsRedacted", {
+        let labels: [String: String] = [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeBind,
+            ContainerIdentity.labelLocalFolder: "/work/app"
+        ]
+        let entry = MockProcessRunner.containerListJSON(
+            id: "run-app", state: "running", labels: labels
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let data = try! JSONSerialization.data(withJSONObject: [entry])
+                    return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
+                }
+                if args.first == "exec" {
+                    return ProcessResult(
+                        exitCode: 1,
+                        stdout: Data(),
+                        stderr: Data("password=super-secret-leak https://user:tok@dev.azure.com/x\n".utf8)
+                    )
+                }
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        ]
+        let host = RecordingHostProcessRunner()
+        host.handler = { call in
+            if call.arguments == ["-C", "/work/app", "remote", "-v"] {
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: Data("origin\thttps://dev.azure.com/org/proj/_git/repo (fetch)\n".utf8),
+                    stderr: Data()
+                )
+            }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+        let restore = RecordingHostProcessRunner.install(host)
+        defer { restore() }
+        let creds = SeedMockCredential()
+        creds.results["https://dev.azure.com/org/proj/_git/repo"] = .success(
+            GitHTTPSCredentials(username: "plantsuite", password: "super-secret-leak")
+        )
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            try RefreshCredentialsCommand.run(name: "run-app", runtime: runtime, credentials: creds)
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(err.message.contains("refresh"))
+            try MiniTest.expect(!err.message.contains("super-secret-leak"))
+            try MiniTest.expect(!err.message.contains("user:tok"))
+            try MiniTest.expect(!(err.hint ?? "").contains("super-secret-leak"))
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "start" || $0.arguments.first == "stop" })
+    }),
+    ("refreshCredentialsHelpAndUsage", {
+        let usage = CommandSurface.usageText()
+        try MiniTest.expect(usage.contains("refresh-credentials"))
+        let help = CommandSurface.commandHelpText("refresh-credentials") ?? ""
+        try MiniTest.expect(help.contains("refresh-credentials [--name"))
+        try MiniTest.expect(help.contains("start --name"))
+        try MiniTest.expect(help.contains("stdin"))
+        try MiniTest.expect(help.contains("fetch"))
+        try MiniTest.expect(help.contains("useHttpPath"))
+        try MiniTest.expect(CommandSurface.commandHelpText("start")?.contains("refreshes git credentials") == true)
+        try MiniTest.expect(CommandSurface.commandHelpText("up")?.contains("refreshes git credentials") == true)
     })
 ]
 
@@ -3384,7 +3900,10 @@ nonisolated(unsafe) let phase4CommandTests: [(String, () throws -> Void)] = [
         let resolved = try ConfigResolver.resolve(workspacePath: ws.path, localEnv: [:])
         var events: [String] = []
         let host = RecordingHostProcessRunner()
-        host.handler = { _ in
+        host.handler = { call in
+            if call.arguments.contains("remote") {
+                return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
             events.append("initialize")
             return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
         }

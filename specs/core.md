@@ -763,9 +763,11 @@ See also: [lifecycle-hooks.md](lifecycle-hooks.md) for hook surface details; [vs
 
 On the create paths — `up` fresh create (bind mode) and `rebuild` replacement create (bind and volume mode) — the CLI MUST seed the resolved remote connection user's git credential store in the container BEFORE any create-path lifecycle hook (onCreateCommand, updateContentCommand, postCreateCommand, postStartCommand) runs. Seeding MUST run after the create-path ownership steps.
 
-Seeding MUST write a POSIX-sh credential helper script to the connection user's home directory in the container (e.g. `$HOME/.adevcontainer/git-credential-adev`) with mode 0700, owned by the connection user. Seeding MUST configure the helper at `--global` scope via `git config --global --add credential.helper <absolute-path>`; the configuration MUST append and MUST NOT replace pre-existing credential helpers. Seeding MUST add one credential entry per unique (protocol, host, username) triple via `git credential approve`, which routes through the configured helper whose store mode persists the entry. Entries MUST NOT include a path component, so sibling repositories on the same host are covered without knowing their paths. Matching uses the URL scheme (protocol), host, and username; SSH remotes MUST NOT be seeded.
+Seeding MUST write a POSIX-sh credential helper script to the connection user's home directory in the container (e.g. `$HOME/.adevcontainer/git-credential-adev`) with mode 0700, owned by the connection user. For non-Azure HTTPS hosts, seeding MUST configure the helper at `--global` scope via `git config --global --add credential.helper <absolute-path>`; the configuration MUST append and MUST NOT replace pre-existing credential helpers. Seeding MUST add one credential entry per unique (protocol, host, username) triple via `git credential approve`, which routes through the configured helper whose store mode persists the entry. Entries MUST NOT include a path component, so sibling repositories on the same host are covered without knowing their paths. Matching uses the URL scheme (protocol) and host; the queried username and path are ignored on get. SSH remotes MUST NOT be seeded.
 
-The helper MUST implement `get`, `store`, and `erase`. On `get`, the helper MUST match the persisted store by (protocol, host) IGNORING the queried username, and MUST return the queried username (or the stored username when the query carries none) together with the stored password; when no entry matches, the helper MUST exit 0 with no output so git falls through to remaining helpers, askpass, or prompt. On `store`, the helper MUST persist the entry, deduping by (protocol, host, username), to its own store file (e.g. `$HOME/.adevcontainer/git-credentials`) with mode 0600, owned by the connection user; the helper MAY use git's store file format with percent-encoding or its own simple line format, and persisted values MUST round-trip raw username and password values (including `@` and `:` characters) without corruption. `erase` MUST be a no-op. Secrets MUST NOT be echoed to stdout or stderr outside the credential protocol and MUST NOT appear in argv.
+For `dev.azure.com`, every seed and refresh MUST NOT write an empty `credential.https://dev.azure.com.helper` value and MUST NOT reset the global `credential.helper` list. It MUST remove an existing empty value for that URL-scoped key so an old empty reset stops blocking fallthrough. It MUST ensure the product helper path is present exactly once, and MUST set `credential.https://dev.azure.com.useHttpPath` true. A pathless query proxied to host Git Credential Manager fatals with "Cannot determine the organization name" because the organization is in the URL path; the CLI MUST NOT copy host `credential.helper` (`osxkeychain` / GCM) into the guest and MUST NOT proxy pathless queries to GCM.
+
+The helper MUST implement `get`, `store`, and `erase`. On `get`, the helper MUST match the persisted store by (protocol, host) IGNORING the queried username and path, and MUST return the queried username (or the stored username when the query carries none) together with the stored password; when no entry matches, the helper MUST exit 0 with no output so git falls through to remaining helpers, askpass, or prompt. If the matched password is a JWT (exactly two dots, three segments) and the payload decodes and contains a numeric `exp` less than or equal to now plus 60 seconds, `get` MUST exit 0 with no output and MUST remove that store entry so the expired token is not replayed. If the password is not a JWT, `exp` is missing, decode fails, or base64 is unavailable, `get` MUST return the stored password. The helper MUST NOT print the password outside the credential protocol. On `store`, the helper MUST persist the entry, deduping by (protocol, host, username), to its own store file (e.g. `$HOME/.adevcontainer/git-credentials`) with mode 0600, owned by the connection user; the helper MAY use git's store file format with percent-encoding or its own simple line format, and persisted values MUST round-trip raw username and password values (including `@` and `:` characters) without corruption. On `erase`, the helper MUST remove every store entry matching protocol and host, ignoring username and path, by an atomic rewrite that leaves the store mode 0600. No match MUST exit 0. `erase` MUST NOT be a no-op. Secrets MUST NOT be echoed to stdout or stderr outside the credential protocol and MUST NOT appear in argv or the environment.
 
 Credentials MUST be acquired on the HOST through the shared acquisition contract declared by **In-container full clone populate (auth by URL scheme)** ([clone.md](clone.md)): `git credential fill` (protocol/host/path from URL) with `GIT_TERMINAL_PROMPT=0`, optional `ADEVCONTAINER_GIT_TOKEN`, and the `gh auth token` fallback — the existing `HostGitCredential.fillHTTPS` path. When fill returns nil for a URL, the CLI MUST skip that URL silently.
 
@@ -780,15 +782,17 @@ Seeding failures (for example missing in-container git or an exec failure) MUST 
 
 Secrets MUST NEVER appear in success JSON, labels, StatusPrinter progress lines, or logged errors; errors MUST redact URL userinfo and credential material (same redaction as the clone flow).
 
-Non-create paths MUST NOT seed: `up` reuse of a running matching container, `up` start-stopped, and bare `start` MUST NOT run seeding.
+A real `start` (stopped → running) and `up` start-stopped MUST re-seed the same way after the container is running and before restart postStart. Bind mode uses the host workspace's HTTPS fetch remotes; volume mode uses the stamped `devcontainer.git_url`. Silent skip — no warning and no failure — MUST apply when host git is missing, when there are no HTTPS remotes, or when fill returns nil. Refresh failure MUST soft-fail with a redacted stderr warning and MUST NOT fail start or up, delete the container, or enter recovery. Already-running `start` and `up` reuse of an already-running container MUST NOT re-seed.
 
-`clone` is covered-by-design: the product MUST NOT add a second seeding mechanism on `clone`; clone's populate already configures `credential.helper store` + approve before hooks, and regression coverage MUST prove the store outcome is delivered without a seeding call.
+`adevcontainer refresh-credentials [--name]` MUST use the same managed selection as `start` (interactive picker or `--name`). The target MUST already be running. If it is stopped, the command MUST fail with a structured error whose hint names `start --name <name>` and MUST NOT start or stop the container. An exec failure MUST fail the command with a redacted error. The command MUST NOT run git fetch, pull, or push, and MUST NOT write the workspace. Credential material MUST enter the guest via stdin only, never argv or environment.
+
+`clone` keeps its existing populate path. Non-Azure clone configures local `credential.helper store` plus pathless approve and MUST NOT install the product helper. Azure clone MUST install the same URL-scoped product helper via `installHTTPSCredential` (no second mechanism, no empty helper reset, `useHttpPath` true) and MUST NOT use pathless `credential.helper store` for that host.
 
 #### Scenario: up bind fresh create seeds the store before hooks
 
 - Given a bind-mode `up` fresh create whose host workspace has an HTTPS fetch remote `https://dev.azure.com/plantsuite/PlantSuite/_git/GitOps` and host `git credential fill` returns credentials
 - When the create path runs after start and before create-path hooks
-- Then the CLI acquires credentials on the host and runs an in-container exec as the connection user that writes the credential helper script, configures `credential.helper --add` with its absolute path at `--global` scope, and approves an entry for (https, dev.azure.com, plantsuite) BEFORE the first create-path hook exec
+- Then the CLI acquires credentials on the host and runs an in-container exec as the connection user that writes the credential helper script, configures the `dev.azure.com` URL-scoped helper (no empty helper value, product helper present once, `useHttpPath` true) without resetting the global `credential.helper` list, and approves an entry for (https, dev.azure.com, plantsuite) BEFORE the first create-path hook exec
 
 #### Scenario: sibling repositories on the same host are covered
 
@@ -844,11 +848,55 @@ Non-create paths MUST NOT seed: `up` reuse of a running matching container, `up`
 - When seeding runs
 - Then stderr carries a warning, the create path continues through hooks and succeeds absent other failures, the container is NOT deleted, and bring-up recovery is NOT entered
 
-#### Scenario: non-create paths never seed
+#### Scenario: expired JWT get is a miss and drops the entry
 
-- Given a matching running bind-mode container, a stopped bind-mode container, or a bare `start` target
-- When `up` reuses the running container, `up` starts the stopped one, or `start` runs
-- Then no seeding exec runs
+- Given a store entry whose password is a JWT (exactly two dots, three segments) and whose payload decodes to a numeric `exp` less than or equal to now plus 60 seconds
+- When the helper handles `get` for that protocol and host
+- Then the helper exits 0 with no output, removes that store entry, and does not print the password outside the credential protocol
+
+#### Scenario: undecodable or non-JWT passwords are still returned
+
+- Given a store entry whose password is not a JWT, or is a JWT whose `exp` is missing, whose payload does not decode, or for which base64 is unavailable
+- When the helper handles `get` for that protocol and host
+- Then the helper returns the stored password with the queried username (or the stored username when the query has none)
+
+#### Scenario: erase removes protocol and host matches
+
+- Given a store with two entries for the same protocol and host and one entry for another host
+- When the helper handles `erase` for that protocol and host, including a query that names a different username or a path
+- Then both matching entries are removed by an atomic rewrite, the other host remains, the store mode is 0600, and stdout and stderr are empty
+- And an erase with no match exits 0 and leaves the store unchanged
+
+#### Scenario: Azure seed removes an empty helper and does not write one
+
+- Given a global git config that already has an empty `credential.https://dev.azure.com.helper` value and another non-empty helper for that URL
+- When Azure seeding or refresh configures the URL-scoped helper
+- Then the empty value is gone, the product helper path is present exactly once, `credential.https://dev.azure.com.useHttpPath` is true, pre-existing global `credential.helper` values remain, and no empty helper value is written
+
+#### Scenario: refresh-credentials refreshes a running container
+
+- Given a running managed container and host `git credential fill` returns a credential for its bind remotes or stamped git URL
+- When the user runs `adevcontainer refresh-credentials --name <name>`
+- Then the CLI execs the seed script in that container with the credential on stdin only, does not start or stop the container, and does not fetch, pull, push, or write the workspace
+
+#### Scenario: refresh-credentials refuses a stopped container
+
+- Given a stopped managed container
+- When the user runs `adevcontainer refresh-credentials --name <name>`
+- Then the command fails with a structured error whose hint names `start --name <name>`, and the CLI does not start, stop, or exec the container
+
+#### Scenario: real start and up start-stopped refresh and soft-fail
+
+- Given a stopped managed container
+- When `adevcontainer start` or `up` starts it and the credential exec fails
+- Then stderr carries a redacted warning, the command still succeeds absent other failures, the container is not deleted, and bring-up or start recovery is not entered
+- And the refresh runs after the container is running and before restart postStart
+
+#### Scenario: already-running start and up reuse do not refresh
+
+- Given a matching running container
+- When `up` reuses it, or `start` finds it already running
+- Then no credential refresh exec runs
 
 #### Scenario: secrets are redacted on the seeding error path
 

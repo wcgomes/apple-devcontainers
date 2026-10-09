@@ -256,6 +256,15 @@ public enum UpCommand {
                         resetExistingName: existing.name
                     )
                 }
+                // Stopped → running only. Reuse of an already-running container returned
+                // above. Soft-fail: do not fail up, delete the container, or recover.
+                GuestGitCredentialSeed.refreshSoft(
+                    containerId: existing.id,
+                    labels: existing.labels,
+                    connectionUser: GuestGitCredentialSeed.connectionUser(from: existing.labels),
+                    runtime: runtime,
+                    credentials: credentials
+                )
                 var reuseConfig = configForReuse(resolved.config, labels: existing.labels)
                 PostAttachConfigLoader.mergeFeaturePostAttach(
                     into: &reuseConfig,

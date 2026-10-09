@@ -2827,6 +2827,7 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         let script = seeds[0].arguments.last ?? ""
         try MiniTest.expect(script.contains("credential.https://dev.azure.com.helper"))
         try MiniTest.expect(script.contains("credential.https://dev.azure.com.useHttpPath true"))
+        try MiniTest.expect(!script.contains("credential.https://dev.azure.com.helper \"\""), "Azure clone must not install an empty helper reset")
         try MiniTest.expect(!script.contains("git config --global --replace-all credential.helper"))
         try MiniTest.expect(!script.contains("git config --global --add credential.helper"))
         try MiniTest.expect(!script.contains("credential.helper store"))

@@ -338,7 +338,7 @@ public enum CommandSurface {
         CLIError(
             code: CLIErrorCode.usage,
             message: "Unknown subcommand '\(subcommand)'",
-            hint: "Try: doctor | plugin | up | clone | rebuild | list | start | exec | stop | delete | purge | inspect"
+            hint: "Try: doctor | plugin | up | clone | rebuild | list | start | refresh-credentials | exec | stop | delete | purge | inspect"
         )
     }
 
@@ -359,7 +359,9 @@ public enum CommandSurface {
           up [-w path]        Create/start/reuse bind-mode dev container (host path)
           clone <git-url>     Clone repo into volume-mode dev container (managed)
           list [--json]       List managed dev containers (up + clone)
-          start [--name]      Start a stopped managed container (initialize + postStart on real start; --json suppresses recovery prompt)
+          start [--name]      Start a stopped managed container (initialize + postStart on real start; --json suppresses recovery prompt). A real start refreshes git credentials; already running does not
+          refresh-credentials [--name]
+                              Refresh git credentials in a running managed container from the host (does not start, stop, fetch, pull, or push)
           exec [-it] [--name] [--] [cmd...]  Run a command (or shell) in a managed dev container
           stop [--name]       Stop a managed dev container (name or picker)
           delete [--name]     Remove container only (not workspace volume)
@@ -370,7 +372,7 @@ public enum CommandSurface {
 
         Options:
           -w, --workspace <path>   Workspace root for `up` only (default: cwd)
-          --name <container>       Managed container name/id (exec/start/stop/delete/purge/rebuild/inspect)
+          --name <container>       Managed container name/id (exec/start/refresh-credentials/stop/delete/purge/rebuild/inspect)
           --resume <config-dir>    Resume clone from a retained config checkout (clone only)
           --reuse-volume           Keep an existing clone workspace volume (clone only)
           --replace-volume         Delete an existing clone workspace volume and clone fresh (clone only)
@@ -509,6 +511,10 @@ public enum CommandSurface {
             apply. postAttach is CLI attach after waitFor (not --vscode-gated).
             Settings and extensions from customizations.vscode apply by default after
             create-path hooks (and on reuse / start-stopped when the marker is pending).
+            Starting a stopped matching container refreshes git credentials from the host
+            before postStart (soft-fail; does not fail up or enter recovery). Reusing an
+            already-running container does not refresh. Use refresh-credentials for a
+            container that is already running.
             Order with --vscode: apply → open → postAttach. Open soft-fail does not skip
             postAttach. postAttach failure fails up but keeps the container.
             Apply is soft-fail with marker skip when matched.
@@ -578,8 +584,11 @@ public enum CommandSurface {
             \(cmd) start [--name <container>] [--vscode] [--json]
 
             Start a stopped managed container. Real start runs host initializeCommand
-            (when a host workspace exists), then config postStartCommand and remelted
-            feature postStart. Already running is success no-op for those hooks.
+            (when a host workspace exists), refreshes git credentials from the host
+            (soft-fail; does not fail start or enter recovery), then config postStartCommand
+            and remelted feature postStart. Already running does not refresh credentials
+            and is a success no-op for those hooks. Use refresh-credentials to refresh a
+            container that is already running.
 
             --vscode: best-effort open VS Code on the labeled remote workspace folder after
             start (inspect for id/image/folder). Soft-fail open. postAttach runs after a
@@ -589,6 +598,24 @@ public enum CommandSurface {
             (default Y) and delegates to `rebuild --name <name>`; decline/EOF, non-TTY,
             and --json fail with that exact rebuild hint. Start never opens an editor or
             retries start. Not full extension parity.
+            """
+        case "refresh-credentials":
+            return """
+            \(cmd) refresh-credentials [--name <container>]
+
+            Refresh git credentials in a running managed container from the host git
+            credential store. Bind mode reads the host workspace's HTTPS fetch remotes;
+            volume mode uses the stamped git URL. Selection matches start (--name or
+            the interactive picker).
+
+            The container must already be running. If it is stopped, this command fails
+            and does not start it — run `\(cmd) start --name <name>` (start also refreshes
+            credentials). Already-running start and up reuse do not refresh.
+
+            Does not git fetch, pull, or push, and does not write the workspace.
+            Credential material is read on the host and passed to the guest on stdin only,
+            never in argv or the environment. An exec failure fails this command.
+            dev.azure.com keeps useHttpPath and does not install an empty helper reset.
             """
         case "exec":
             return """

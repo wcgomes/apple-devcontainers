@@ -1,7 +1,7 @@
 # Apple Dev Container CLI (adevcontainer)
 
 [![CI](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml/badge.svg)](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-1163%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
+[![tests](https://img.shields.io/badge/tests-1176%2B-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Native Swift CLI that reads `devcontainer.json` and runs development environments on Apple [`container`](https://github.com/apple/container).
@@ -103,7 +103,7 @@ Apple upgrades wipe the plugin directory. PATH `adevcontainer` survives. Restage
 
 ### Interactive picker
 
-The `start`, `exec`, `stop`, `delete`, `purge`, `rebuild`, and `inspect` commands open an interactive picker (picklist) in an interactive TTY when `--name` is not provided and multiple managed containers exist. In a non-interactive terminal, `--name <name>` is required in this case.
+The `start`, `refresh-credentials`, `exec`, `stop`, `delete`, `purge`, `rebuild`, and `inspect` commands open an interactive picker (picklist) in an interactive TTY when `--name` is not provided and multiple managed containers exist. In a non-interactive terminal, `--name <name>` is required in this case.
 
 | Command | Purpose |
 | --- | --- |
@@ -114,7 +114,8 @@ The `start`, `exec`, `stop`, `delete`, `purge`, `rebuild`, and `inspect` command
 | `adevcontainer clone <git-url> [--vscode] [--resume <config-dir>]` | Clone a repository into a named volume and start its dev container |
 | `adevcontainer exec [-it] [--name <name>] [--] [cmd…]` | Open a shell or run a command in a running managed container |
 | `adevcontainer list [--json]` | List managed dev containers |
-| `adevcontainer start [--name <name>] [--vscode] [--json]` | Start a container by name or with the interactive picker |
+| `adevcontainer start [--name <name>] [--vscode] [--json]` | Start a container by name or with the interactive picker. A real start refreshes git credentials; already running does not |
+| `adevcontainer refresh-credentials [--name <name>]` | Refresh git credentials in a running managed container from the host |
 | `adevcontainer stop [--name <name>]` | Stop a container by name or with the interactive picker |
 | `adevcontainer inspect [--name <name>]` | Inspect a container by name or with the interactive picker |
 | `adevcontainer delete [--name <name>]` | Remove a container, keeping its managed volumes |
