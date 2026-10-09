@@ -71,7 +71,7 @@ After parse, the resolver MUST apply this substitution subset anywhere string va
 | `${localWorkspaceFolderBasename}` | Basename of the workspace root |
 | `${localEnv:VAR}` | Value of host environment variable `VAR` (empty string if unset, unless a default form is later specified) |
 | `${containerWorkspaceFolder}` | Resolved container workspace folder path (after `workspaceFolder` resolution) |
-| `${devcontainerId}` | Resource identity stem `adev-{base}-{hash12}` (empty resource base → `adev-{hash12}`). **Base** is the sanitized workspace folder basename (`up`) or git URL repo basename (`clone`) only — MUST NOT use config `name`. Hash material matches the product workspace volume (bind: workspace path + config path; volume: normalized git URL + config relative path). MUST NOT be the create `--name` / DNS hostname. Official meaning is unique + stable across rebuilds; this stem is that analogue. |
+| `${devcontainerId}` | Resource identity stem `adev-{base}-{hash12}` (empty resource base → `adev-{hash12}`). **Base** is the sanitized workspace folder basename (`up`) or git URL repo basename (`clone`) only — MUST NOT use config `name`. Hash material matches the product workspace volume (bind: workspace path + config path; volume: normalized git URL + config relative path). MUST NOT be the create `--name` / DNS hostname. Official `${devcontainerId}` is unique and stable across rebuilds; this stem is the product's stand-in for that unique, rebuild-stable id. |
 
 Unsupported substitution tokens MUST cause a structured error naming the token. Substitution MUST run before runtime admission and mount/port mapping.
 
@@ -377,7 +377,7 @@ The existing known optional families remain warn-and-ignore in default mode: doc
 **Blocked inputs — Features-aware**
 
 - `runArgs` entries not on the runArgs allowlist and not in the registered warn-and-ignore family
-- First-class smuggling via runArgs (`-e`, `-u`, `-w`, `-p`, `-v`, …)
+- First-class collisions via runArgs (`-e`, `-u`, `-w`, `-p`, `-v`, …)
 - Docker Compose keys / compose-file driven multi-service config
 - Unknown top-level dangerous properties; neither `image` nor nested `build`, or both together; invalid Feature option shapes; hostRequirements shortfalls; unsupported substitutions
 - Top-level `dockerFile` / `dockerfile` / `context`
@@ -442,7 +442,7 @@ The existing known optional families remain warn-and-ignore in default mode: doc
 - When config is validated
 - Then admission succeeds; the docker-* ref is absent from admitted features; stderr warns naming the feature
 
-#### Scenario: Non-ood features no longer rejected as blanket-unsupported
+#### Scenario: Features other than docker-outside-of-docker are no longer rejected as blanket-unsupported
 - Given `features` with only `ghcr.io/devcontainers/features/node:1`
 - When config is validated at admission
 - Then the CLI does not fail with a blanket “features are not supported” error
@@ -681,11 +681,11 @@ postAttach is **not** part of create-path delete-on-fail. Settings/open soft-fai
 | Fresh create-path `up`/`clone`/`rebuild` with well-formed settings | after create-path hooks: settings merge (soft-fail); marker/idempotency rules |
 | Fresh create-path without settings (and no pending payload) | no settings apply required |
 | Any path with well-formed extensions, `--vscode` absent | extensions not installed by CLI on that invocation |
-| Any path with well-formed extensions, `--vscode` set, marker pending/drift | before open: extensions install (soft-fail; flag gate only — runs even if open later soft-fails); then open; then postAttach only on open success per existing matrix |
+| Any path with well-formed extensions, `--vscode` set, marker pending/drift | before open: extensions install (soft-fail; flag gate only — runs even if open later soft-fails); then open; then postAttach only on open success per the postAttach rows above |
 | Any path with matching marker for full normalized payload | skip redundant settings+extensions apply |
 | `start` / reuse with loadable config and marker drift | settings repair when applicable; extensions only when `--vscode` is set and still pending (not gated on open success) |
 
-postAttach matrix rows and gating text above remain in force. Customizations apply is **not** part of create-path delete-on-fail and **not** folded into postAttach execution.
+The postAttach rows in the lifecycle hook matrix above, and the gating text above, remain in force. Customizations apply is **not** part of create-path delete-on-fail and **not** folded into postAttach execution.
 
 Create-path cleanup is unchanged: if any create-path hook fails before the command returns success, the CLI MUST delete the new/created container (extend to onCreate, updateContent, postCreate, and first-create postStart). On `rebuild`, delete-on-fail applies to the **new** container only (workspace/config volumes preserved); eligible hard post-delete failures then offer mode-split recovery.
 
@@ -745,7 +745,7 @@ Create-path cleanup is unchanged: if any create-path hook fails before the comma
 - When the user runs `adevcontainer up` for that workspace
 - Then the CLI fails with `config_hash_mismatch` and does not delete the container
 - And the error hint mentions `adevcontainer rebuild` and managed selection (`--name` or auto)
-#### Scenario: rebuild hook matrix row applies
+#### Scenario: rebuild runs the fresh-create hook order
 - Given a managed container being rebuilt with a config carrying initialize plus the four create-path hooks
 - When `rebuild` runs the fresh create-path on the new container
 - Then initialize runs on the host, then onCreate → updateContent → postCreate → postStart execute on the new container, and a first create-path hook failure deletes only the new container
@@ -1052,7 +1052,7 @@ The repository MUST provide pure JSON capability fixtures used by tests and docs
 | `Tests/Fixtures/lifecycle.json` | postCreateCommand |
 | `Tests/Fixtures/lifecycle-hooks.json` | lifecycle hooks |
 | `Tests/Fixtures/runargs-host.json` | runArgs + hostRequirements |
-| `Tests/Fixtures/features-node.json` | OCI Features runner (node only; no docker-ood) |
+| `Tests/Fixtures/features-node.json` | OCI Features runner (node only; no docker-outside-of-docker) |
 | `Tests/Fixtures/features-local.json` | Local path Features runner (sample-a + sample-b) |
 
 Fixtures MUST be valid for their capability (no hard-error props such as Compose). They MAY include warn-skip surface when testing that path; ordinary fixtures SHOULD remain free of docker-* / privileged noise. They SHOULD align field styles with `reference/devcontainer.json` where applicable (image family, env keys, mount shapes, ports) while remaining Apple-container-runnable after warn-skips. Existing core fixtures MUST remain valid under lifecycle / runArgs / hostRequirements / Features-aware admission (configs without `features` behave as today).

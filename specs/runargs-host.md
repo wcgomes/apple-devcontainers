@@ -55,7 +55,7 @@ Each skipped entry MUST emit a stderr warning naming the entry and that it is ig
 
 **Still hard-error**
 
-- First-class smuggling flags (`-e`/`-u`/`-w`/`-p`/`-v`/… listed above)
+- First-class collisions: runArgs flags for first-class properties (`-e`/`-u`/`-w`/`-p`/`-v`/… listed above); hard-error even if that property is unset
 - Any other flag or bare token not consumed by the allowlist rules above
 - Incomplete valued forms (e.g. bare `--cap-add` with no name)
 
@@ -66,7 +66,7 @@ Errors MUST name the offending `runArgs` entry and state allowlist or first-clas
 - When config is resolved and a create request is built
 - Then admission succeeds and create argv includes `--init` and the corresponding `--cap-add` / `--cap-drop` forms supported by the runtime mapper
 
-#### Scenario: Wave A+B allowlisted flags admit and map
+#### Scenario: shm-size, dns, tmpfs, named network, and --rosetta/--ssh/--read-only admit and map
 - Given `runArgs` including `--shm-size=64m`, `--dns=8.8.8.8`, `--tmpfs=/tmp:rw`, `--network=mynet`, `--rosetta`, `--ssh`, `--read-only`
 - When config is resolved and a create request is built
 - Then admission succeeds; create argv includes `--shm-size`/`64m`, `--dns`/`8.8.8.8`, `--tmpfs`/`/tmp` (opts stripped), `--network`/`mynet`, `--rosetta`, `--ssh`, `--read-only`
@@ -186,7 +186,7 @@ The repository MUST provide pure JSON fixtures for lifecycle, runArgs, and hostR
 | `Tests/Fixtures/lifecycle-hooks.json` | `onCreateCommand`, `updateContentCommand`, `postCreateCommand`, `postStartCommand`; MAY include admitted `postAttachCommand` |
 | `Tests/Fixtures/runargs-host.json` | Allowlisted `runArgs` and parseable `hostRequirements` (`memory` and/or `cpus`) |
 
-Ordinary fixtures MUST NOT include Compose or unknown/first-class-smuggling runArgs (hard-error). Privileged/device family entries are valid warn-skip inputs (see warn-skip scenarios); keep default fixtures free of them unless exercising that path. They SHOULD remain Apple-container-runnable for optional integration tests.
+Ordinary fixtures MUST NOT include Compose, unknown runArgs, or runArgs flags for first-class properties (hard-error even if that property is unset). Privileged/device family entries are valid warn-skip inputs (see warn-skip scenarios); keep default fixtures free of them unless exercising that path. They SHOULD remain Apple-container-runnable for optional integration tests.
 
 #### Scenario: Lifecycle / runArgs / hostRequirements fixtures admit
 - Given each lifecycle / runArgs / hostRequirements fixture file

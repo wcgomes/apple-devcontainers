@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Lifecycle hook surface for `initializeCommand` through `postAttachCommand` (string | argv | object-map forms, parallel object-map, create-path order, resume/reuse behavior, delete-on-fail), plus `waitFor`, `userEnvProbe`, and `shutdownAction`. postAttach execution lives in [vscode.md](vscode.md); create-path matrices on `up` also appear in [core.md](core.md).
+Lifecycle hook surface for `initializeCommand` through `postAttachCommand` (string | argv | object-map forms, parallel object-map, fresh-create (create-path) hook order, resume/reuse behavior, delete-on-fail), plus `waitFor`, `userEnvProbe`, and `shutdownAction`. postAttach execution lives in [vscode.md](vscode.md); the hooks that run on fresh create, resume, and reuse of `up` are also specified in [core.md](core.md) **Up lifecycle**.
 
 ## Requirements
 
@@ -310,4 +310,4 @@ This requirement MUST NOT change hook order, admitted forms, fail/delete-on-fail
 - When the CLI executes that hook
 - Then `==> Running …` status lines are not printed and the hook’s output still appears on host stderr as framed internal tool lines
 
-See also: [core.md](core.md) **Up lifecycle** for the create/reuse/start path matrix (including postAttach and vscode customizations rows); [vscode.md](vscode.md) for **postAttachCommand policy (CLI-only)**; [features.md](features.md) **Feature postStart remelt on resume** and **Features progress status lines** for remelt and StatusPrinter / QUIET / `--json` norms; [terminal-output.md](terminal-output.md) for framing/color/QUIET presentation.
+See also: [core.md](core.md) **Up lifecycle** for which hooks run on create, reuse, and start (including the postAttach and vscode customizations rows); [vscode.md](vscode.md) for **postAttachCommand policy (CLI-only)**; [features.md](features.md) **Feature postStart remelt on resume** and **Features progress status lines** for re-merging feature postStart on resume and for StatusPrinter / QUIET / `--json` norms; [terminal-output.md](terminal-output.md) for framing/color/QUIET presentation.

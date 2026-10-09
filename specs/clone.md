@@ -169,7 +169,7 @@ On `clone` create, the CLI MUST:
    - **Reuse:** MUST NOT delete that workspace volume, including failure cleanup after create, start, ownership, populate, or hooks. MUST NOT run in-container git clone populate over an existing tree. If the mounted volume has no object entries other than `lost+found`, populate is allowed. If it has entries, skip populate and keep the tree; still apply author identity when `.git` exists; still overlay an edited `devcontainer.json` on `--resume`/recovery when that path already exists.
    - **Replace:** delete-then-create. Failure cleanup MAY delete only the volume this invocation created after the operator chose replace.
    - Config `type=volume` mounts remain list-then-create/reuse per Named volume reuse policy — no prompt. `rebuild` MUST remain unable to delete `*-ws`.
-2. **`rebuild` carve-out:** `rebuild` of a volume-mode managed container MUST **reuse** the existing `*-ws` volume tree with its data and MUST NOT delete, replace, or re-populate it; MUST NOT run git re-clone or `git pull` inside it. The freshness rule applies to `clone` only.
+2. **`rebuild` exception:** `rebuild` of a volume-mode managed container MUST **reuse** the existing `*-ws` volume tree with its data and MUST NOT delete, replace, or re-populate it; MUST NOT run git re-clone or `git pull` inside it. The freshness rule applies to `clone` only.
 3. Mount that volume as the **container workspace folder** (the implicit workspace mount). MUST NOT bind-mount a durable host project directory as the workspace for clone-created containers.
 4. **Existing occupant of the create name:** classify per **Create-name occupancy classification**. Same-workspace same-name MUST fail closed (MUST NOT silently reuse, replace, or attach; MUST NOT offer rename-to-duplicate). Foreign occupant MUST follow **Foreign create-name collision offer**. Same-workspace different-name MUST fail with a delete-hint.
 5. Set labels on create:
@@ -360,7 +360,7 @@ before returning the structured failure. A reused pre-existing workspace volume 
 
 **Lifecycle (clone fresh create)**
 
-At the start of `clone`, when a host checkout exists, the CLI MUST run host `initializeCommand` per [lifecycle-hooks.md](lifecycle-hooks.md) **initializeCommand host execution**. After successful populate, `clone` MUST run create-path lifecycle hooks with the **same matrix as `up` fresh create**:
+At the start of `clone`, when a host checkout exists, the CLI MUST run host `initializeCommand` per [lifecycle-hooks.md](lifecycle-hooks.md) **initializeCommand host execution**. After successful populate, `clone` MUST run create-path lifecycle hooks in the **same order as `up` fresh create**:
 
 `onCreateCommand` → `updateContentCommand` → `postCreateCommand` → `postStartCommand`
 
@@ -396,7 +396,7 @@ At the start of `clone`, when a host checkout exists, the CLI MUST run host `ini
 - Then clone fails structured, the managed dev container is deleted, the workspace `*-ws` volume is deleted, and temps are cleaned up
 - And a reused pre-existing workspace volume is not deleted
 
-See also: [core.md](core.md) **Up lifecycle** and [lifecycle-hooks.md](lifecycle-hooks.md) for the shared create-path hook matrix; [vscode.md](vscode.md) for postAttach policy.
+See also: [core.md](core.md) **Up lifecycle** and [lifecycle-hooks.md](lifecycle-hooks.md) for which hooks run on fresh create; [vscode.md](vscode.md) for postAttach policy.
 
 ---
 
