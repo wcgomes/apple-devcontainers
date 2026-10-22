@@ -1,6 +1,10 @@
 /* Synthetic credentials only. Exercises the executable, including the shipped ELF on Linux. */
 #define _POSIX_C_SOURCE 200809L
 #define _DARWIN_C_SOURCE
+/* Optimized Zig builds define NDEBUG; this harness requires active assertions. */
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
