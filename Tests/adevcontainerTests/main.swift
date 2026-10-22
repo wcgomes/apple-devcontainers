@@ -21,6 +21,8 @@ TerminalStyle.colorOverride = false
 // Force-link test translation units by referencing their register functions.
 let credentialTests = gitCredentialBrokerPolicyTests + gitCredentialProtocolTests + guestGitCredentialArtifactTests + credentialDuplexProcessTests + automaticHostGitCredentialTests + gitCredentialRuntimeTests + gitCredentialBrokerServiceTests + gitCredentialRelayChannelTests + gitCredentialBrokerEntryTests + gitCredentialConnectionTests + credentialProviderCrashTests + automaticGitCredentialsCommandTests + gitCredentialBrokerSmokeTests + gitCredentialBrokerDetachedTests
 let allTests: [(String, () throws -> Void)] = credentialTests
+    + sshForwardingPolicyTests
+    + automaticSSHForwardingCommandTests
     + terminalStyleTests
     + statusPrinterTests
     + processRunnerFramingTests
@@ -104,7 +106,9 @@ let automaticCloneTests = cloneCommandTests.filter { ["cloneHTTPSNonAzureUsesAut
 let automaticRebuildTests = rebuildPhaseTests.filter { ["rebuildBindSeedsFromHostRemotesBeforeHooks", "rebuildVolumeSeedsFromStampedGitURLWithoutEnumeration", "rebuildVolumeMissingGitURLSkipsSilently", "rebuildSeedingFailureWarnsAndContinues", "rebuildNeverSeedsOldContainerBeforeDelete", "rebuildBindIdentityOrderAndConnectionUser", "rebuildVolumeIdentityReadsGuestBeforeDelete", "rebuildGlobalIdentityFailureWarnsAndContinues", "rebuildVolumeGlobalFailurePreservesWorkspaceAndHook"].contains($0.0) }
 let automaticLifecycleTests = upTests.filter { $0.0.hasPrefix("upFreshCreate") || $0.0.hasPrefix("upReuseRunning") || $0.0.hasPrefix("upStartStopped") } + credentialRefreshCommandTests + gitCredentialDiscoveryTests + automaticRebuildTests + vscodeOpenCommandTests.filter { $0.0 == "realBindStartRunsInitializeCommandFromStampedHostPath" }
 let selectedTests: [(String, () throws -> Void)]
-if ProcessInfo.processInfo.environment["ADEVCONTAINER_CREDENTIAL_TESTS_ONLY"] == "1" {
+if ProcessInfo.processInfo.environment["ADEVCONTAINER_SSH_TESTS_ONLY"] == "1" {
+    selectedTests = sshForwardingPolicyTests + automaticSSHForwardingCommandTests
+} else if ProcessInfo.processInfo.environment["ADEVCONTAINER_CREDENTIAL_TESTS_ONLY"] == "1" {
     selectedTests = credentialTests + legacyCredentialTests + automaticCloneTests + automaticLifecycleTests
 } else if ProcessInfo.processInfo.environment["ADEVCONTAINER_TESTS_SYNTHETIC_ONLY"] == "1" {
     // AllIntegrationTests contains runtime mutations/network checks behind its

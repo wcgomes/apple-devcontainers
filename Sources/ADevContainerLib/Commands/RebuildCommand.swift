@@ -692,6 +692,12 @@ public enum RebuildCommand {
 
         // ═══════════════════════════ PHASE B (destructive create path) ═══════════════════════════
 
+        let ssh = isVolumeMode ? SSHForwardingPolicy.Decision() : SSHForwardingPolicy.evaluate(
+            workspace: stampedLocalFolder(labels), environment: localEnv,
+            explicitSSH: effectiveConfig.runArgs.contains(.ssh)
+        )
+        if let warning = ssh.warning { StatusPrinter.warning(warning) }
+
         // Publish the session under the container name BEFORE delete. A process exit after
         // the container is gone must still be resumable by `rebuild --name` without a helper.
         if isVolumeMode, let session = recoveryContext?.session ?? resumedSession {
@@ -742,7 +748,8 @@ public enum RebuildCommand {
                 labels: newLabels,
                 configHash: configHash,
                 workspacePath: stampedLocalFolder(labels),
-                platform: platform
+                platform: platform,
+                enableSSHForward: ssh.automatic
             )
         }
 
@@ -785,7 +792,7 @@ public enum RebuildCommand {
         StatusPrinter.status("Creating container", item: replacementName)
         let id: String
         do {
-            id = try runtime.create(request: request, ensureVolumes: false)
+            id = try runtime.create(request: request, ensureVolumes: false, hostEnvironment: ssh.automatic ? localEnv : nil)
         } catch {
             if allowRecovery, let recovery = recoveryContext {
                 return try RecoveryOrchestrator.recover(

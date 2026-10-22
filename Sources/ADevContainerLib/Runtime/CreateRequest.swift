@@ -245,7 +245,8 @@ public struct CreateRequest: Equatable, Sendable {
         configHash: String,
         workspacePath: String,
         platform: String? = ContainerPlatform.defaultLinuxPlatform,
-        devcontainerId: String? = nil
+        devcontainerId: String? = nil,
+        enableSSHForward: Bool = false
     ) -> CreateRequest {
         let expanded: ResolvedDevContainerConfig
         if let stem = devcontainerId, !stem.isEmpty {
@@ -254,10 +255,14 @@ public struct CreateRequest: Equatable, Sendable {
             expanded = resolved
         }
         let (memoryLimit, cpuLimit) = mergeMemoryCpuLimits(from: expanded)
+        var runArgs = expanded.runArgs
+        if enableSSHForward, !runArgs.contains(.ssh) { runArgs.append(.ssh) }
+        var bindLabels = labelsWithExpandedConfigVolumes(labels, mounts: expanded.mounts)
+        bindLabels[SSHForwardingPolicy.label] = runArgs.contains(.ssh) ? "true" : "false"
         return CreateRequest(
             name: identityName,
             image: expanded.image,
-            labels: labelsWithExpandedConfigVolumes(labels, mounts: expanded.mounts),
+            labels: bindLabels,
             workspaceBindHost: (workspacePath as NSString).standardizingPath,
             workspaceBindTarget: expanded.workspaceFolder,
             workspaceMountMode: .bind,
@@ -268,7 +273,7 @@ public struct CreateRequest: Equatable, Sendable {
             mounts: expanded.mounts,
             publishPorts: expanded.forwardPorts,
             portsAttributes: expanded.portsAttributes,
-            runArgs: expanded.runArgs,
+            runArgs: runArgs,
             memoryLimit: memoryLimit,
             cpuLimit: cpuLimit,
             platform: platform,

@@ -43,6 +43,7 @@ public enum StartCommand {
         try preflightStrictCompatibility(info: info, runtime: runtime, localEnv: localEnv)
 
         if info.isRunning {
+            SSHForwardingPolicy.warnForExisting(labels: info.labels, name: info.name, environment: localEnv)
             StatusPrinter.status("Container already running", item: info.id)
             GitCredentialLifecycle.setupSoft(id: info.id, labels: info.labels, runtime: runtime, credentials: credentials)
             try openAndPostAttach(
@@ -69,6 +70,7 @@ public enum StartCommand {
             hostWorkspace: hostWorkspace
         )
 
+        SSHForwardingPolicy.warnForExisting(labels: info.labels, name: info.name, environment: localEnv)
         StatusPrinter.status("Starting container", item: info.id)
         do {
             try runtime.start(nameOrId: info.id)

@@ -2407,6 +2407,9 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         }
         let createWith = withAgent.mock.calls.first { $0.arguments.first == "create" }!.arguments
         try MiniTest.expect(createWith.contains("--ssh"), "--ssh forwarded with SSH_AUTH_SOCK")
+        try MiniTest.expectEqual(createWith.filter { $0 == "--ssh" }.count, 1)
+        try MiniTest.expect(!createWith.contains { $0.hasPrefix("devcontainer.ssh_forwarded=") }, "bind marker never changes volume policy")
+        try MiniTest.expect(withAgent.mock.calls.first { $0.arguments.first == "create" }!.environment == nil)
 
         let noAgent = RebuildScenario()
         let info2 = RebuildScenario.container(id: "vol-old", labels: noAgent.volumeLabels())
@@ -3723,7 +3726,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(events.firstIndex(of: "ownership")! < events.firstIndex(of: "setup")!)
         try MiniTest.expect(events.firstIndex(of: "setup")! < events.firstIndex(of: "hook")!)
         try MiniTest.expect(creds.fillCalls.isEmpty, "rebuild must not pre-acquire or persist a token")
-        try MiniTest.expect(hostRunner.calls.isEmpty, "bind discovery belongs to the injected connection")
+        try MiniTest.expectEqual(hostRunner.calls.map(\.arguments), [["-C", ws.path, "remote", "-v"]], "only read-only bind SSH discovery is added; credential acquisition stays in the connection")
         try MiniTest.expect(!s.mock.calls.contains { call in
             let joined = call.arguments.joined(separator: " ")
             return joined.contains("credential.helper") || joined.contains("git-credential-adev") || joined.contains("credential approve") || joined.contains("ghp_secret")
