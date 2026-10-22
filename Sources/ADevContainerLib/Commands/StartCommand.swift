@@ -44,6 +44,7 @@ public enum StartCommand {
 
         if info.isRunning {
             StatusPrinter.status("Container already running", item: info.id)
+            GitCredentialLifecycle.setupSoft(id: info.id, labels: info.labels, runtime: runtime, credentials: credentials)
             try openAndPostAttach(
                 options: options,
                 nameOrId: info.id,
@@ -85,13 +86,7 @@ public enum StartCommand {
         }
         // Stopped → running only. Already-running returned above. Soft-fail: a bad
         // refresh must not fail start, delete the container, or enter recovery.
-        GuestGitCredentialSeed.refreshSoft(
-            containerId: info.id,
-            labels: info.labels,
-            connectionUser: GuestGitCredentialSeed.connectionUser(from: info.labels),
-            runtime: runtime,
-            credentials: credentials
-        )
+        GitCredentialLifecycle.setupSoft(id: info.id, labels: info.labels, runtime: runtime, credentials: credentials)
         // Remelt after start for postStart/postAttach. Never run initialize here:
         // volume config becoming readable must not violate initialize-before-start.
         if hooksConfig == nil {

@@ -13,6 +13,7 @@ public enum StopCommand {
             picker: picker
         )
 
+        GitCredentialLifecycle.unregisterSoft(id: info.id, runtime: runtime)
         if !info.isRunning {
             print("Container \(info.id) already stopped")
             return

@@ -47,6 +47,7 @@ class Adevcontainer < Formula
 
   def install
     bin.install "adevcontainer"
+    doc.install "LICENSE", "THIRD_PARTY_NOTICES.md"
   end
 
   test do

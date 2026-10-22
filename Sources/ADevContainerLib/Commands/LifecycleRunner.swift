@@ -152,6 +152,7 @@ public enum LifecycleRunner {
         if let failed = named.first(where: { state.errors[$0.name] != nil }),
            let error = state.errors[failed.name] {
             if failurePolicy == .deleteContainerThenFail {
+                GitCredentialLifecycle.unregisterSoft(id: containerId, runtime: runtime)
                 try? runtime.delete(nameOrId: containerId, force: true)
             }
             throw error
@@ -169,16 +170,23 @@ public enum LifecycleRunner {
         emitRunningStatus(property)
         // Stream hook logs live (teed to host stderr) so long postCreate/etc scripts do not
         // look stuck. Capture is retained for failure diagnostics; QUIET only silences status.
+        var environment = HostGitCredential.strippingCredentialTraces(config.containerEnv)
+        environment["GIT_TERMINAL_PROMPT"] = "0"
+        environment["GCM_INTERACTIVE"] = "Never"
+        environment["GCM_GUI_PROMPT"] = "0"
+        environment["GIT_ASKPASS"] = "/bin/false"
+        environment["SSH_ASKPASS"] = "/bin/false"
         let execResult = try runtime.exec(
             nameOrId: containerId,
             command: command.execArguments,
             user: config.connectionUser,
             workdir: config.workspaceFolder,
-            env: config.containerEnv,
+            env: environment,
             streamOutput: true
         )
         guard execResult.succeeded else {
             if failurePolicy == .deleteContainerThenFail {
+                GitCredentialLifecycle.unregisterSoft(id: containerId, runtime: runtime)
                 try? runtime.delete(nameOrId: containerId, force: true)
             }
             throw lifecycleError(property: property, execResult: execResult)

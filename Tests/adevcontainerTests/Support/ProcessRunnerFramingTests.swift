@@ -30,6 +30,24 @@ private final class ProcessResultBox: @unchecked Sendable {
 }
 
 nonisolated(unsafe) let processRunnerFramingTests: [(String, () throws -> Void)] = [
+    ("processRunnerDoesNotInheritGitTokenIntoContainerProcess", {
+        setenv("ADEVCONTAINER_GIT_TOKEN", "synthetic-host-token", 1)
+        defer { unsetenv("ADEVCONTAINER_GIT_TOKEN") }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("opencode-token-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = root.appendingPathComponent("print-token")
+        try Data("#!/bin/sh\n[ -z \"${ADEVCONTAINER_GIT_TOKEN+x}\" ]\n".utf8).write(to: script)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        let runtime = AppleContainerRuntime(executablePath: script.path, runner: FoundationProcessRunner())
+        let invoked = try runtime.invoke([])
+        let executed = try runtime.exec(nameOrId: "synthetic", command: ["true"])
+        let streamed = try runtime.exec(nameOrId: "synthetic", command: ["true"], streamOutput: true)
+        for result in [invoked, executed, streamed] {
+            try MiniTest.expect(result.succeeded, "container process inherited ADEVCONTAINER_GIT_TOKEN")
+            try MiniTest.expect(result.stdoutString.isEmpty && result.stderrString.isEmpty)
+        }
+    }),
     ("processRunnerFramesStreamedLinesIndentPipe", {
         let previousColor = TerminalStyle.colorOverride
         TerminalStyle.colorOverride = false

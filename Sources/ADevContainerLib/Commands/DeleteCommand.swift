@@ -14,6 +14,7 @@ public enum DeleteCommand {
             picker: picker
         )
         StatusPrinter.status("Deleting container", item: info.id)
+        GitCredentialLifecycle.unregisterSoft(id: info.id, runtime: runtime)
         try runtime.delete(nameOrId: info.id, force: true)
         print("Deleted \(info.id)")
     }

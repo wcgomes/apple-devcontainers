@@ -264,7 +264,7 @@ Additional existing labels MAY be set. Discovery of managed containers for `list
 
 ### Requirement: In-container full clone populate (auth by URL scheme)
 
-After the container is created and started (and Features have ensured in-container git), `clone` MUST populate the workspace volume with a **full git clone inside the container** into `workspaceFolder` (volume mount), **before** create-path lifecycle hooks — except when reusing a workspace volume that already has object entries (see **Workspace volume freshness**). That reuse path MUST skip in-container git clone and keep the tree. An empty reused volume (no object entries other than `lost+found`) MUST still be populated.
+After the container is created and started (and Features have ensured in-container git), `clone` MUST populate the workspace volume with a **full git clone inside the container** into `workspaceFolder` (volume mount), **before** create-path lifecycle hooks — except when reusing a workspace volume that already has object entries (see **Workspace volume freshness**). That reuse path MUST skip in-container git clone and keep the tree, and MUST still prepare the automatic credential connection before hooks. An empty reused volume (no object entries other than `lost+found`) MUST still be populated.
 
 **Populate steps — MUST**
 
@@ -280,12 +280,12 @@ After the container is created and started (and Features have ensured in-contain
 | Scheme | Behavior |
 |--------|----------|
 | **SSH** (`git@host:path`, `ssh://…`) | On volume-mode create, inject `AllowlistedRunArg.ssh` (`container create --ssh`) when host `SSH_AUTH_SOCK` is set and non-empty (if not already in runArgs). If SSH URL and `SSH_AUTH_SOCK` unset/empty → fail structured with hint to start ssh-agent / `ssh-add` / use HTTPS. Later push works while the container retains `--ssh` forward from create. |
-| **HTTPS** (`http://`, `https://`) | On the **host**, attempt credentials via `git credential fill` (protocol/host/path from URL) using host env (works with GCM/osxkeychain without product GCM integration). Optional fallbacks: `ADEVCONTAINER_GIT_TOKEN`; if `gh` available and host is github.com, `gh auth token`. When credentials are available, pass them into **one** in-container `git clone` via GIT_ASKPASS / env one-shot (prefer approach that avoids logging secrets; redact errors), then configure in-container `credential.helper store` and `git credential approve` once so later push/pull work without re-prompt. Store MAY persist on volume/home layer. When fill returns nothing, still attempt an anonymous in-container clone (public repos). If that clone fails → structured error hinting to configure git credential on Mac or use SSH URL. The host-side acquisition (fill with `GIT_TERMINAL_PROMPT=0`, `ADEVCONTAINER_GIT_TOKEN`, `gh auth token` fallback) is the **shared acquisition contract**; clone's in-container store+approve pattern is one use site (create-path seeding uses its own username-agnostic helper — see below). |
+| **HTTPS** (`http://`, `https://`) | Before the in-container full clone and subsequent create-path hooks, establish the same on-demand credential connection used by up/start, as defined in [core.md](core.md) **Git credential store seeded on create paths** (heading retained; token seeding is no longer the behavior). The shared host acquisition contract retains existing provider precedence: explicit host token, `git credential fill` with protocol/host/path, and the optional existing GitHub CLI fallback, with host interactivity disabled and bounded waits. Clone MUST NOT configure new `credential.helper store` entries, approve or persist token seeds, or pass credential values through guest environment variables. Azure and non-Azure HTTP(S) clones use that same connection; Azure retains the URL-scoped helper and organization path behavior defined in core.md. No GCM installation or detection in the guest, and no mounting of host credential stores. When host credentials are unavailable, an anonymous in-container clone MUST still be possible. A private authentication failure MUST produce a structured host-login or SSH hint without a new token CLI flag. |
 | **Other** | Fail clear or best-effort passthrough with structured errors on failure. |
 
 **Shared acquisition contract — MUST**
 
-The host-side HTTPS acquisition (`git credential fill` with `GIT_TERMINAL_PROMPT=0`, optional `ADEVCONTAINER_GIT_TOKEN`, `gh auth token` fallback) constitutes the shared acquisition contract. Clone's populate MUST keep the in-container `credential.helper store` + `git credential approve` pattern; create-path seeding MUST reuse the same host-side acquisition and persist credentials in-container via the username-agnostic credential helper defined in [core.md](core.md) **Git credential store seeded on create paths** — the seeding mechanism does not use `credential.helper store`. Both use sites MUST redact secrets identically (URL userinfo and credential material must never appear in success JSON, labels, progress lines, or logged errors).
+The host-side HTTPS and legacy HTTP acquisition — explicit host token, `git credential fill` with protocol/host/path and `GIT_TERMINAL_PROMPT=0`, and the optional `gh auth token` fallback — constitutes the shared acquisition contract, with host interactivity disabled and bounded waits. Clone and create-path setup MUST use the on-demand connection defined in [core.md](core.md) **Git credential store seeded on create paths**. Clone MUST NOT configure new `credential.helper store` entries, approve or persist token seeds, or pass credential values through guest environment variables. Both use sites MUST redact secrets identically (URL userinfo and credential material must never appear in success JSON, labels, progress lines, logged errors, or diagnostics).
 
 **Clone cleanup on failure (after workspace volume / container create) — MUST**
 
@@ -294,7 +294,7 @@ If start, populate, or create-path lifecycle hooks fail after the workspace volu
 1. Delete the managed dev container (force as needed), and
 2. Delete the workspace volume (`*-ws`) **only when this invocation created it** (it did not exist, or the operator chose replace and this invocation created the replacement),
 
-before returning the structured failure. A reused pre-existing workspace volume MUST NOT be deleted on these failures. (Create-path hook runners that already delete the container still require workspace volume deletion on this path when this invocation created that volume.) Temp dirs remain subject to always-clean rules below. Tests MUST assert no successful outcome and no leftover clone container on these failures, and no leftover workspace volume when this invocation created it. A reused volume MUST still exist.
+before returning the structured failure. A reused pre-existing workspace volume MUST NOT be deleted on these failures. Clone failure cleanup MUST also invalidate its credential session without acquiring tokens, and MUST retain these created-versus-reused volume deletion rules. (Create-path hook runners that already delete the container still require workspace volume deletion on this path when this invocation created that volume.) Temp dirs remain subject to always-clean rules below. Tests MUST assert no successful outcome and no leftover clone container on these failures, and no leftover workspace volume when this invocation created it. A reused volume MUST still exist.
 
 #### Scenario: Populate uses in-container git clone with verify
 - Given a resolved clone create with container started and in-container git available
@@ -310,11 +310,6 @@ before returning the structured failure. A reused pre-existing workspace volume 
 - Given an SSH git URL and host `SSH_AUTH_SOCK` unset or empty
 - When the user runs `adevcontainer clone <ssh-url>`
 - Then the CLI fails structured with a hint to start ssh-agent / use HTTPS and MUST NOT create a container or volume
-
-#### Scenario: HTTPS uses host credential fill one-shot
-- Given an HTTPS git URL and host `git credential fill` returns username/password
-- When populate runs
-- Then credentials are passed into one in-container clone without appearing in success JSON/labels, and after clone the guest configures `credential.helper store`.
 
 #### Scenario: HTTPS public works without host credentials
 - Given an HTTPS git URL to a public repository and host credential fill returns nothing
@@ -342,17 +337,21 @@ before returning the structured failure. A reused pre-existing workspace volume 
 - When clone runs
 - Then the product does not install/detect GCM inside the container and does not mount host `~/.git-credentials`
 
-#### Scenario: create-path seeding reuses the shared acquisition contract
+#### Scenario: L01 - one automatic HTTPS mechanism before populate
+- Given a fresh HTTPS or legacy HTTP clone for Azure or a non-Azure host and an available host provider
+- When clone populates the volume
+- Then the resolved connection user's automatic helper is connected before the single in-container full clone and hooks, verification still checks .git, no host full-clone/tar path runs, and no token store/approve/secret environment mechanism is installed
 
-- Given a bind-mode `up` fresh create (or a `rebuild` replacement create) whose host workspace has an HTTPS remote, and clone's populate already exercised the same host fill and store+approve semantics
-- When create-path seeding acquires credentials for that remote
-- Then seeding uses the same acquisition contract as the clone HTTPS row (fill with `GIT_TERMINAL_PROMPT=0`, `ADEVCONTAINER_GIT_TOKEN` escape hatch, `gh auth token` fallback) and redacts secrets identically
+#### Scenario: L02 - public/private fallback and volume reuse cleanup
+- Given no host credentials, or a reused populated workspace volume
+- When HTTPS clone runs
+- Then public anonymous clone can succeed, private authentication fails noninteractively with a redacted host-login hint, and populated reuse skips clone while preparing the connection before hooks
+- And any failed-clone session is invalidated, newly created workspace volumes follow existing cleanup, and reused volumes are preserved
 
-#### Scenario: clone keeps a single populate mechanism (regression)
-
-- Given a volume-mode `clone` create with an HTTPS git URL and host credentials available
-- When clone runs populate
-- Then the existing in-clone store+approve delivers the store outcome before hooks and NO seeding call runs on `clone`
+#### Scenario: L03 - SSH regression
+- Given an SSH clone URL and either a present or absent host SSH agent
+- When clone runs
+- Then existing --ssh injection/missing-agent behavior is unchanged and no HTTPS credential session is created for that SSH URL
 
 ---
 

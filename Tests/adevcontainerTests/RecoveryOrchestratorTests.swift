@@ -308,6 +308,36 @@ nonisolated(unsafe) let recoveryOrchestratorTests: [(String, () throws -> Void)]
         }
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "volume" })
     }),
+    ("recoveryOrchestratorUnregistersBeforeDeletingFailedContainer", {
+        let port = AutomaticCredentialCommandPort()
+        GitCredentialLifecycle.setTestConnection(port)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
+        var entry = MockProcessRunner.containerListJSON(id: "failed-id", state: "running")
+        var configuration = entry["configuration"] as! [String: Any]
+        configuration["mounts"] = []
+        entry["configuration"] = configuration
+        let listed = try JSONSerialization.data(withJSONObject: [entry])
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.first == "list" {
+                return ProcessResult(exitCode: 0, stdout: listed, stderr: Data())
+            }
+            if args.first == "delete" { port.record("runtime.delete") }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }]
+        let runtime = AppleContainerRuntime(executablePath: "/synthetic/container", runner: mock)
+        try RecoveryOrchestrator.detachFailedContainer(containerID: "failed-id", workspaceVolume: "ws", runtime: runtime)
+        try RecoveryOrchestrator.detachFailedBindContainer(containerID: "failed-id", runtime: runtime)
+        try MiniTest.expectEqual(port.events, ["unregister", "runtime.delete", "unregister", "runtime.delete"])
+        let missing = MockProcessRunner()
+        missing.handlers = [{ args in
+            if args.first == "list" { return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data()) }
+            if args.first == "delete" { port.record("runtime.delete") }
+            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }]
+        try RecoveryOrchestrator.detachFailedBindContainer(containerID: "unlisted-id", runtime: AppleContainerRuntime(executablePath: "/synthetic/container", runner: missing))
+        try MiniTest.expectEqual(Array(port.events.suffix(2)), ["unregister", "runtime.delete"])
+    }),
     ("recoveryOrchestratorOpensExistingRetrySession", {
         let fileManager = FileManager.default
         let sessionID = "retry-session"

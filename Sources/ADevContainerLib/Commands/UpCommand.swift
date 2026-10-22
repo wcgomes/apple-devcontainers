@@ -209,6 +209,7 @@ public enum UpCommand {
         {
             StatusPrinter.status("Replacing container", item: existingContainer.name)
             do {
+                GitCredentialLifecycle.unregisterSoft(id: existingContainer.id, runtime: runtime)
                 try runtime.delete(nameOrId: existingContainer.id, force: true)
             } catch {
                 throw BringUpRecovery.eligible(
@@ -231,6 +232,7 @@ public enum UpCommand {
             } else if existing.isRunning {
                 // Reuse running: no feature fetch/build; settings+extensions repair on marker drift; postAttach gated after open.
                 StatusPrinter.status("Reusing running container", item: existing.name)
+                GitCredentialLifecycle.setupSoft(id: existing.id, labels: existing.labels, runtime: runtime, credentials: credentials)
                 let reuseConfig = configForReuse(resolved.config, labels: existing.labels)
                 _ = VSCodeCustomizationsApply.applySettingsIfNeeded(
                     containerId: existing.id,
@@ -258,13 +260,7 @@ public enum UpCommand {
                 }
                 // Stopped → running only. Reuse of an already-running container returned
                 // above. Soft-fail: do not fail up, delete the container, or recover.
-                GuestGitCredentialSeed.refreshSoft(
-                    containerId: existing.id,
-                    labels: existing.labels,
-                    connectionUser: GuestGitCredentialSeed.connectionUser(from: existing.labels),
-                    runtime: runtime,
-                    credentials: credentials
-                )
+                GitCredentialLifecycle.setupSoft(id: existing.id, labels: existing.labels, runtime: runtime, credentials: credentials)
                 var reuseConfig = configForReuse(resolved.config, labels: existing.labels)
                 PostAttachConfigLoader.mergeFeaturePostAttach(
                     into: &reuseConfig,
@@ -522,22 +518,8 @@ public enum UpCommand {
             throw BringUpRecovery.eligible(error)
         }
 
-        // Forward host git credentials into the fresh container's store before hooks
-        // (fresh-create bind path only). Soft-fail: warn and continue; never delete.
-        do {
-            try GuestGitCredentialSeed(
-                credentials: credentials,
-                runner: LifecycleRunner.hostProcessRunnerOverride ?? FoundationProcessRunner()
-            ).seed(
-                containerId: id,
-                hostWorkspace: resolved.workspacePath,
-                gitURL: nil,
-                connectionUser: connectionUser,
-                runtime: runtime
-            )
-        } catch {
-            StatusPrinter.warning("Git credential seeding failed; continuing without forwarded credentials: \(error.localizedDescription)")
-        }
+        // Connected before create hooks; setup failure never enters recovery.
+        GitCredentialLifecycle.setupSoft(id: id, hostWorkspace: resolved.workspacePath, gitURL: nil, runtime: runtime, credentials: credentials)
 
         do {
             try LifecycleRunner.runCreatePathThroughWaitFor(

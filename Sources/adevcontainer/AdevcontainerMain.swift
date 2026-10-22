@@ -6,6 +6,8 @@ struct AdevcontainerMain {
     static func main() {
         let processPath = CommandLine.arguments.first ?? ""
         let raw = Array(CommandLine.arguments.dropFirst())
+        if let result = CredentialProcessGuardianEntry.run(arguments: raw) { exit(result) }
+        if let result = GitCredentialBrokerEntry.run(arguments: raw) { exit(result) }
         CommandSurface.commandPrefix = CommandSurface.invocationPrefix(
             processPath: processPath,
             argv: raw
@@ -149,20 +151,6 @@ struct AdevcontainerMain {
                     openVSCode: parsed.flags.contains("vscode"),
                     jsonOutput: parsed.flags.contains("json")
                 ),
-                runtime: runtime
-            )
-            return 0
-
-        case "refresh-credentials":
-            guard parsed.passthrough.isEmpty else {
-                throw CLIError(
-                    code: CLIErrorCode.usage,
-                    message: "refresh-credentials does not accept positional arguments",
-                    hint: "Usage: \(CommandSurface.commandPrefix) refresh-credentials [--name <name>]"
-                )
-            }
-            try RefreshCredentialsCommand.run(
-                name: parsed.name,
                 runtime: runtime
             )
             return 0

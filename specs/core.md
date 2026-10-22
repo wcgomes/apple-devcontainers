@@ -761,184 +761,149 @@ See also: [lifecycle-hooks.md](lifecycle-hooks.md) for hook surface details; [vs
 
 ### Requirement: Git credential store seeded on create paths
 
-On the create paths — `up` fresh create (bind mode) and `rebuild` replacement create (bind and volume mode) — the CLI MUST seed the resolved remote connection user's git credential store in the container BEFORE any create-path lifecycle hook (onCreateCommand, updateContentCommand, postCreateCommand, postStartCommand) runs. Seeding MUST run after the create-path ownership steps.
+For managed containers with discovered HTTPS or legacy HTTP credential destinations, the product MUST automatically prepare the resolved connection user's Git credential helper for on-demand host acquisition before create-path hooks, after ownership preparation. A per-user broker process using the currently invoking adevcontainer executable MUST survive the invoking CLI and activate on demand without sudo. It MUST NOT install, load, or depend on a LaunchAgent plist, launchd job, brew service, or login item, and MUST NOT be restarted automatically after a crash (see **Demand-started detached Git credential broker**). Guest setup MUST NOT require Python, socat, a compiler, GCM, or additional package installation. New product-managed persistent guest token stores MUST NOT be created.
 
-Seeding MUST write a POSIX-sh credential helper script to the connection user's home directory in the container (e.g. `$HOME/.adevcontainer/git-credential-adev`) with mode 0700, owned by the connection user. For non-Azure HTTPS hosts, seeding MUST configure the helper at `--global` scope via `git config --global --add credential.helper <absolute-path>`; the configuration MUST append and MUST NOT replace pre-existing credential helpers. Seeding MUST add one credential entry per unique (protocol, host, username) triple via `git credential approve`, which routes through the configured helper whose store mode persists the entry. Entries MUST NOT include a path component, so sibling repositories on the same host are covered without knowing their paths. Matching uses the URL scheme (protocol) and host; the queried username and path are ignored on get. SSH remotes MUST NOT be seeded.
+Discovery MUST retain the unique HTTP(S) fetch destinations of the host workspace for bind mode and the stamped Git URL for volume mode; clone MUST register its requested HTTP(S) URL. Legacy HTTP MUST retain its original scheme and existing provider policy without widening to new hosts/ports or permitting scheme downgrade. The product MUST NOT enable unsafe-HTTP overrides in a host provider. Missing host Git, no repository/remotes, or absent volume URL MUST remain silent skips without making host Git a prerequisite for up. Missing credentials from a provider MUST be a silent miss. Duplicate source URLs MUST NOT create duplicate helpers or sessions.
 
-For `dev.azure.com`, every seed and refresh MUST NOT write an empty `credential.https://dev.azure.com.helper` value and MUST NOT reset the global `credential.helper` list. It MUST remove an existing empty value for that URL-scoped key so an old empty reset stops blocking fallthrough. It MUST ensure the product helper path is present exactly once, and MUST set `credential.https://dev.azure.com.useHttpPath` true. A pathless query proxied to host Git Credential Manager fatals with "Cannot determine the organization name" because the organization is in the URL path; the CLI MUST NOT copy host `credential.helper` (`osxkeychain` / GCM) into the guest and MUST NOT proxy pathless queries to GCM.
+Setup MUST apply to fresh up, clone, rebuild replacement, real start, up start-stopped, and already-running up/start reuse. Existing healthy sessions on reuse MUST NOT be needlessly recreated or trigger provider lookup; missing or broken sessions MUST be repaired. Setup errors MUST warn with redaction and MUST NOT themselves fail up/start/rebuild, delete a container, or enter recovery. Hooks retain their own failure semantics.
 
-The helper MUST implement `get`, `store`, and `erase`. On `get`, the helper MUST match the persisted store by (protocol, host) IGNORING the queried username and path, and MUST return the queried username (or the stored username when the query carries none) together with the stored password; when no entry matches, the helper MUST exit 0 with no output so git falls through to remaining helpers, askpass, or prompt. If the matched password is a JWT (exactly two dots, three segments) and the payload decodes and contains a numeric `exp` less than or equal to now plus 60 seconds, `get` MUST exit 0 with no output and MUST remove that store entry so the expired token is not replayed. If the password is not a JWT, `exp` is missing, decode fails, or base64 is unavailable, `get` MUST return the stored password. The helper MUST NOT print the password outside the credential protocol. On `store`, the helper MUST persist the entry, deduping by (protocol, host, username), to its own store file (e.g. `$HOME/.adevcontainer/git-credentials`) with mode 0600, owned by the connection user; the helper MAY use git's store file format with percent-encoding or its own simple line format, and persisted values MUST round-trip raw username and password values (including `@` and `:` characters) without corruption. On `erase`, the helper MUST remove every store entry matching protocol and host, ignoring username and path, by an atomic rewrite that leaves the store mode 0600. No match MUST exit 0. `erase` MUST NOT be a no-op. Secrets MUST NOT be echoed to stdout or stderr outside the credential protocol and MUST NOT appear in argv or the environment.
+#### Scenario: C01 - create and rebuild prepare before hooks
+- Given bind up, bind rebuild, or volume rebuild with discovered HTTP(S) destinations and an available provider
+- When the container is running and ownership is prepared
+- Then the resolved connection user has a connected credential helper before any create-path hook, including when that user is root, without a persisted token seed
+- And bind discovery uses host fetch remotes while volume discovery uses the stamped URL
 
-Credentials MUST be acquired on the HOST through the shared acquisition contract declared by **In-container full clone populate (auth by URL scheme)** ([clone.md](clone.md)): `git credential fill` (protocol/host/path from URL) with `GIT_TERMINAL_PROMPT=0`, optional `ADEVCONTAINER_GIT_TOKEN`, and the `gh auth token` fallback — the existing `HostGitCredential.fillHTTPS` path. When fill returns nil for a URL, the CLI MUST skip that URL silently.
+#### Scenario: C02 - real start and running reuse
+- Given either a stopped managed container or an already-running matching container
+- When start or up selects it
+- Then real start prepares the connection before restart postStart, running reuse repairs only missing/broken connections, and neither duplicates a healthy session nor queries credentials merely to reuse it
 
-Remote discovery MUST be:
+#### Scenario: C03 - silent skips and soft setup failure
+- Given missing host Git, no HTTP(S) destinations, a non-repository workspace, an absent stamped URL, or a provider miss
+- When lifecycle setup or helper lookup runs
+- Then missing sources/providers do not add a lifecycle failure or warning, and an actual installation/transport setup failure produces only a redacted warning without product-triggered deletion or recovery
 
-- Bind mode (`up` fresh create, `rebuild` bind): the unique fetch remote URLs of the host workspace via `git -C <hostWorkspace> remote -v`.
-- Rebuild volume mode: the stamped `devcontainer.git_url` label of the rebuilt container; a missing or empty label MUST skip seeding silently.
+The product MUST preserve pre-existing global helpers and their ordering, append its non-Azure helper idempotently, and install its Azure helper exactly once at the matching registered scheme's URL-scoped helper key. HTTPS Azure MUST retain its existing helper key and `credential.https://dev.azure.com.useHttpPath=true`; explicitly discovered legacy HTTP Azure MUST receive equivalent HTTP-scoped helper/path handling without authorizing HTTP for an HTTPS-only registration. Azure configuration MUST remove legacy empty helper values, MUST NOT write an empty helper reset, and MUST NOT reset global helper lists. The automatic freshness guarantee applies when the product helper is invoked; earlier user-configured helpers MAY satisfy Git without invoking it and MUST NOT be silently disabled.
 
-Silent skip — no warning and no failure — MUST apply when host git is missing, when the host workspace is not a git repository or has no remotes, or when fill returns nil. `up` MUST NOT gain a host-git prerequisite.
+On get, the product helper MUST authorize the destination before contacting a host provider. The authorized destination set MUST remain the HTTP or HTTPS scheme plus exact normalized host and port discovered for that container, retaining sibling repository coverage across paths rather than limiting lookup to the original repository. Unknown hosts, alternative ports, unregistered schemes, and non-HTTP(S) protocols MUST be misses without provider calls. HTTP and HTTPS MUST NOT authorize each other. Queried usernames MUST NOT select a different host account/provider; responses MUST retain the queried username when supplied, otherwise the acquired username. The host MUST receive the actual validated repository path for Azure lookups; a missing organization path MUST be a miss without a pathless GCM call. It MUST NOT silently substitute a different repository path.
 
-Seeding failures (for example missing in-container git or an exec failure) MUST soft-fail: a warning on stderr and the create path continues. Seeding MUST NOT delete the container and MUST NOT enter bring-up recovery. Hook failure remains the hook's own failure under existing create-path policy.
+#### Scenario: C04 - Azure configuration and path compatibility
+- Given an HTTPS Azure destination (or explicitly registered legacy HTTP Azure destination), a legacy empty URL-scoped helper, existing global helpers, and a lookup for a sibling repository on that host
+- When setup and get run
+- Then the product helper occurs exactly once at the matching scheme's Azure URL-scoped key, useHttpPath is true, empty resets are absent, global helpers/order are preserved, and the host receives that sibling's actual organization/repository path
+- And a pathless Azure lookup never reaches GCM
 
-Secrets MUST NEVER appear in success JSON, labels, StatusPrinter progress lines, or logged errors; errors MUST redact URL userinfo and credential material (same redaction as the clone flow).
+#### Scenario: C05 - destination and username compatibility
+- Given a registered HTTPS host and an acquired username X
+- When Git requests another repository on that host with username Y, or requests an unregistered host, different port, unregistered scheme, or non-HTTP(S) protocol
+- Then the sibling request returns the acquired password with username Y without using Y to change host account selection, while unauthorized requests produce misses without provider calls
 
-A real `start` (stopped → running) and `up` start-stopped MUST re-seed the same way after the container is running and before restart postStart. Bind mode uses the host workspace's HTTPS fetch remotes; volume mode uses the stamped `devcontainer.git_url`. Silent skip — no warning and no failure — MUST apply when host git is missing, when there are no HTTPS remotes, or when fill returns nil. Refresh failure MUST soft-fail with a redacted stderr warning and MUST NOT fail start or up, delete the container, or enter recovery. Already-running `start` and `up` reuse of an already-running container MUST NOT re-seed.
+#### Scenario: C06 - existing helper ordering
+- Given a user-configured helper before the product helper
+- When setup runs repeatedly and Git performs a lookup
+- Then the original helper and ordering remain, the product entry is not duplicated, and an earlier complete answer is not represented as proof of product lookup or freshness
 
-`adevcontainer refresh-credentials [--name]` MUST use the same managed selection as `start` (interactive picker or `--name`). The target MUST already be running. If it is stopped, the command MUST fail with a structured error whose hint names `start --name <name>` and MUST NOT start or stop the container. An exec failure MUST fail the command with a redacted error. The command MUST NOT run git fetch, pull, or push, and MUST NOT write the workspace. Credential material MUST enter the guest via stdin only, never argv or environment.
+#### Scenario: C19 - legacy HTTP without implicit expansion
+- Given a discovered HTTP destination and a distinct HTTPS-only destination
+- When lookup requests the registered HTTP destination, another port/host, or HTTP on the HTTPS-only destination
+- Then only the registered HTTP destination can reach the existing provider, its scheme/path/port are retained, an unsafe-HTTP provider refusal remains a miss, and no unsafe override or downgrade is enabled
 
-`clone` keeps its existing populate path. Non-Azure clone configures local `credential.helper store` plus pathless approve and MUST NOT install the product helper. Azure clone MUST install the same URL-scoped product helper via `installHTTPSCredential` (no second mechanism, no empty helper reset, `useHttpPath` true) and MUST NOT use pathless `credential.helper store` for that host.
+Each product get MUST use the shared host acquisition provider rather than a product guest-token cache. Host acquisition MUST disable Git terminal prompts and provider GUI/TTY prompts, respect a finite deadline, and return a miss if interaction is required. Azure provider interaction MUST be disabled in addition to `GIT_TERMINAL_PROMPT=0`. The product MUST NOT implement OAuth renewal or claim a provider's unchanged token is evidence of renewal. Provider nil MUST permit normal Git helper fallthrough; product-managed clone/hooks MUST remain noninteractive on authentication failure and offer host-login guidance. The shared acquisition precedence remains the contract in [clone.md](clone.md) **In-container full clone populate (auth by URL scheme)**.
 
-#### Scenario: up bind fresh create seeds the store before hooks
+Store MUST consume input without persisting credentials or approving them in the host credential store. Erase MUST NOT invoke host credential reject/erase, remove account bindings, or modify the host token cache. It MUST temporarily suppress replay of a matching credential previously delivered for that session/destination, without suppressing a newer different credential or affecting other containers. Suppression MUST expire after a finite cooldown; a subsequent get MAY consult the provider again. Helper operations MUST NOT contain an unbounded internal reacquisition/rejection loop.
 
-- Given a bind-mode `up` fresh create whose host workspace has an HTTPS fetch remote `https://dev.azure.com/plantsuite/PlantSuite/_git/GitOps` and host `git credential fill` returns credentials
-- When the create path runs after start and before create-path hooks
-- Then the CLI acquires credentials on the host and runs an in-container exec as the connection user that writes the credential helper script, configures the `dev.azure.com` URL-scoped helper (no empty helper value, product helper present once, `useHttpPath` true) without resetting the global `credential.helper` list, and approves an entry for (https, dev.azure.com, plantsuite) BEFORE the first create-path hook exec
+#### Scenario: C07 - lookup freshness and provider UI required
+- Given two successive product-helper gets and a host provider that changes its answer between them
+- When the gets run
+- Then each obtains the current provider answer without a guest seed, and a provider requiring interaction instead results in a bounded miss with no GUI/TTY prompt or product OAuth-refresh claim
 
-#### Scenario: sibling repositories on the same host are covered
+#### Scenario: C08 - store and correlated erase
+- Given a credential delivered in one session and a newer different credential delivered for the same destination
+- When store or a delayed erase for the older delivery arrives
+- Then store persists/approves nothing, erase does not suppress the newer credential, and neither operation mutates host credential storage or another session
 
-- Given the same bind-mode `up` and a workspace whose remotes include `https://dev.azure.com/plantsuite/PlantSuite/_git/GitOps` and `https://dev.azure.com/plantsuite/PlantSuite/_git/Other`
-- When seeding runs
-- Then one approve entry per unique (protocol, host, username) is applied and the entries contain no path component
+#### Scenario: C09 - rejection cooldown is finite
+- Given a delivered credential that Git rejects and a provider that continues returning the same value
+- When get occurs during suppression and after its deadline, or stop followed by start clears that session's suppression
+- Then the rejected value is not immediately replayed, the cooldown eventually permits a fresh attempt, and no single helper operation loops indefinitely
 
-#### Scenario: duplicate remote lines dedupe to one entry
+The product MUST provide private per-container channels without network listeners, bind mounts of host credential material, or guest access to host runtime control endpoints. Session identity and destination authorization MUST derive from host-established context, not guest-asserted container identity. Guest connection endpoints MUST be accessible only to the resolved connection user, subject to guest root's existing authority. Product-owned helper/session directories MUST be private and correctly owned; stale sockets MUST be safely replaced without following attacker-controlled symlinks or deleting unrelated files.
 
-- Given `git -C <hostWorkspace> remote -v` lists the same fetch URL more than once
-- When seeding runs
-- Then only one approve entry per (protocol, host, username) is applied
+Secrets MUST remain in confidential pipes/socket payloads and process memory, never new persistent token files, process argv, product-created environment variables, labels, progress, success JSON, or diagnostics. Reading the existing explicit host token escape hatch is retained; the product MUST NOT propagate it through a new child environment or persist it across processes. Any per-session explicit override MUST be lost on broker restart and MUST require registration by an invoking CLI to restore it; successor recovery MUST NOT silently substitute a different credential source for that session until re-registration. No provider/helper command text or local filesystem path supplied by the guest MUST be executed.
 
-#### Scenario: no host credentials skip silently
+#### Scenario: C10 - session isolation and malicious input
+- Given two registered containers and an untrusted guest request claiming the other container's identity or carrying an unauthorized destination, malformed fields, oversized payload, or command text
+- When the broker processes it
+- Then identity remains bound to the established channel, invalid requests do not reach the provider, unrelated sessions remain usable, and no arbitrary host command runs
 
-- Given a public HTTPS remote and host credential fill returns nothing
-- When seeding runs
-- Then the CLI skips silently (no warning, no failure) and the create path continues
+#### Scenario: C11 - secret containment and private endpoints
+- Given successful lookup, provider/transport errors, or endpoint provisioning against a stale or symlinked path
+- When the operation finishes
+- Then secrets appear only in intended credential-channel responses, endpoints have private ownership/permissions, no host credential/control endpoint is mounted or published, and unsafe paths fail without deleting unrelated files
 
-#### Scenario: workspace without a git repo or remotes skips silently
+#### Scenario: C12 - explicit token override restart
+- Given a CLI registration with the existing explicit host token override
+- When the service restarts
+- Then the override was not persisted or put in child environment, its session cannot silently switch credential source, and re-registration restores that override through private IPC
 
-- Given a bind workspace that is not a git repository, or a git repository with no remotes
-- When `up` fresh create runs
-- Then no seeding exec runs and `up` succeeds
+Only one service instance per macOS user MUST own the session registry. Simultaneous activations MUST be idempotent. Concurrent requests MUST have bounded admission, payload size, deadlines, and independent response correlation. Service/channel failure MUST terminate pending waits within their deadlines. Recovery MUST reject messages from prior service/container session generations and MUST not authorize a new container solely because it reuses an old name.
 
-#### Scenario: missing host git skips silently
+A crashed broker MUST NOT be restarted automatically. The successor started by the next credential-dependent lifecycle activation MUST reconcile saved nonsecret registrations against managed container identity/state before recreating channels. Transport loss while a container remains running MUST trigger bounded-backoff reconnection; failed requests MUST NOT be replayed automatically. Stopped/removed containers MUST have no live relay or usable session; stop/delete/purge and failed-clone cleanup MUST invalidate registrations without acquiring tokens. Runtime changes outside the CLI MUST be reconciled within a finite interval: an external stop or removal MUST invalidate that registration's session and pending replies within 2 seconds and retirement MUST complete no later than 9 seconds after the event, comprising the 2-second invalidation, the 5-second zero-demand grace, and at most one recheck interval, without provider polling. A failed, timed-out, unparseable, or ambiguous runtime observation MUST NOT be treated as absence: it MUST preserve the nonsecret registration and its recovery intent, MUST NOT cancel an admitted request solely for that reason, MUST NOT start idle retirement or deliver credentials to an unvalidated identity, and MUST NOT replay a request; existing request deadlines remain in force, and a later valid observation MUST either reconnect the same identity or definitively invalidate it and start a fresh grace. Registration and the final no-demand retirement decision MUST be serialized: a registration MUST either cancel retirement and connect on that owner or retry against an activated successor within its existing setup deadline, and it MUST never be acknowledged and then discarded by idle shutdown. Only one owner may exist, late old-generation results MUST NOT remove a newer session, and old-instance cleanup MUST NOT unlink a successor's endpoint. Broker idleness MUST NOT cause provider polling.
 
-- Given host git is not installed
-- When bind-mode `up` fresh create runs
-- Then no seeding runs, no warning is required, and `up` succeeds without a host-git prerequisite
+#### Scenario: C13 - activation races and process exit
+- Given concurrent lifecycle invocations and a prepared container
+- When the invocations finish or one broker instance crashes
+- Then only one process owns the registry, credential lookup remains available after the invoking CLIs exit, no LaunchAgent or other persistent service is installed, a crash is not restarted automatically, and the next credential-dependent invocation starts a successor without sudo or another installed host executable
 
-#### Scenario: rebuild bind seeds from host remotes
+#### Scenario: C14 - out-of-order concurrency and overload
+- Given multiple concurrent gets whose provider replies complete out of order and requests beyond admission bounds
+- When requests complete or time out
+- Then every reply reaches only its own waiter, capacity is bounded, overload fails within the request deadline, and other sessions are not starved indefinitely
 
-- Given a bind-mode `rebuild` replacement create whose host workspace has an HTTPS remote and host fill returns credentials
-- When the rebuild create path runs after start and before create-path hooks
-- Then seeding runs before the first create-path hook exec and the rebuild succeeds
+#### Scenario: C15 - transport failure, restart, and generation fence
+- Given pending requests and a stale guest socket
+- When the relay/container or broker restarts, including a rebuild reusing the name
+- Then pending requests fail within their deadline, stale endpoints are safely replaced, nonsecret registrations are revalidated, old-generation replies/identities are rejected, and a fresh lookup succeeds after connection recovery without replaying the old request
 
-#### Scenario: rebuild volume seeds from the stamped git URL
+#### Scenario: C16 - stop, removal, and external reconciliation
+- Given a registered container and an idle broker process
+- When stop, delete, purge, failed-clone cleanup, or an external runtime stop/removal occurs
+- Then sessions/relays and pending requests are cleaned up or invalidated within bounded waits/reconciliation, no tokens are polled, and workspace/volume deletion semantics remain unchanged
 
-- Given a volume-mode `rebuild` of a managed container whose `devcontainer.git_url` label is `https://github.com/org/repo`
-- When the rebuild create path runs (no host workspace remote enumeration)
-- Then seeding acquires credentials for that URL and approves an entry before the first create-path hook exec
+On existing containers, setup MUST migrate the product-owned seeded helper to on-demand operation and remove the legacy product-owned token store without reading or logging its contents. It MUST NOT delete unidentified user credentials, reset user helper chains, or fall back to a legacy product seed if the host is unavailable. Legacy clone store files without trustworthy ownership/provenance MUST be preserved; user/legacy helpers that answer before the product remain outside the automatic freshness guarantee. Migration MUST be idempotent.
 
-#### Scenario: rebuild volume without a stamped git URL skips silently
+#### Scenario: C17 - migration without destructive credential cleanup
+- Given an existing product helper/store, user helper configuration, and an unmarked legacy clone store file
+- When up/start reuse performs migration twice
+- Then the product helper becomes on-demand, the product-owned store is removed without exposing its content, unmarked/user credential files and helper ordering remain, and host failure does not replay the removed product seed
 
-- Given a volume-mode rebuild whose stamped `devcontainer.git_url` label is missing or empty
-- When the rebuild create path runs
-- Then no seeding runs and the rebuild succeeds
+Already-running `start` and `up` MUST repair a missing or broken automatic connection from the same discovery sources without persisting tokens, fetching, pulling, pushing, writing the workspace, clearing that session's rejection suppression, or failing the command when setup fails. Setup failure remains a redacted warning. Rejection suppression is cleared by unregister on `stop`; clearing a rejection block before the cooldown expires requires `stop` followed by `start`. Neither path promises provider token renewal or resolves an expired host login.
 
-#### Scenario: seeding failure soft-fails
+#### Scenario: Running recovery does not clear rejection suppression
+- Given a running managed target with a broken channel and rejection suppression
+- When start or up selects it
+- Then the channel is repaired without clearing rejection suppression, without token persistence, and without repository operations; setup failure warns and does not fail the command
 
-- Given a create path whose seeding exec fails (for example in-container git is missing or the exec errors)
-- When seeding runs
-- Then stderr carries a warning, the create path continues through hooks and succeeds absent other failures, the container is NOT deleted, and bring-up recovery is NOT entered
+#### Scenario: Stop then start clears rejection suppression
+- Given a managed target whose session has rejection suppression
+- When stop is followed by start
+- Then stop unregisters the session and clears that suppression, and the following start prepares the connection again without promising provider token renewal
 
-#### Scenario: expired JWT get is a miss and drops the entry
+---
 
-- Given a store entry whose password is a JWT (exactly two dots, three segments) and whose payload decodes to a numeric `exp` less than or equal to now plus 60 seconds
-- When the helper handles `get` for that protocol and host
-- Then the helper exits 0 with no output, removes that store entry, and does not print the password outside the credential protocol
+### Requirement: Self-contained guest credential artifacts
 
-#### Scenario: undecodable or non-JWT passwords are still returned
+The distributed macOS CLI MUST contain version-matched static Linux relay/client artifacts for linux/arm64 and linux/amd64. Runtime selection MUST use the actual guest platform rather than the host architecture. The product MUST verify artifact integrity and protocol/platform compatibility before allowing credential delivery, and MUST fail closed on unsupported/missing/corrupt artifacts using existing soft lifecycle error semantics. It MUST NOT install a translator, enable Rosetta, download executable artifacts at runtime, or fall back to Python/socat. Release and source builds MUST have a documented pinned, checksum-verified build path and reproducible guest outputs; relocation of the distributed executable MUST NOT lose its guest artifacts. Applicable linked-runtime license notices MUST accompany distribution.
 
-- Given a store entry whose password is not a JWT, or is a JWT whose `exp` is missing, whose payload does not decode, or for which base64 is unavailable
-- When the helper handles `get` for that protocol and host
-- Then the helper returns the stored password with the queried username (or the stored username when the query has none)
+#### Scenario: A01 - source and release artifact completeness
+- Given a clean source checkout with the documented build prerequisites or an unpacked release
+- When the source preparation/build is repeated in independent build directories and the release executable is relocated without the source tree
+- Then both Linux variants have matching source/protocol identity, deterministic per-variant hashes, no dynamic loader or shared-library dependency, and the relocated CLI retains both verified artifacts without guest package installation or runtime downloads
 
-#### Scenario: erase removes protocol and host matches
-
-- Given a store with two entries for the same protocol and host and one entry for another host
-- When the helper handles `erase` for that protocol and host, including a query that names a different username or a path
-- Then both matching entries are removed by an atomic rewrite, the other host remains, the store mode is 0600, and stdout and stderr are empty
-- And an erase with no match exits 0 and leaves the store unchanged
-
-#### Scenario: Azure seed removes an empty helper and does not write one
-
-- Given a global git config that already has an empty `credential.https://dev.azure.com.helper` value and another non-empty helper for that URL
-- When Azure seeding or refresh configures the URL-scoped helper
-- Then the empty value is gone, the product helper path is present exactly once, `credential.https://dev.azure.com.useHttpPath` is true, pre-existing global `credential.helper` values remain, and no empty helper value is written
-
-#### Scenario: refresh-credentials refreshes a running container
-
-- Given a running managed container and host `git credential fill` returns a credential for its bind remotes or stamped git URL
-- When the user runs `adevcontainer refresh-credentials --name <name>`
-- Then the CLI execs the seed script in that container with the credential on stdin only, does not start or stop the container, and does not fetch, pull, push, or write the workspace
-
-#### Scenario: refresh-credentials refuses a stopped container
-
-- Given a stopped managed container
-- When the user runs `adevcontainer refresh-credentials --name <name>`
-- Then the command fails with a structured error whose hint names `start --name <name>`, and the CLI does not start, stop, or exec the container
-
-#### Scenario: real start and up start-stopped refresh and soft-fail
-
-- Given a stopped managed container
-- When `adevcontainer start` or `up` starts it and the credential exec fails
-- Then stderr carries a redacted warning, the command still succeeds absent other failures, the container is not deleted, and bring-up or start recovery is not entered
-- And the refresh runs after the container is running and before restart postStart
-
-#### Scenario: already-running start and up reuse do not refresh
-
-- Given a matching running container
-- When `up` reuses it, or `start` finds it already running
-- Then no credential refresh exec runs
-
-#### Scenario: secrets are redacted on the seeding error path
-
-- Given host fill returned username/password for a remote and the seeding exec fails
-- When the warning or error is emitted
-- Then the warning or error contains no credential material and no URL userinfo
-
-#### Scenario: SSH remotes are not seeded
-
-- Given a bind workspace whose remotes are SSH URLs (`git@host:path`)
-- When `up` fresh create runs
-- Then no seeding exec runs
-
-#### Scenario: seeding runs as the resolved connection user
-
-- Given a create path whose resolved connection user is `alice` (non-root) or `root`
-- When the seeding exec runs
-- Then the exec runs as that user and the store lands in that user's home directory
-
-#### Scenario: S15: username-agnostic get serves URL-forced usernames
-
-- Given a seeded store entry for (https, dev.azure.com, X) and a create-path hook whose URL forces username Y (X ≠ Y) on the same protocol and host
-- When the hook's git performs credential lookup in the non-interactive hook environment
-- Then the helper's get returns the stored password with the QUERIED username Y and the hook's git authenticates
-
-#### Scenario: S16: unseeded hosts receive no credentials
-
-- Given a seeded store containing entries only for one (protocol, host, username) triple
-- When git queries the helper for a host absent from the store
-- Then the helper exits 0 with no output, no credentials are returned, and git falls through to remaining helpers, askpass, or prompt
-
-#### Scenario: S17: helper and store files are private and secrets stay out of argv and logs
-
-- Given a create path that seeded the helper
-- When seeding completes and the hook environment runs
-- Then the helper script (0700) and the store file (0600) are owned by the connection user, are not world-readable, and no password material appears in argv, success JSON, labels, progress lines, or logged errors
-
-#### Scenario: S18: pre-existing global credential helpers are preserved
-
-- Given a container whose global git config already configures one or more credential helpers
-- When seeding appends its helper via `git config --global --add credential.helper <absolute-path>`
-- Then the pre-existing helpers remain configured and are consulted before the seeded helper
+#### Scenario: A02 - platform selection and tampering
+- Given arm64 or amd64 guests, an unsupported guest platform, or an altered/truncated artifact
+- When the product provisions and handshakes the relay
+- Then supported guests receive their own variant, invalid/unsupported artifacts fail before credential delivery, read-back/handshake verifies the installed bytes and protocol, and no host-architecture substitution or translator installation occurs
 
 ---
 
@@ -2043,3 +2008,99 @@ The repository MUST provide `references/dockerfile/` containing `.devcontainer.j
 - Given `references/dockerfile/.devcontainer.json` and its sibling `Dockerfile`
 - When the example is admitted and resolved
 - Then nested `build` admits, no Compose or privileged/DinD requirement is present, and validation does not fail solely because `image` is omitted
+
+---
+
+### Requirement: Demand-started detached Git credential broker
+
+For a managed container with discovered HTTP(S) destinations, the first eligible credential lifecycle setup MUST ensure exactly one per-user broker process is serving, starting it from the currently invoking `adevcontainer` executable when none is acceptable, without sudo, a public command, a LaunchAgent plist, a launchd job, a `brew services` entry, or a login item. The process MUST be detached from the invoking CLI so it survives CLI exit, and it MUST complete the connection before HTTP(S) full clone or applicable create-path hooks when setup succeeds. Existing silent-skip, redacted soft-failure, and hook/clone failure semantics remain unchanged.
+
+Broker demand MUST exist only for credential-dependent managed-container lifecycle work: fresh up, clone, rebuild replacement, real start, up start-stopped, and running up/start repair. Installation, login, list, inspect, exec, stop, delete, purge, unregister, and setup with no HTTP(S) destination or SSH-only sources MUST NOT start a process or create an endpoint. When a broker is running, unregister MUST remove the registration without provider access. Unregister without a running broker MUST succeed as a no-op without starting one; saved intent is not usable until a successor revalidates it.
+
+The broker MUST be a single instance per macOS user. Concurrent CLI activations MUST serialize and MUST start at most one process; every successful registration MUST reach that owner. A losing spawn attempt MUST exit without replacing or unlinking the owner's endpoint. No second process may serve the same registry or control socket.
+
+After the last registration is definitively invalidated or unregistered and no admitted work remains, the broker MUST exit successfully after a continuous 5-second zero-demand grace, rechecked at intervals no greater than 2 seconds. Under healthy, promptly responding local adapters, exit MUST complete no later than 7 seconds after demand reaches zero and MUST leave no running broker and no stale control socket. A later eligible setup MUST start a successor. SIGTERM and SIGINT MUST perform the same bounded cleanup as idle exit.
+
+A crash MUST NOT be restarted automatically, and the product MUST NOT install or rely on any supervisor that restarts it. Until the next eligible lifecycle activation, credential lookups fail as ordinary misses and any stale control socket is not usable. The next activation MUST start a successor that loads saved nonsecret registrations, reconciles them against authoritative managed-container identity and state before recreating channels, and reconnects eligible running containers. A crash MUST NOT resurrect an explicit token override or replay pending requests.
+
+#### Scenario: D01 - first demand starts a detached broker before consumers
+- Given no broker process exists and a managed container has discovered HTTPS destinations
+- When fresh up, clone, rebuild replacement, real start, or up start-stopped prepares the connection
+- Then exactly one broker process from the invoking executable is serving before HTTP(S) full clone or applicable hooks, the setup connects, and that same process still serves lookups after the invoking CLI exits
+- And no product-created LaunchAgent plist, launchd job, brew service, login item, or separate installed launcher exists
+
+#### Scenario: D02 - no lifecycle demand creates no broker
+- Given no broker process exists
+- When install, login, list, inspect, exec, stop, delete, purge, unregister, or SSH-only/no-destination setup runs
+- Then no broker process, control socket, or new registration intent is created, and stop/delete/purge still report success
+- And no launchd or `brew services` operation is attempted, and saved intent is not usable until a successor revalidates it
+
+#### Scenario: D03 - concurrent CLIs converge on one instance
+- Given no broker process exists and two CLIs run eligible setup concurrently
+- When both activations and registrations complete
+- Then only one broker process and one control socket exist, both registrations reach that owner, neither registration is acknowledged by a losing instance, and no duplicate process survives
+- And a later eligible activation reuses the same owner without spawning another
+
+#### Scenario: D04 - idle exit removes the process and a later demand starts a successor
+- Given a broker whose last registration was invalidated or unregistered and which has no admitted work
+- When the 5-second grace elapses without new demand
+- Then the process exits within the healthy bound, its owned control socket is removed, no automatic replacement starts, and a later eligible setup starts a successor before its consumers
+
+#### Scenario: D05 - crash is recovered only by the next activation
+- Given a broker with a running managed-container registration
+- When the broker dies abnormally
+- Then no replacement process starts during an observation window longer than the idle bound, the stale socket is not usable, and the next up/start or other eligible activation starts a successor that preserves the nonsecret registration, revalidates the running container, and reconnects before its consumers
+- And the successor does not restore an explicit token override or replay a pending request
+
+### Requirement: Executable-identity broker reuse and replacement
+
+A running broker MUST expose a private, same-user-authenticated identity to CLI activation containing at least its process identity, the executable device and inode captured when it started, and its build/protocol identity. A broker whose identity matches the invoking executable MUST be reused without restart, without a reload, and without provider lookup. A broker whose executable or protocol identity differs MUST be retired gracefully before a successor from the invoking executable serves registrations. Replacement MUST preserve nonsecret registrations, remain bounded by the existing activation deadline, and MUST NOT leave two owners, a second registry writer, or a successor-unlinked endpoint.
+
+Identical on-disk definition bytes, equal path strings, a live socket, or a successful liveness probe MUST NOT alone establish identity match. Concurrent activations observing the same stale instance MUST replace it at most once and MUST all converge on the successor. A broker that cannot be identified, or that accepts retirement but does not exit within the bound, MUST fail activation with the existing redacted soft-failure behavior rather than kill a process or unlink an endpoint it cannot authenticate, or start a competing owner.
+
+#### Scenario: E01 - matching executable is reused
+- Given a running broker started from the invoking executable and a healthy registration
+- When repeated setup/reuse runs, including concurrent activations
+- Then the same process remains, no new process is spawned, no restart or reload occurs, and provider lookup is not triggered merely by reuse
+
+#### Scenario: E02 - upgraded executable replaces the running broker
+- Given a broker running from an older executable, for example a replaced Homebrew keg or a rebuilt development binary, with saved nonsecret registrations
+- When a CLI from the new executable activates credentials
+- Then the old process exits gracefully, the new executable becomes the only owner, the registrations survive and are revalidated, and a subsequent lookup succeeds without re-registration or credential persistence
+- And repeating the activation does not repeatedly kill the healthy successor
+
+#### Scenario: E03 - replacement failure is bounded and recoverable
+- Given a running broker that reports an unrecognized identity, refuses to exit, or becomes unreachable after accepting retirement
+- When activation attempts reuse or replacement
+- Then setup fails within its existing deadline using the existing redacted warning semantics, no second registry owner is created, no process or endpoint that cannot be authenticated is killed or unlinked, and a later retry can converge
+
+### Requirement: Broker exit cleanup and package removal without service registration
+
+On graceful exit the broker MUST cancel its channels and pending work, remove its control socket only when it still owns the same private socket inode, and MUST NOT unlink lock inodes or delete saved nonsecret registrations. Old-instance cleanup MUST NOT remove or replace a successor's endpoint. A successor MUST safely replace a stale, privately owned socket left by an abnormal exit without following symlinks or deleting unrelated files; a foreign or unsafe endpoint MUST fail closed.
+
+The product MUST NOT install, load, or depend on a LaunchAgent plist, launchd job, `brew services` entry, login item, or other persistent host service. Ordinary package removal MUST therefore leave no product-created broker job or plist and MUST NOT require an uninstall hook, `zap`, a manual cleanup command, or a later login. Formula packaging, install, test, and caveats remain unchanged. A detached broker still running when the package is removed MUST exit under the existing 5-second grace once its last demand ends, MUST NOT be restarted, and MUST NOT recreate broker state after it exits.
+
+#### Scenario: F01 - graceful exit cleans only owned runtime state
+- Given a broker with active channels, pending work, and saved registrations
+- When it exits for idleness or receives SIGTERM/SIGINT while a successor is binding
+- Then channels and pending work terminate within their deadlines, the old cleanup removes only its owned socket, never a successor's socket or a lock inode, and any remaining saved registrations are preserved for successor reconciliation
+
+#### Scenario: F02 - package removal leaves no job or plist
+- Given a normal Formula install, upgrade, or removal, with or without a running detached broker
+- When the operation completes
+- Then no product-created LaunchAgent plist, launchd job, brew service, or login item exists, no uninstall hook or manual cleanup is required, and a running broker exits under the normal grace once its last demand ends and is not restarted
+
+#### Scenario: F03 - stale or unsafe endpoint is handled safely
+- Given an abnormal exit left a privately owned stale socket, or the expected socket path is a symlink or foreign object
+- When the next activation starts a successor
+- Then the owned stale socket is replaced safely, while a symlink or foreign endpoint fails closed without deleting unrelated files
+
+### Requirement: Verification isolates detached broker state
+
+Verification of a development build MUST use a unique private broker context and test-owned executable or executables under the approved temporary root. It MUST NOT touch production state or production broker identity, execute `launchctl`, write a plist, use a real launchd domain, authenticate with a real provider, run installed CLI code, or start user containers without separate authorization. Success, failure, and handled interruption MUST terminate only test-owned detached processes and remove their control sockets, registrations, endpoint directories, helper configuration, and exclusively created container resources. Abrupt unhandleable termination MUST have a narrowly targeted residual-cleanup procedure using only recorded test paths and process identity.
+
+#### Scenario: V01 - isolated detached broker verification and cleanup
+- Given a development build, a pre-existing user installation/state, authorized throwaway runtime resources, and a synthetic provider
+- When isolated verification starts, replaces, crashes, retires, fails midway, and receives a handled termination signal
+- Then CLI-exit survival, single-owner concurrency, idle exit, identity replacement, and no-automatic-crash-restart are demonstrated without any launchctl command, plist, production state, or real credential acquisition
+- And production installation/state remains unchanged, cleanup removes only test-owned processes and paths, and abrupt termination has a documented targeted cleanup procedure
