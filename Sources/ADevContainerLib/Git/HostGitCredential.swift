@@ -1,6 +1,6 @@
 import Foundation
 
-/// HTTPS credentials obtained on the host for a one-shot in-container clone.
+/// HTTP(S) credentials acquired on the host through the existing provider chain.
 public struct GitHTTPSCredentials: Equatable, Sendable {
     public var username: String
     public var password: String
@@ -11,7 +11,7 @@ public struct GitHTTPSCredentials: Equatable, Sendable {
     }
 }
 
-/// Host-side HTTPS credential lookup for clone populate (not GCM product integration).
+/// Shared host-side lookup (not a guest GCM integration or OAuth renewal API).
 public protocol GitCredentialProviding: Sendable {
     /// Resolve HTTPS credentials for `url` via host git credential helper / fallbacks.
     /// Returns nil when no credentials are available (caller maps to structured error).
@@ -32,7 +32,7 @@ public struct HostGitCredential: GitCredentialProviding {
     public var ghPathOverride: String??
 
     public init(
-        runner: any ProcessRunning = FoundationProcessRunner(),
+        runner: any ProcessRunning = CredentialProviderProcessRunner(),
         gitPathOverride: String?? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         ghPathOverride: String?? = nil
@@ -44,10 +44,21 @@ public struct HostGitCredential: GitCredentialProviding {
     }
 
     public func fillHTTPS(url: String) throws -> GitHTTPSCredentials? {
+        guard let fields = GitURLClassifier.httpsCredentialFields(for: url),
+              let destination = try? GitCredentialDestination(scheme: fields.protocolName, host: fields.host),
+              destination.hostname != "dev.azure.com" || !fields.path.split(separator: "/").isEmpty else { return nil }
+        var provider = self
+        if let bounded = runner as? CredentialProviderProcessRunner {
+            provider.runner = bounded.withDeadline(ProcessInfo.processInfo.systemUptime + bounded.timeout)
+        }
+        return try provider.acquire(url: url)
+    }
+
+    private func acquire(url: String) throws -> GitHTTPSCredentials? {
         // Escape hatch: explicit token (not primary UX).
         if let token = environment["ADEVCONTAINER_GIT_TOKEN"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
-           !token.isEmpty
+           !token.isEmpty, GitCredentialProtocol.safe(token), token.utf8.count <= 60000
         {
             return GitHTTPSCredentials(username: "x-access-token", password: token)
         }
@@ -112,7 +123,8 @@ public struct HostGitCredential: GitCredentialProviding {
         guard let fields = GitURLClassifier.httpsCredentialFields(for: url) else {
             return nil
         }
-        let host = fields.host.lowercased()
+        guard let destination = try? GitCredentialDestination(scheme: fields.protocolName, host: fields.host) else { return nil }
+        let host = destination.hostname
         guard host == "github.com" || host.hasSuffix(".github.com") else {
             return nil
         }
@@ -132,7 +144,7 @@ public struct HostGitCredential: GitCredentialProviding {
         }
         guard result.succeeded else { return nil }
         let token = result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty else { return nil }
+        guard !token.isEmpty, GitCredentialProtocol.safe(token), token.utf8.count <= 60000 else { return nil }
         return GitHTTPSCredentials(username: "x-access-token", password: token)
     }
 
@@ -169,24 +181,38 @@ public struct HostGitCredential: GitCredentialProviding {
     }
 
     private func mergedEnvironment() -> [String: String] {
-        // Start from process env so PATH helpers work, then overlay explicit map.
-        var env = ProcessInfo.processInfo.environment
-        for (k, v) in environment {
-            env[k] = v
-        }
+        // Defaults already capture the parent. An explicitly sanitized service/
+        // test environment must not be merged with inherited credential config.
+        var env = environment
         env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GCM_INTERACTIVE"] = "Never"
+        env["GCM_GUI_PROMPT"] = "0"
+        env["GIT_ASKPASS"] = "/usr/bin/false"
+        env["SSH_ASKPASS"] = "/usr/bin/false"
+        env["GH_PROMPT_DISABLED"] = "1"
+        env.removeValue(forKey: "ADEVCONTAINER_GIT_TOKEN")
+        return Self.strippingCredentialTraces(env)
+    }
+
+    static func strippingCredentialTraces(_ environment: [String: String]) -> [String: String] {
+        var env = environment
+        for key in Array(env.keys) where key.hasPrefix("GIT_TRACE") || key.hasPrefix("GCM_TRACE") || ["GIT_CURL_VERBOSE", "GH_DEBUG", "GH_FORCE_TTY", "GCM_DEBUG"].contains(key) {
+            env.removeValue(forKey: key)
+        }
         return env
     }
 
     /// Parse `git credential fill` stdout key=value lines.
     static func parseCredentialOutput(_ text: String) -> [String: String] {
+        guard text.utf8.count <= GitCredentialProtocol.limit else { return [:] }
         var result: [String: String] = [:]
-        for line in text.split(whereSeparator: \.isNewline) {
+        for line in text.split(separator: "\n") {
             let s = String(line)
-            guard let eq = s.firstIndex(of: "=") else { continue }
+            guard GitCredentialProtocol.safe(s), let eq = s.firstIndex(of: "=") else { return [:] }
             let key = String(s[..<eq])
             let value = String(s[s.index(after: eq)...])
             if !key.isEmpty {
+                guard result[key] == nil else { return [:] }
                 result[key] = value
             }
         }

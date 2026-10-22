@@ -39,7 +39,12 @@ jobs:
         run: bash scripts/inject-version.sh "${{ steps.version.outputs.version }}"
 
       - name: Run tests
-        run: swift run adevcontainerTests
+        run: |
+          sh scripts/build-guest-credential-relay.sh
+          sh scripts/test-guest-credential-relay.sh
+          swift build --product adevcontainer
+          ADEVCONTAINER_CREDENTIAL_TESTS_ONLY=1 swift run adevcontainerTests
+          swift run adevcontainerTests
 
       - name: Release build
         run: swift build -c release --product adevcontainer
@@ -59,11 +64,7 @@ jobs:
             exit 1
           fi
           echo "Using binary: ${BIN}"
-          mkdir -p dist
-          cp "${BIN}" dist/adevcontainer
-          export COPYFILE_DISABLE=1
-          tar -C dist -czf adevcontainer-macos-arm64.tar.gz adevcontainer
-          shasum -a 256 adevcontainer-macos-arm64.tar.gz > adevcontainer-macos-arm64.tar.gz.sha256
+          sh scripts/package-release.sh "${BIN}" .
           SHA256="$(awk '{print $1}' adevcontainer-macos-arm64.tar.gz.sha256)"
           if [[ ! "$SHA256" =~ ^[0-9a-f]{64}$ ]]; then
             echo "error: failed to parse sha256 from checksum file: ${SHA256}" >&2

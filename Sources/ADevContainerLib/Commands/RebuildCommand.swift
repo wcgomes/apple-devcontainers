@@ -711,11 +711,13 @@ public enum RebuildCommand {
             ?? (selected.name != selected.id ? try runtime.findByName(selected.name) : nil)
         {
             StatusPrinter.status("Deleting container", item: existing.id)
+            GitCredentialLifecycle.unregisterSoft(id: existing.id, runtime: runtime)
             try runtime.delete(nameOrId: existing.id, force: true)
         } else if selectedOverride != nil || bindRecoveryEligible || volumeResume != nil {
             StatusPrinter.status("Old container already removed; continuing rebuild")
         } else {
             StatusPrinter.status("Deleting container", item: selected.id)
+            GitCredentialLifecycle.unregisterSoft(id: selected.id, runtime: runtime)
             try runtime.delete(nameOrId: selected.id, force: true)
         }
         crossedDeleteBoundary = true
@@ -987,25 +989,7 @@ public enum RebuildCommand {
             return try handleOwnershipFailure(error)
         }
 
-        // Forward host git credentials into the new container's store before hooks.
-        // Bind mode enumerates host remotes; volume mode seeds the stamped git_url.
-        // Credential seeding remains soft-fail: warn and continue, never delete.
-        do {
-            try GuestGitCredentialSeed(
-                credentials: credentials,
-                runner: LifecycleRunner.hostProcessRunnerOverride ?? FoundationProcessRunner()
-            ).seed(
-                containerId: id,
-                hostWorkspace: isVolumeMode ? nil : stampedLocalFolder(labels),
-                gitURL: isVolumeMode ? labels[ContainerIdentity.labelGitURL] : nil,
-                connectionUser: effectiveConfig.connectionUser,
-                runtime: runtime
-            )
-        } catch {
-            StatusPrinter.warning(
-                "Git credential seeding failed; continuing without forwarded credentials: \(error.localizedDescription)"
-            )
-        }
+        GitCredentialLifecycle.setupSoft(id: id, hostWorkspace: isVolumeMode ? nil : stampedLocalFolder(labels), gitURL: isVolumeMode ? labels[ContainerIdentity.labelGitURL] : nil, runtime: runtime, credentials: credentials)
 
         if capturedLocalIdentity.isComplete {
             do {

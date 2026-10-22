@@ -377,6 +377,7 @@ public enum RecoveryOrchestrator {
     ) throws {
         if let containerID {
             if let existing = try runtime.findByName(containerID) {
+                GitCredentialLifecycle.unregisterSoft(id: existing.id, runtime: runtime)
                 try runtime.delete(nameOrId: existing.id, force: true)
             }
         }
@@ -393,8 +394,10 @@ public enum RecoveryOrchestrator {
         // (start failures may leave a container that list has not yet reflected in tests,
         // and LifecycleRunner may already have removed a hook-failed container).
         if let existing = try runtime.findByName(containerID) {
+            GitCredentialLifecycle.unregisterSoft(id: existing.id, runtime: runtime)
             try runtime.delete(nameOrId: existing.id, force: true)
         } else {
+            GitCredentialLifecycle.unregisterSoft(id: containerID, runtime: runtime)
             try? runtime.delete(nameOrId: containerID, force: true)
         }
     }

@@ -1367,6 +1367,8 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(git.fullCloneCalls.isEmpty)
     }),
     ("cloneHappyPathVolumeMountLabelsInContainerCloneJSON", {
+        let connection = AutomaticCredentialCommandPort(); GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
         let git = MockGitClient()
@@ -1486,8 +1488,9 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(mock.calls.contains {
             $0.arguments.first == "exec" && $0.arguments.contains("test") && $0.arguments.contains("-e")
         })
-        // HTTPS credentials filled once
-        try MiniTest.expectEqual(creds.fillCalls.count, 1)
+        // Full clone uses the shared connection, not a one-shot token seed.
+        try MiniTest.expectEqual(creds.fillCalls.count, 0)
+        try MiniTest.expectEqual(connection.events, ["setup"])
         // Hooks: postCreate exec (sh -lc)
         try MiniTest.expect(mock.calls.contains {
             $0.arguments.first == "exec" && $0.arguments.contains("-lc")
@@ -1599,6 +1602,8 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         )
     }),
     ("cloneSSHInjectsCreateSSHFlag", {
+        let connection = AutomaticCredentialCommandPort(); GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
         let git = MockGitClient()
@@ -1621,11 +1626,14 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
             $0.arguments.last?.contains("git-credential-adev") == true
         }, "SSH clone must not seed HTTPS credentials")
         try MiniTest.expect(git.fullCloneCalls.isEmpty)
+        try MiniTest.expect(connection.events.isEmpty)
         try MiniTest.expect(mock.calls.contains {
             $0.arguments.first == "exec" && $0.arguments.contains("-c")
         })
     }),
     ("cloneHTTPSPublicWorksWithoutHostCredentials", {
+        let connection = AutomaticCredentialCommandPort(); GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
         let git = MockGitClient()
@@ -1643,13 +1651,16 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
             localEnv: [:]
         )
         try MiniTest.expectEqual(result.outcome, "success")
-        try MiniTest.expectEqual(creds.fillCalls.count, 1)
+        try MiniTest.expectEqual(creds.fillCalls.count, 0)
+        try MiniTest.expectEqual(connection.events, ["setup"])
         try MiniTest.expect(!mock.calls.contains {
             $0.arguments.last?.contains("git-credential-adev") == true
         }, "nil fill must not seed")
         try MiniTest.expect(git.fullCloneCalls.isEmpty)
     }),
     ("cloneHTTPSCloneFailWithoutCredsHintsCredentials", {
+        let connection = AutomaticCredentialCommandPort(); GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
         let git = MockGitClient()
@@ -1658,6 +1669,10 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         creds.fillResult = .success(nil)
         let mock = MockProcessRunner()
         mock.handlers = CloneRuntimeMock.handlers(cloneExecSucceeds: false)
+        mock.handlers.insert({ args in
+            if args.first == "delete" { connection.record("runtime.delete") }
+            return nil
+        }, at: 0)
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         try MiniTest.expectThrows({
             _ = try CloneCommand.run(
@@ -1677,6 +1692,7 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         }
         try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" })
         try MiniTest.expect(mock.calls.contains { $0.arguments.starts(with: ["volume", "delete"]) })
+        try MiniTest.expectEqual(connection.events, ["setup", "unregister", "runtime.delete"])
         try MiniTest.expect(git.fullCloneCalls.isEmpty)
     }),
     ("cloneRootConfigFallback", {
@@ -2234,6 +2250,9 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         })
     }),
     ("cloneGlobalAuthorFailureWarnsAndRunsHook", {
+        let connection = AutomaticCredentialCommandPort()
+        GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
         let git = MockGitClient()
@@ -2271,6 +2290,9 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(mock.calls.contains { $0.arguments.last?.contains("author-hook") == true })
     }),
     ("cloneLocalAuthorFailureSkipsGlobalAndRunsHook", {
+        let connection = AutomaticCredentialCommandPort()
+        GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
         let git = MockGitClient()
@@ -2763,14 +2785,33 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "delete" })
     }),
-    ("cloneHTTPSNonAzureKeepsLocalStore", {
+    ("cloneLegacyHTTPPreservesDiscoveredScheme", {
+        let restore = CloneGitFeatureTestSupport.installOverrides(); defer { restore() }
+        let connection = AutomaticCredentialCommandPort(); GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
+        let git = MockGitClient(); git.configJSONToWrite = #"{"image":"alpine:3.20"}"#
+        let mock = MockProcessRunner(); mock.handlers = CloneRuntimeMock.handlers()
+        let credentials = MockGitCredential()
+        let url = "http://dev.azure.com/org/project/_git/repo"
+        _ = try CloneCommand.run(options: .init(gitURL: url, skipPull: true), runtime: .init(executablePath: "/synthetic/container", runner: mock), git: git, credentials: credentials, localEnv: [:], identityPrompt: quietIdentityPrompt(), isTTY: false)
+        try MiniTest.expectEqual(connection.setups.first?.gitURL, url)
+        try MiniTest.expectEqual(connection.events, ["setup"])
+        try MiniTest.expect(credentials.fillCalls.isEmpty)
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.joined().contains("ADEV_CLONE_PASS") || $0.arguments.joined().contains("credential approve") })
+        try MiniTest.expectEqual(gitCloneCalls(mock).count, 1)
+    }),
+    ("cloneHTTPSNonAzureUsesAutomaticConnectionBeforePopulate", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
         let git = MockGitClient()
         git.configJSONToWrite = #"{"name":"CloneApp","image":"alpine:3.20"}"#
         let creds = MockGitCredential()
+        let connection = AutomaticCredentialCommandPort(); GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         let mock = MockProcessRunner()
-        mock.handlers = CloneRuntimeMock.handlers()
+        mock.handlers = [{ args in
+            if args.first == "exec", args.last?.contains("git clone") == true { connection.record("populate") }; return nil
+        }] + CloneRuntimeMock.handlers()
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         let result = try CloneCommand.run(
             options: CloneOptions(gitURL: "https://github.com/org/clone-app.git", skipPull: true),
@@ -2780,10 +2821,11 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
             localEnv: [:]
         )
         try MiniTest.expectEqual(result.outcome, "success")
-        try MiniTest.expectEqual(creds.fillCalls.count, 1, "clone does not fill twice")
+        try MiniTest.expectEqual(creds.fillCalls.count, 0, "on-demand connection does not pre-acquire credentials")
+        try MiniTest.expectEqual(Array(connection.events.prefix(2)), ["setup", "populate"])
         try MiniTest.expect(!mock.calls.contains {
             $0.arguments.last?.contains("git-credential-adev") == true
-        }, "non-Azure clone must not install the product helper")
+        }, "the injected connection owns helper provisioning")
         try MiniTest.expect(!mock.calls.contains {
             $0.arguments.last?.contains("useHttpPath") == true
         })
@@ -2795,8 +2837,9 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         }
         try MiniTest.expectEqual(cloneScripts.count, 1)
         let script = cloneScripts[0].arguments.last ?? ""
-        try MiniTest.expect(script.contains("git -C \"$WS\" config credential.helper store"))
-        try MiniTest.expect(script.contains("git -C \"$WS\" credential approve"))
+        try MiniTest.expect(!script.contains("credential.helper store"))
+        try MiniTest.expect(!script.contains("credential approve"))
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.joined().contains("ADEV_CLONE_PASS") || $0.arguments.joined().contains("ADEV_CLONE_USER") })
         try MiniTest.expect(!script.contains("secret-token"), "password stays off the exec command")
     }),
     ("cloneHTTPSAzureUsesURLScopedHelper", {
@@ -2805,8 +2848,12 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         let git = MockGitClient()
         git.configJSONToWrite = #"{"name":"CloneApp","image":"alpine:3.20"}"#
         let creds = MockGitCredential()
+        let connection = AutomaticCredentialCommandPort(); GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         let mock = MockProcessRunner()
-        mock.handlers = CloneRuntimeMock.handlers()
+        mock.handlers = [{ args in
+            if args.first == "exec", args.last?.contains("git clone") == true { connection.record("populate") }; return nil
+        }] + CloneRuntimeMock.handlers()
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         let result = try CloneCommand.run(
             options: CloneOptions(
@@ -2819,23 +2866,12 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
             localEnv: [:]
         )
         try MiniTest.expectEqual(result.outcome, "success")
-        try MiniTest.expectEqual(creds.fillCalls.count, 1, "Azure clone does not fill twice")
+        try MiniTest.expectEqual(creds.fillCalls.count, 0)
+        try MiniTest.expectEqual(Array(connection.events.prefix(2)), ["setup", "populate"])
         let seeds = mock.calls.filter {
             $0.arguments.first == "exec" && $0.arguments.last?.contains("git-credential-adev") == true
         }
-        try MiniTest.expectEqual(seeds.count, 1, "Azure clone seeds the URL-scoped helper once")
-        let script = seeds[0].arguments.last ?? ""
-        try MiniTest.expect(script.contains("credential.https://dev.azure.com.helper"))
-        try MiniTest.expect(script.contains("credential.https://dev.azure.com.useHttpPath true"))
-        try MiniTest.expect(!script.contains("credential.https://dev.azure.com.helper \"\""), "Azure clone must not install an empty helper reset")
-        try MiniTest.expect(!script.contains("git config --global --replace-all credential.helper"))
-        try MiniTest.expect(!script.contains("git config --global --add credential.helper"))
-        try MiniTest.expect(!script.contains("credential.helper store"))
-        try MiniTest.expect(!script.contains("secret-token"))
-        try MiniTest.expectEqual(
-            String(data: seeds[0].stdinData ?? Data(), encoding: .utf8) ?? "",
-            "protocol=https\nhost=dev.azure.com\nusername=user\npassword=secret-token\n\n"
-        )
+        try MiniTest.expectEqual(seeds.count, 0, "the shared connection, not clone, owns helper setup")
         let cloneScripts = mock.calls.filter {
             $0.arguments.first == "exec" && $0.arguments.last?.contains("git clone") == true
         }
@@ -3700,6 +3736,8 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(deleteIdx < createIdx)
     }),
     ("cloneReuseVolumePromptYesKeepsTree", {
+        let connection = AutomaticCredentialCommandPort(); GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
         let gitURL = "https://github.com/org/reuse-yes.git"
@@ -3710,9 +3748,13 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
         )
         let wsVol = identity.workspaceVolumeName
         let (runtime, mock) = volumeDecisionRuntime(volumeName: wsVol, present: true, entriesExit: 0)
+        mock.handlers.insert({ args in
+            if args.first == "exec", args.last?.contains("echo reuse-credential-hook") == true { connection.record("hook") }
+            return nil
+        }, at: 0)
         let prompt = VolumePromptCapture(answers: ["Y"])
         let git = MockGitClient()
-        git.configJSONToWrite = #"{ "image": "alpine:3.20" }"#
+        git.configJSONToWrite = #"{ "image": "alpine:3.20", "postCreateCommand": "echo reuse-credential-hook" }"#
         let result = try CloneCommand.run(
             options: CloneOptions(gitURL: gitURL, skipPull: true),
             runtime: runtime,
@@ -3730,6 +3772,8 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
         )
         try MiniTest.expect(volumeDeleteCalls(mock, name: wsVol).isEmpty, "reuse must not delete the volume")
         try MiniTest.expect(gitCloneCalls(mock).isEmpty, "reuse must not git-clone over an existing tree")
+        try MiniTest.expectEqual(connection.events, ["setup", "hook"])
+        try MiniTest.expectEqual(connection.setups.first?.gitURL, gitURL)
         try MiniTest.expect(mock.calls.contains {
             $0.arguments.contains("user.name") && $0.arguments.contains("Test User")
         }, "reuse still applies author identity when .git exists")

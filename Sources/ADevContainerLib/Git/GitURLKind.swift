@@ -41,10 +41,12 @@ public enum GitURLClassifier {
     /// Returns nil when the URL is not an http(s) form.
     public static func httpsCredentialFields(for rawURL: String) -> (protocolName: String, host: String, path: String)? {
         let trimmed = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let comps = URLComponents(string: trimmed),
+        guard GitCredentialProtocol.safe(trimmed), let comps = URLComponents(string: trimmed),
               let scheme = comps.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
-              let host = comps.host, !host.isEmpty
+              let host = comps.host, !host.isEmpty,
+              let destination = try? GitCredentialDestination(scheme: scheme, host: host + (comps.port.map { ":\($0)" } ?? "")),
+              GitCredentialProtocol.safe(comps.path)
         else {
             return nil
         }
@@ -52,6 +54,6 @@ public enum GitURLClassifier {
         if path.hasPrefix("/") {
             path = String(path.dropFirst())
         }
-        return (scheme, host, path)
+        return (scheme, destination.hostField, path)
     }
 }

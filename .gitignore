@@ -1,5 +1,6 @@
 # SwiftPM
 .build/
+Sources/ADevContainerLib/Git/Generated/GuestGitCredentialEmbeddedAssets.swift
 .swiftpm/xcode/xcuserdata/
 .swiftpm/configuration/
 *.xcodeproj

@@ -447,6 +447,63 @@ nonisolated(unsafe) let upCommandRecoveryTests: [(String, () throws -> Void)] = 
         try MiniTest.expectEqual(result.outcome, "success")
         try MiniTest.expectEqual(creates, 1, "retry creates after restart postStart failure")
     }),
+    ("upRecoveryReplaceUnregistersBeforeDelete", {
+        let port = AutomaticCredentialCommandPort()
+        GitCredentialLifecycle.setTestConnection(port)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20", "postStartCommand": "echo post-start" }"#)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        let existing = MockProcessRunner.containerListJSON(
+            id: resolved.containerName,
+            state: "stopped",
+            labels: resolved.labels
+        )
+        var creates = 0
+        var execCalls = 0
+        mock.handlers = [
+            { args in
+                if args.starts(with: ["list"]) {
+                    let values: [[String: Any]] = [existing]
+                    return ProcessResult(exitCode: 0, stdout: try! JSONSerialization.data(withJSONObject: values), stderr: Data())
+                }
+                if args.first == "create" {
+                    creates += 1
+                    return ProcessResult(exitCode: 0, stdout: Data("new-container\n".utf8), stderr: Data())
+                }
+                if args.first == "start" { return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data()) }
+                if args.first == "delete" {
+                    port.record("runtime.delete")
+                    return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
+                }
+                if args.first == "exec" {
+                    execCalls += 1
+                    return ProcessResult(
+                        exitCode: execCalls == 1 ? 1 : 0,
+                        stdout: Data(),
+                        stderr: execCalls == 1 ? Data("post-start failed".utf8) : Data()
+                    )
+                }
+                return nil
+            },
+            MockProcessRunner.imageInspectHandler(baseUser: nil)
+        ]
+        let editorRunner = UpRecoveryEditorRunner(payloads: [Data(#"{ "image": "alpine:3.20" }"#.utf8)])
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: workspace.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:],
+            isTTY: true,
+            recoveryEditor: upRecoveryEditor(runner: editorRunner),
+            openEditorPrompt: upRecoveryPrompt(answers: ["y"])
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        let unregister = port.events.firstIndex(of: "unregister")
+        let deleted = port.events.firstIndex(of: "runtime.delete")
+        try MiniTest.expect(unregister != nil && deleted != nil && unregister! < deleted!, "replacement must unregister before delete")
+    }),
 
     ("upLaterRetryDeletesLeftoverFromLatestFailure", {
         // First eligible failure is create (no leftover). A later retry then hits a

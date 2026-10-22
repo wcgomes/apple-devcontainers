@@ -64,6 +64,7 @@ public enum PurgeCommand {
         // 1. Container (missing is OK after resolve — should exist, but treat delete failures carefully)
         if let container = target.container {
             StatusPrinter.status("Deleting container", item: container.id)
+            GitCredentialLifecycle.unregisterSoft(id: container.id, runtime: runtime)
             do {
                 try runtime.delete(nameOrId: container.id, force: true)
                 print("Removed container \(container.id)")

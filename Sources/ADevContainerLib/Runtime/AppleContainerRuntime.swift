@@ -1,5 +1,43 @@
 import Foundation
 import Crypto
+import CoreFoundation
+
+struct GitCredentialRuntimeContext: Codable, Equatable, Sendable {
+    static let identityLabels: Set<String> = [ContainerIdentity.labelManaged, ContainerIdentity.labelConfigHash, ContainerIdentity.labelRemoteUser,
+        ContainerIdentity.labelLocalFolder, ContainerIdentity.labelConfigFile, ContainerIdentity.labelWorkspaceMode, ContainerIdentity.labelGitURL]
+    let id: String
+    let incarnation: String
+    let platform: String
+    let user: String
+    let labels: [String: String]
+    static func parse(_ data: Data) throws -> Self {
+        guard data.count <= GitCredentialProtocol.limit, let object = try? JSONSerialization.jsonObject(with: data) else { throw GitCredentialFailure.invalidContext }
+        let dictionary: [String: Any]?
+        if let array = object as? [[String: Any]], array.count == 1 { dictionary = array[0] } else { dictionary = object as? [String: Any] }
+        guard let root = dictionary, let configuration = root["configuration"] as? [String: Any],
+              let id = configuration["id"] as? String, !id.isEmpty, GitCredentialProtocol.safe(id),
+              let labels = configuration["labels"] as? [String: String], labels["devcontainer.managed"] == "adevcontainer",
+              let state = root["status"] as? [String: Any], state["state"] as? String == "running",
+              let platform = configuration["platform"] as? [String: Any], platform["os"] as? String == "linux",
+              let architecture = platform["architecture"] as? String, ["arm64", "amd64"].contains(architecture),
+              let user = labels[ContainerIdentity.labelRemoteUser], !user.isEmpty, GitCredentialProtocol.safe(user),
+              let creation = configuration["creationDate"] else { throw GitCredentialFailure.invalidContext }
+        let incarnation: String
+        if let number = creation as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue.isFinite, number.doubleValue > 0 {
+            incarnation = "reference:\(number.doubleValue)"
+        } else if let text = creation as? String {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let date = formatter.date(from: text) ?? ISO8601DateFormatter().date(from: text)
+            guard let date, date.timeIntervalSince1970 > 0 else { throw GitCredentialFailure.invalidContext }
+            incarnation = "unix:\(date.timeIntervalSince1970)"
+        } else { throw GitCredentialFailure.invalidContext }
+        var identity = labels.filter { identityLabels.contains($0.key) }
+        if let gitURL = identity[ContainerIdentity.labelGitURL] { identity[ContainerIdentity.labelGitURL] = ContainerIdentity.normalizeGitURL(gitURL) }
+        guard identity.values.allSatisfy(GitCredentialProtocol.safe) else { throw GitCredentialFailure.invalidContext }
+        return .init(id: id, incarnation: incarnation, platform: "linux/\(architecture)", user: user, labels: identity)
+    }
+}
 
 public struct ContainerInfo: Equatable, Sendable {
     public var id: String
@@ -122,6 +160,84 @@ enum AppleStaleExec {
 
 /// Sole module that invokes the Apple `container` CLI.
 public struct AppleContainerRuntime: Sendable {
+    static func credentialExecArguments(context: GitCredentialRuntimeContext, command: [String]) throws -> [String] {
+        guard !context.id.isEmpty, !context.id.hasPrefix("-"), !context.user.isEmpty, !context.user.hasPrefix("-"), !command.isEmpty,
+              [context.id, context.user].allSatisfy(GitCredentialProtocol.safe), command.allSatisfy({ !$0.utf8.contains(0) }) else { throw GitCredentialFailure.invalidContext }
+        return ["exec", "-i", "-u", context.user, context.id] + command
+    }
+    func credentialContext(id: String, deadline: TimeInterval? = nil) throws -> GitCredentialRuntimeContext {
+        guard !id.isEmpty, !id.hasPrefix("-"), GitCredentialProtocol.safe(id) else { throw GitCredentialFailure.invalidContext }
+        let result = try credentialRun(arguments: ["inspect", id], deadline: deadline)
+        guard result.succeeded else { throw GitCredentialFailure.invalidContext }
+        return try GitCredentialRuntimeContext.parse(result.stdout)
+    }
+    func credentialObservation(id: String, deadline: TimeInterval? = nil) -> GitCredentialObservation {
+        guard !id.isEmpty, !id.hasPrefix("-"), GitCredentialProtocol.safe(id) else { return .unknown }
+        let end = deadline ?? (ProcessInfo.processInfo.systemUptime + 1)
+        guard let inspect = try? credentialRun(arguments: ["inspect", id], deadline: end) else { return .unknown }
+        let data: Data
+        if inspect.succeeded { data = inspect.stdout }
+        else {
+            // A failed inspect cannot distinguish removal from runtime downtime.
+            guard let list = try? credentialRun(arguments: ["list", "--all", "--format", "json"], deadline: end), list.succeeded else { return .unknown }
+            data = list.stdout
+        }
+        guard data.count <= GitCredentialProtocol.limit, let object = try? JSONSerialization.jsonObject(with: data) else { return .unknown }
+        let entries: [[String: Any]]
+        if let array = object as? [[String: Any]] { entries = array }
+        else if inspect.succeeded, let dictionary = object as? [String: Any] { entries = [dictionary] }
+        else { return .unknown }
+        // Only well-formed successful inventory can prove absence. Do not parse
+        // human diagnostics, and never adopt any other entry as a session.
+        guard entries.allSatisfy({ entry in
+            guard let configuration = entry["configuration"] as? [String: Any], let id = configuration["id"] as? String, !id.isEmpty,
+                  let status = entry["status"] as? [String: Any], let state = status["state"] as? String, !state.isEmpty else { return false }
+            return configuration["labels"] == nil || configuration["labels"] is [String: String]
+        }) else { return .unknown }
+        let matches = entries.filter { ($0["configuration"] as? [String: Any])?["id"] as? String == id }
+        guard let entry = matches.first else { return !inspect.succeeded || entries.isEmpty ? .inactive : .unknown }
+        guard matches.count == 1, let configuration = entry["configuration"] as? [String: Any],
+              let labels = configuration["labels"] as? [String: String], let status = entry["status"] as? [String: Any], let state = status["state"] as? String else { return .unknown }
+        if labels[ContainerIdentity.labelManaged] != ContainerIdentity.managedValue || state == "stopped" { return .inactive }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: entry), let context = try? GitCredentialRuntimeContext.parse(bytes) else { return .unknown }
+        return .running(context)
+    }
+    func credentialRun(arguments: [String], input: Data? = nil, deadline: TimeInterval? = nil) throws -> ProcessResult {
+        let end = deadline ?? (ProcessInfo.processInfo.systemUptime + 30)
+        guard ProcessInfo.processInfo.systemUptime < end else { throw GitCredentialFailure.deadline }
+        let selected: any ProcessRunning = runner is FoundationProcessRunner ? CredentialProviderProcessRunner().withDeadline(end) : runner
+        do {
+            let result = try selected.run(executable: executablePath, arguments: arguments, environment: ProcessInfo.processInfo.environment.filter { $0.key != "ADEVCONTAINER_GIT_TOKEN" }, currentDirectory: nil, stdinData: input)
+            guard ProcessInfo.processInfo.systemUptime < end else { throw GitCredentialFailure.deadline }
+            return result
+        } catch let error as GitCredentialFailure { throw error }
+        catch { throw GitCredentialFailure.transport }
+    }
+    func credentialExec(context: GitCredentialRuntimeContext, command: [String], input: Data? = nil, deadline: TimeInterval? = nil) throws -> ProcessResult {
+        try credentialRun(arguments: Self.credentialExecArguments(context: context, command: command), input: input, deadline: deadline)
+    }
+    func credentialDuplex(context: GitCredentialRuntimeContext, command: [String]) throws -> CredentialDuplexProcess {
+        // Buffered-runner fakes must never accidentally open a real container
+        // channel. Broker tests inject their transport port explicitly instead.
+        guard runner is FoundationProcessRunner else { throw GitCredentialFailure.invalidContext }
+        return try CredentialDuplexProcess(executable: executablePath, arguments: Self.credentialExecArguments(context: context, command: command), environment: ProcessInfo.processInfo.environment.filter { $0.key != "ADEVCONTAINER_GIT_TOKEN" }, guarded: true)
+    }
+    func credentialBrokerPorts(providerEnvironment: [String: String] = ProcessInfo.processInfo.environment) -> GitCredentialBrokerPorts {
+        let sanitized = providerEnvironment.filter { $0.key != "ADEVCONTAINER_GIT_TOKEN" }
+        return .init(context: { try credentialContext(id: $0) }, connect: { registration, generation, receive, disconnected in
+            let process = try credentialDuplex(context: registration.context, command: [registration.directory + "/adevcontainer-git-relay", "relay", registration.directory, String(generation)])
+            do {
+                let channel = try GitCredentialRelayChannel(process: process, platform: registration.context.platform, generation: generation)
+                channel.start(receive: receive, disconnected: disconnected); return channel
+            } catch { process.cancel(); throw GitCredentialFailure.transport }
+        }, acquire: { url, token, deadline in
+            var environment = sanitized
+            if let token { environment["ADEVCONTAINER_GIT_TOKEN"] = token }
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { throw GitCredentialFailure.deadline }
+            return try HostGitCredential(runner: CredentialProviderProcessRunner(timeout: remaining), environment: environment).fillHTTPS(url: url)
+        }, observe: { id, deadline in credentialObservation(id: id, deadline: deadline) })
+    }
     public var executablePath: String
     public var runner: any ProcessRunning
     /// Used for interactive/TTY `exec` (inherits host stdio).

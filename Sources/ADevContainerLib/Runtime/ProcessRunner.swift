@@ -87,6 +87,19 @@ extension ProcessRunning {
     }
 }
 
+func sanitizedProcessEnvironment(_ overlay: [String: String]?) -> [String: String] {
+    var env = ProcessInfo.processInfo.environment
+    if let overlay {
+        for (key, value) in overlay {
+            env[key] = value
+        }
+    }
+    // A nil or partial overlay must not reintroduce the host token. Container
+    // CLI children run on the host; the guest does not need this variable.
+    env.removeValue(forKey: "ADEVCONTAINER_GIT_TOKEN")
+    return env
+}
+
 public struct FoundationProcessRunner: StreamTeeingProcessRunning {
     public init() {}
 
@@ -124,13 +137,7 @@ public struct FoundationProcessRunner: StreamTeeingProcessRunning {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
 
-        var env = ProcessInfo.processInfo.environment
-        if let environment {
-            for (k, v) in environment {
-                env[k] = v
-            }
-        }
-        process.environment = env
+        process.environment = sanitizedProcessEnvironment(environment)
 
         if let currentDirectory {
             process.currentDirectoryURL = URL(fileURLWithPath: currentDirectory)
@@ -311,13 +318,7 @@ public struct InteractiveProcessRunner: ProcessRunning {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
 
-        var env = ProcessInfo.processInfo.environment
-        if let environment {
-            for (k, v) in environment {
-                env[k] = v
-            }
-        }
-        process.environment = env
+        process.environment = sanitizedProcessEnvironment(environment)
 
         if let currentDirectory {
             process.currentDirectoryURL = URL(fileURLWithPath: currentDirectory)

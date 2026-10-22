@@ -16,7 +16,24 @@ jobs:
         run: swift --version
 
       - name: Run tests
-        run: swift run adevcontainerTests
+        # Prepare generated, ignored Swift payloads before any Swift target builds.
+        # Build the CLI explicitly for isolated internal-entry subprocess tests.
+        run: |
+          sh scripts/build-guest-credential-relay.sh
+          sh scripts/test-guest-credential-relay.sh
+          swift build --product adevcontainer
+          ADEVCONTAINER_CREDENTIAL_TESTS_ONLY=1 swift run adevcontainerTests
+          swift run adevcontainerTests
 
       - name: Release build
         run: swift build -c release --product adevcontainer
+
+  native-linux-amd64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and exercise shipped static amd64 relay
+        run: |
+          sh scripts/build-guest-credential-relay.sh --raw-only
+          sh scripts/test-guest-credential-relay.sh
+          sh Tests/GuestGitCredentialRelay/build_artifacts_tests.sh

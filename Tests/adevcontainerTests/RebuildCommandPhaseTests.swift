@@ -3677,7 +3677,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         })
     }),
 
-    // ═══════════════════════ Section 6: git credential seeding ═══════════════════════
+    // ═══════════════════════ Section 6: automatic credential connection ═══════════════════════
 
     ("rebuildBindSeedsFromHostRemotesBeforeHooks", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
@@ -3688,6 +3688,9 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         }
         """)
         defer { try? FileManager.default.removeItem(at: ws) }
+        let connection = AutomaticCredentialCommandPort()
+        GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         let s = RebuildScenario()
         let info = RebuildScenario.container(
             id: "old-bind-id",
@@ -3698,17 +3701,14 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         )
         s.containers = [info]
         s.install()
+        s.mock.handlers.insert({ args in
+            if args.first == "delete" { connection.record("runtime.delete") }
+            if args.first == "exec", args.last?.contains("chown") == true { connection.record("ownership") }
+            if args.first == "exec", args.last?.contains("postCreateCustom") == true { connection.record("hook") }
+            return nil
+        }, at: 0)
         let hostRunner = RecordingHostProcessRunner()
-        hostRunner.handler = { call in
-            if call.arguments == ["-C", ws.path, "remote", "-v"] {
-                return ProcessResult(
-                    exitCode: 0,
-                    stdout: Data("origin\thttps://github.com/wcgomes/repo.git (fetch)\n".utf8),
-                    stderr: Data()
-                )
-            }
-            return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
-        }
+        hostRunner.handler = { _ in ProcessResult(exitCode: 0, stdout: Data(), stderr: Data()) }
         let restore = RecordingHostProcessRunner.install(hostRunner)
         defer { restore() }
         let creds = SeedMockCredential()
@@ -3717,31 +3717,24 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         )
         let result = try RebuildCommand.run(options: RebuildOptions(), runtime: s.runtime, credentials: creds)
         try MiniTest.expectEqual(result.outcome, "success")
-        let calls = s.mock.calls.map(\.arguments)
-        let deleteIdx = calls.firstIndex { $0.first == "delete" }!
-        let createIdx = calls.firstIndex { $0.first == "create" }!
-        let startIdx = calls.firstIndex { $0.first == "start" }!
-        let seedIdx = calls.firstIndex { $0.first == "exec" && $0.last?.contains("credential.helper") == true }!
-        let hookIdx = calls.firstIndex { $0.first == "exec" && $0.last?.contains("postCreateCustom") == true }!
-        try MiniTest.expect(deleteIdx < createIdx, "old deleted before new created")
-        try MiniTest.expect(createIdx < startIdx, "new created before start")
-        try MiniTest.expect(startIdx < seedIdx, "seeding after start")
-        try MiniTest.expect(seedIdx < hookIdx, "seeding before first hook exec")
-        let seedCall = s.mock.calls[seedIdx]
-        let seedArgs = seedCall.arguments
-        try MiniTest.expect(seedArgs.contains("-u") && seedArgs.contains("vscode"), "seeds as connection user")
-        try MiniTest.expectEqual(
-            String(data: seedCall.stdinData ?? Data(), encoding: .utf8) ?? "",
-            "protocol=https\nhost=github.com\nusername=x-access-token\npassword=ghp_secret\n\n"
-        )
-        try MiniTest.expect(!seedArgs.contains(where: { $0.contains("ghp_secret") }))
-        try MiniTest.expect(seedCall.environment?.values.contains("ghp_secret") != true)
-        let script = seedArgs.last ?? ""
-        try MiniTest.expect(script.contains("git config --global --add credential.helper"))
-        try MiniTest.expect(!script.contains("ghp_secret"), "secrets never in the exec command")
-        try MiniTest.expect(!script.contains("github.com"), "no host/path in the script")
+        try MiniTest.expectEqual(connection.setups, [.init(id: s.newContainerId, hostWorkspace: ws.path, gitURL: nil, refresh: false)])
+        let events = connection.events
+        try MiniTest.expect(events.firstIndex(of: "unregister")! < events.firstIndex(of: "runtime.delete")!)
+        try MiniTest.expect(events.firstIndex(of: "ownership")! < events.firstIndex(of: "setup")!)
+        try MiniTest.expect(events.firstIndex(of: "setup")! < events.firstIndex(of: "hook")!)
+        try MiniTest.expect(creds.fillCalls.isEmpty, "rebuild must not pre-acquire or persist a token")
+        try MiniTest.expect(hostRunner.calls.isEmpty, "bind discovery belongs to the injected connection")
+        try MiniTest.expect(!s.mock.calls.contains { call in
+            let joined = call.arguments.joined(separator: " ")
+            return joined.contains("credential.helper") || joined.contains("git-credential-adev") || joined.contains("credential approve") || joined.contains("ghp_secret")
+                || (call.stdinData ?? Data()).contains(Data("ghp_secret".utf8))
+                || call.environment?.values.contains("ghp_secret") == true
+        })
     }),
     ("rebuildVolumeSeedsFromStampedGitURLWithoutEnumeration", {
+        let connection = AutomaticCredentialCommandPort()
+        GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         let s = RebuildScenario()
         let info = RebuildScenario.container(id: "vol-old", labels: s.volumeLabels())
         s.containers = [info]
@@ -3761,21 +3754,19 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
             result = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime, credentials: creds)
         }
         try MiniTest.expectEqual(result?.outcome, "success")
-        let calls = s.mock.calls.map(\.arguments)
-        let seedIdx = calls.firstIndex { $0.first == "exec" && $0.last?.contains("credential.helper") == true }!
-        let seedCall = s.mock.calls[seedIdx]
-        let seedArgs = seedCall.arguments
-        try MiniTest.expectEqual(
-            String(data: seedCall.stdinData ?? Data(), encoding: .utf8) ?? "",
-            "protocol=https\nhost=github.com\nusername=x-access-token\npassword=ghp_secret\n\n",
-            "volume seeds from the stamped git_url"
-        )
-        try MiniTest.expect(!seedArgs.contains(where: { $0.contains("ghp_secret") }))
-        try MiniTest.expect(seedCall.environment?.values.contains("ghp_secret") != true)
-        try MiniTest.expect(seedArgs.contains("-u") && seedArgs.contains("vscode"))
+        try MiniTest.expectEqual(connection.setups, [.init(id: s.newContainerId, hostWorkspace: nil, gitURL: "https://github.com/example/repo.git", refresh: false)])
+        try MiniTest.expect(creds.fillCalls.isEmpty)
         try MiniTest.expect(hostRunner.calls.isEmpty, "volume mode must not enumerate host remotes")
+        try MiniTest.expect(!s.mock.calls.contains { call in
+            let joined = call.arguments.joined(separator: " ")
+            return joined.contains("credential.helper") || joined.contains("git-credential-adev") || joined.contains("credential approve") || joined.contains("ghp_secret")
+                || (call.stdinData ?? Data()).contains(Data("ghp_secret".utf8))
+        })
     }),
     ("rebuildVolumeMissingGitURLSkipsSilently", {
+        let connection = AutomaticCredentialCommandPort()
+        GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         let s = RebuildScenario()
         let info = RebuildScenario.container(id: "vol-old", labels: s.volumeLabels(gitURL: ""))
         s.containers = [info]
@@ -3792,6 +3783,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         }
         try MiniTest.expectEqual(result?.outcome, "success")
         try MiniTest.expect(creds.fillCalls.isEmpty, "missing git_url never fills")
+        try MiniTest.expectEqual(connection.setups.last?.gitURL, "")
         try MiniTest.expect(
             !s.mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("git config --global --add credential.helper") == true },
             "no seeding exec without git_url"
@@ -3807,6 +3799,10 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         }
         """)
         defer { try? FileManager.default.removeItem(at: ws) }
+        let connection = AutomaticCredentialCommandPort()
+        connection.fails = true
+        GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         let s = RebuildScenario()
         let info = RebuildScenario.container(
             id: "old-bind-id",
@@ -3816,7 +3812,6 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
             )
         )
         s.containers = [info]
-        s.failingExecSubstrings = ["git-credential-adev"]
         s.install()
         let hostRunner = RecordingHostProcessRunner()
         hostRunner.handler = { call in
@@ -3852,6 +3847,9 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
     ("rebuildNeverSeedsOldContainerBeforeDelete", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20","remoteUser":"vscode"}"#)
         defer { try? FileManager.default.removeItem(at: ws) }
+        let connection = AutomaticCredentialCommandPort()
+        GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         let s = RebuildScenario()
         let info = RebuildScenario.container(
             id: "old-bind-id",
@@ -3887,8 +3885,9 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
             !calls.prefix(deleteIdx + 1).contains { $0.first == "exec" && $0.last?.contains("git config --global --add credential.helper") == true },
             "no seeding exec on the old container before delete"
         )
-        let seeds = calls.filter { $0.first == "exec" && $0.last?.contains("git config --global --add credential.helper") == true }
-        try MiniTest.expectEqual(seeds.count, 1, "exactly one seeding exec, on the new container")
+        try MiniTest.expect(connection.events.firstIndex(of: "unregister")! < connection.events.firstIndex(of: "setup")!)
+        try MiniTest.expectEqual(connection.setups.map(\.id), [s.newContainerId])
+        try MiniTest.expect(!calls.contains { $0.first == "exec" && $0.last?.contains("credential.helper") == true })
     }),
     ("rebuildBindIdentityOrderAndConnectionUser", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
@@ -3900,6 +3899,10 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         """)
         defer { try? FileManager.default.removeItem(at: ws) }
         var events: [String] = []
+        let connection = AutomaticCredentialCommandPort()
+        connection.onEvent = { events.append($0) }
+        GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         let reader = RebuildIdentityReaderFixture()
         reader.hostIdentity = GitAuthorIdentity(name: "Ada Lovelace", email: "ada@example.com")
         reader.onHostRead = { events.append("host-read") }
@@ -3919,9 +3922,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
             if args.first == "create" { events.append("replacement-create") }
             if args.first == "start" { events.append("replacement-start") }
             if args.first == "exec", let script = args.last {
-                if script.contains("git config --global --add credential.helper") {
-                    events.append("credential")
-                } else if script.contains("git config --global --replace-all user.name") {
+                if script.contains("git config --global --replace-all user.name") {
                     events.append("global")
                 } else if script.contains("chown") {
                     events.append("ownership")
@@ -3959,7 +3960,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(reader.guestCalls.isEmpty, "bind mode uses the host local reader")
         try MiniTest.expectEqual(
             events,
-            ["host-read", "old-delete", "replacement-create", "replacement-start", "ownership", "credential", "global", "hook"]
+            ["host-read", "unregister", "old-delete", "replacement-create", "replacement-start", "ownership", "setup", "global", "hook"]
         )
         let global = s.mock.calls.first { $0.arguments.last?.contains("git config --global --replace-all user.name") == true }
         try MiniTest.expect(global?.arguments.contains("-u") == true)
@@ -3971,6 +3972,10 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
     }),
     ("rebuildVolumeIdentityReadsGuestBeforeDelete", {
         var events: [String] = []
+        let connection = AutomaticCredentialCommandPort()
+        connection.onEvent = { events.append($0) }
+        GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         let reader = RebuildIdentityReaderFixture()
         reader.hostIdentity = GitAuthorIdentity(name: "Host", email: "host@example.com")
         reader.guestIdentity = GitAuthorIdentity(name: "Ada Lovelace", email: "ada@example.com")
@@ -3990,9 +3995,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
             if args.first == "create" { events.append("replacement-create") }
             if args.first == "start" { events.append("replacement-start") }
             if args.first == "exec", let script = args.last {
-                if script.contains("git config --global --add credential.helper") {
-                    events.append("credential")
-                } else if script.contains("git config --global --replace-all user.name") {
+                if script.contains("git config --global --replace-all user.name") {
                     events.append("global")
                 } else if script.contains("chown") {
                     events.append("ownership")
@@ -4020,7 +4023,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(reader.guestCalls[0].containerId, info.id)
         try MiniTest.expectEqual(
             events,
-            ["guest-read", "old-delete", "replacement-create", "replacement-start", "ownership", "credential", "global", "hook"]
+            ["guest-read", "unregister", "old-delete", "replacement-create", "replacement-start", "ownership", "setup", "global", "hook"]
         )
     }),
     ("rebuildIncompleteIdentitySkipsGlobalWithoutPrompt", {
@@ -4057,6 +4060,9 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         s.containers = [info]
         s.failingExecSubstrings = ["git config --global --replace-all user.name"]
         s.install()
+        let connection = AutomaticCredentialCommandPort()
+        GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         var warnings: [String] = []
         let previousWarning = StatusPrinter.onWarning
         StatusPrinter.onWarning = { warnings.append($0) }
@@ -4111,6 +4117,9 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         s.volumeConfigText = #"{"image":"alpine:3.20","remoteUser":"alice","postCreateCommand":"echo identity-hook"}"#
         s.failingExecSubstrings = ["git config --global --replace-all user.name"]
         s.install()
+        let connection = AutomaticCredentialCommandPort()
+        GitCredentialLifecycle.setTestConnection(connection)
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
         var warnings: [String] = []
         let previousWarning = StatusPrinter.onWarning
         StatusPrinter.onWarning = { warnings.append($0) }
