@@ -216,7 +216,7 @@ Helper shape: same image/platform; eligible RW named volumes at private targets;
 
 **Parents:** some Apple rootfs inodes (`/workspaces`) reject `chown` with EPERM even as root. Unmodifiable but traversable ancestors do not fail `up`. Recursive target `chown -R` stays strict. The helper cannot repair the main private rootfs; on the helper/`--read-only` path, parents are probed after start as the connection user (`test -x`).
 
-**Filesystem:** Apple named-volume `volume.img` is raw ext4 (magic `0xEF53` at offset 1080) and can be `e2fsck`'d in place only while unmounted; do not copy the sparse image. `Structure needs cleaning` on chown is ext4 `EUCLEAN`, not a chown-logic bug.
+**Filesystem:** Apple named-volume `volume.img` is raw ext4 (magic `0xEF53` at offset 1080); in-place `e2fsck` is valid only while unmounted; a same-volume APFS `cp -c` (unmounted, outside the container volume store) is the backup, and a naive copy of the sparse image is still forbidden. `Structure needs cleaning` on chown is ext4 `EUCLEAN`, not a chown-logic bug. Detail: [gaps — named volume ownership](../domain/devcontainer-apple-gaps.md#named-volume-ownership-rootroot).
 
 Create `-u` for a non-root connection user (typical official image: OCI USER root + metadata `remoteUser` vscode) stays; ownership exec stays `-u root`.
 
@@ -229,6 +229,8 @@ Contract: [`specs/core.md`](../../specs/core.md) (workspace parents + read-only 
 ### Git credential seeding
 
 Contract: [`specs/core.md`](../../specs/core.md) **Git credential store seeded on create paths**. Implementation symbol: `GuestGitCredentialSeed`.
+
+In plantsuite, the vscode user's `$HOME/.adevcontainer` stays `0755` because the VS Code marker uses `mkdir -p`. Credential prepare must not treat that mode as fatal — refusal blocks setup before any guest endpoint exists. Tighten to `0700` only for an own non-symlink directory; refuse symlinks and foreign-owned directories without `chmod`. Symbol: `GitCredentialConnection.privateDirectoryRepair`.
 
 **Test seam:** command tests driving `up` fresh-create or `rebuild` replacement that install `RecordingHostProcessRunner` via `LifecycleRunner.hostProcessRunnerOverride` must answer or tolerate the seeding probe call (`git -C <ws> remote -v`), same as the adapted initialize-command tests.
 
