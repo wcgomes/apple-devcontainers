@@ -230,6 +230,7 @@ public enum UpCommand {
                     hint: "Run '\(CommandSurface.commandPrefix) rebuild' (managed selection: --name or auto) to force-rebuild from current config"
                 )
             } else if existing.isRunning {
+                SSHForwardingPolicy.warnForExisting(labels: existing.labels, name: existing.name, environment: localEnv)
                 // Reuse running: no feature fetch/build; settings+extensions repair on marker drift; postAttach gated after open.
                 StatusPrinter.status("Reusing running container", item: existing.name)
                 GitCredentialLifecycle.setupSoft(id: existing.id, labels: existing.labels, runtime: runtime, credentials: credentials)
@@ -249,6 +250,7 @@ public enum UpCommand {
                 )
             } else {
                 // Start stopped: no rebuild (features already baked on create).
+                SSHForwardingPolicy.warnForExisting(labels: existing.labels, name: existing.name, environment: localEnv)
                 StatusPrinter.status("Starting container")
                 do {
                     try runtime.start(nameOrId: existing.id)
@@ -446,19 +448,25 @@ public enum UpCommand {
         labels[ContainerIdentity.labelRemoteUser] = connectionUser
         labels[ContainerIdentity.labelWorkspaceFolder] = effectiveConfig.workspaceFolder
 
+        let ssh = SSHForwardingPolicy.evaluate(
+            workspace: resolved.workspacePath, environment: localEnv,
+            explicitSSH: effectiveConfig.runArgs.contains(.ssh)
+        )
+        if let warning = ssh.warning { StatusPrinter.warning(warning) }
         let request = CreateRequest.from(
             resolved: effectiveConfig,
             identityName: resolved.containerName,
             labels: labels,
             configHash: resolved.configHash,
             workspacePath: resolved.workspacePath,
-            platform: platform
+            platform: platform,
+            enableSSHForward: ssh.automatic
         )
 
         StatusPrinter.status("Creating container", item: resolved.containerName)
         let id: String
         do {
-            id = try runtime.create(request: request, initializeConfigVolumes: true)
+            id = try runtime.create(request: request, initializeConfigVolumes: true, hostEnvironment: ssh.automatic ? localEnv : nil)
         } catch {
             throw BringUpRecovery.eligible(error)
         }

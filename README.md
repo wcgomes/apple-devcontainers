@@ -125,39 +125,21 @@ The `start`, `exec`, `stop`, `delete`, `purge`, `rebuild`, and `inspect` command
 
 ### Automatic Git credentials
 
-For discovered HTTP(S) Git destinations, lifecycle commands connect the resolved
-container user to the existing host credential provider before hooks; clone does
-so before its single in-container full clone. Credentials travel on private
-exec/socket channels, not guest token stores, argv or product-created environment
-variables. Git/GCM interaction on the host is disabled and acquisition is bounded.
+Use your existing host Git login for HTTP(S) repositories inside your dev
+container, without a separate container login. Setup is automatic during `up`,
+`clone`, `start`, and `rebuild`, before the in-container clone or lifecycle hooks.
 
-The same installed CLI starts a per-user broker process on demand, without sudo,
-before the first credential-dependent lifecycle work. It runs in its own session,
-survives the invoking CLI, and exits after five seconds without demand. Nothing is
-installed and nothing restarts it: a crash is recovered by the next `up`, `start`,
-clone, or rebuild. The next activation reuses a broker from the same executable and
-gracefully replaces one from an older build. Registrations on disk contain
-identity/destinations, not credentials; explicit host token overrides live only in
-memory and require re-registration after the broker exits. No separate guest package,
-Python, socat, GCM, translator or compiler is installed at runtime.
+Keep your host login valid. If authentication stops working, sign in again on
+the host and run `adevcontainer up` or `adevcontainer start` to repair the
+connection—even when the container is already running.
 
-Authorization binds the discovered scheme/hostname/port, preserving sibling paths.
-Legacy HTTP is retained only when discovered; HTTPS never authorizes HTTP and no
-unsafe-HTTP provider option is enabled. Azure retains scheme-specific helper and
-useHttpPath configuration and receives the actual queried repository path.
-Earlier user/legacy helpers remain in order and may answer first; those answers
-are outside the product helper's freshness guarantee. Unmarked legacy clone stores
-are not deleted. The identified old product-owned seed store is migrated away.
+For local SSH Git remotes, fresh `up` and bind-mode `rebuild` automatically forward
+your host SSH agent when `SSH_AUTH_SOCK` points to a socket; HTTPS-only workspaces
+do not automatically expose it. If forwarding is unavailable in an existing
+container, run `adevcontainer rebuild --name <name>` to apply create-time settings.
 
-`start` and `up` on an already-running container repair the automatic
-connection without fetch/pull/push or workspace writes. They do not clear
-rejection suppression. To clear that finite block, stop the container and
-start it again. A provider miss remains a miss. If login is needed, authenticate
-on the host and retry. An unchanged token does not prove OAuth renewal.
-Replacing or moving the executable is detected by identity. The next ordinary
-lifecycle invocation compares the running broker's executable device/inode and
-build identity with the invoking executable, retires a mismatched owner, and
-starts a successor from the current executable.
+See the [Git credential implementation notes](wiki/conventions/cli-runtime-boundary.md#automatic-git-credentials)
+for technical details and troubleshooting.
 
 ### Source builds
 

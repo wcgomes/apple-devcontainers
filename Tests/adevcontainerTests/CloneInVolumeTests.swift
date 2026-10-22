@@ -1631,6 +1631,25 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
             $0.arguments.first == "exec" && $0.arguments.contains("-c")
         })
     }),
+    ("cloneForwardingPolicyRemainsVolumeSpecific", {
+        GitCredentialLifecycle.setTestConnection(AutomaticCredentialCommandPort())
+        defer { GitCredentialLifecycle.setTestConnection(nil) }
+        let restore = CloneGitFeatureTestSupport.installOverrides()
+        defer { restore() }
+        for url in ["git@example.invalid:group/repo.git", "https://example.invalid/repo.git"] {
+            for explicit in [false, true] {
+                let git = MockGitClient()
+                git.configJSONToWrite = "{\"image\":\"alpine:3.20\",\"runArgs\":\(explicit ? "[\"--ssh\"]" : "[]")}"
+                let mock = MockProcessRunner()
+                mock.handlers = CloneRuntimeMock.handlers()
+                _ = try CloneCommand.run(options: .init(gitURL: url, skipPull: true), runtime: .init(executablePath: "/synthetic/container", runner: mock), git: git, credentials: MockGitCredential(), localEnv: ["SSH_AUTH_SOCK": "/synthetic/nonexistent-agent"])
+                let call = mock.calls.first { $0.arguments.first == "create" }!
+                try MiniTest.expectEqual(call.arguments.filter { $0 == "--ssh" }.count, 1)
+                try MiniTest.expect(call.environment == nil)
+                try MiniTest.expect(!call.arguments.contains { $0.hasPrefix("devcontainer.ssh_forwarded=") })
+            }
+        }
+    }),
     ("cloneHTTPSPublicWorksWithoutHostCredentials", {
         let connection = AutomaticCredentialCommandPort(); GitCredentialLifecycle.setTestConnection(connection)
         defer { GitCredentialLifecycle.setTestConnection(nil) }
@@ -3350,7 +3369,7 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
             runtime: runtime
         )
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "start" })
-        try MiniTest.expect(host.calls.isEmpty, "already-running start must not run initialize")
+        try MiniTest.expect(host.calls.allSatisfy { $0.arguments.suffix(2) == ["remote", "-v"] }, "already-running start permits only read-only SSH discovery, not initialize")
         try MiniTest.expect(
             !execBodies.contains("echo postStart-already-running"),
             "already-running start must not run postStart"

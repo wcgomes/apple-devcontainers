@@ -831,7 +831,8 @@ public struct AppleContainerRuntime: Sendable {
         request: CreateRequest,
         ensureVolumes: Bool = true,
         initializeConfigVolumes: Bool = false,
-        workspaceVolumeEnsured: ((Bool) -> Void)? = nil
+        workspaceVolumeEnsured: ((Bool) -> Void)? = nil,
+        hostEnvironment: [String: String]? = nil
     ) throws -> String {
         // Ensure workspace named volume (clone / volume-mode).
         // `true` means this call created it; `false` means it already existed and was reused.
@@ -853,7 +854,13 @@ public struct AppleContainerRuntime: Sendable {
         }
 
         let args = request.createArguments()
-        let result = try invoke(args, streamStderr: true)
+        // Automatic SSH selection is host-only. Capture diagnostics before redacting the
+        // endpoint (including races where a selected socket disappears during create).
+        var result = try invoke(args, streamStderr: hostEnvironment == nil, environment: hostEnvironment)
+        if let socket = hostEnvironment?["SSH_AUTH_SOCK"], !socket.isEmpty {
+            result.stdout = Data(result.stdoutString.replacingOccurrences(of: socket, with: "<SSH_AUTH_SOCK>").utf8)
+            result.stderr = Data(result.stderrString.replacingOccurrences(of: socket, with: "<SSH_AUTH_SOCK>").utf8)
+        }
         try ensureSuccess(result, action: "create")
         let id = result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
         return id.isEmpty ? request.name : id
@@ -1664,12 +1671,12 @@ printf 'RECOVERY_APPLIED:%s\n' "$actual"
     }
 
     @discardableResult
-    public func invoke(_ arguments: [String], streamStderr: Bool = false) throws -> ProcessResult {
+    public func invoke(_ arguments: [String], streamStderr: Bool = false, environment: [String: String]? = nil) throws -> ProcessResult {
         if streamStderr, let streaming = runner as? any StreamTeeingProcessRunning {
             return try streaming.run(
                 executable: executablePath,
                 arguments: arguments,
-                environment: nil,
+                environment: environment,
                 currentDirectory: nil,
                 stdinData: nil,
                 streamStderr: true,
@@ -1679,7 +1686,7 @@ printf 'RECOVERY_APPLIED:%s\n' "$actual"
         return try runner.run(
             executable: executablePath,
             arguments: arguments,
-            environment: nil,
+            environment: environment,
             currentDirectory: nil
         )
     }

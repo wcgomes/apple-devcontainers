@@ -140,7 +140,7 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
           "mounts": [
             "source=calendars-cargo-data,target=/usr/local/cargo/,type=volume"
           ],
-          "runArgs": ["--read-only"],
+          "runArgs": ["--read-only", "--ssh"],
           "postCreateCommand": "test -x /usr/local/cargo/bin/cargo && cargo fetch --locked"
         }
         """)
@@ -203,6 +203,8 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
         let mainCreate = createCalls.first { $0.contains(resolved.containerName) }!
         try MiniTest.expect(!initializerCreate.contains("--read-only"), "initializer needs a writable rootfs and volume")
         try MiniTest.expect(mainCreate.contains("--read-only"), "main container keeps the requested read-only rootfs")
+        try MiniTest.expect(mainCreate.contains("--ssh"), "main container keeps explicit forwarding")
+        try MiniTest.expect(!initializerCreate.contains("--ssh"), "image copy-up helper must not inherit SSH exposure")
         let initExec = mock.calls.firstIndex { $0.arguments.contains("volume-init-id") && $0.arguments.first == "exec" }
         let postCreateExec = mock.calls.firstIndex { $0.arguments.last?.contains("cargo fetch --locked") == true }
         try MiniTest.expect(initExec != nil && postCreateExec != nil && initExec! < postCreateExec!, "volume initialization precedes postCreateCommand")
@@ -1251,7 +1253,7 @@ nonisolated(unsafe) let credentialRefreshCommandTests: [(String, () throws -> Vo
         )
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "start" })
         try MiniTest.expect(creds.fillCalls.isEmpty)
-        try MiniTest.expect(host.calls.isEmpty)
+        try MiniTest.expect(host.calls.allSatisfy { $0.arguments.suffix(2) == ["remote", "-v"] }, "only read-only SSH eligibility discovery is allowed")
         try MiniTest.expectEqual(connection.events, ["setup"])
         try MiniTest.expect(!mock.calls.contains { $0.arguments.last?.contains("git-credential-adev") == true })
     }),
