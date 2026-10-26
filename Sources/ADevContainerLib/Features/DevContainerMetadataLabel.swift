@@ -37,7 +37,11 @@ public enum DevContainerMetadataLabel {
             for entry in commands {
                 var fragment: [String: Any] = [key: entry.command.hashEncoding]
                 if !entry.name.isEmpty {
-                    fragment["id"] = entry.name
+                    fragment["id"] = entry.featureReference ?? entry.name
+                    if let reference = entry.featureReference,
+                       FeatureRef.hookDisplayName(metadataId: reference) != entry.name {
+                        fragment["x-adevcontainer-hook-name"] = entry.name
+                    }
                 }
                 fragments.append(fragment)
             }
@@ -189,8 +193,12 @@ public enum DevContainerMetadataLabel {
         guard let command = try? LifecycleCommand.parse(value, property: property) else {
             return nil
         }
-        let name = FeatureRef.hookDisplayName(metadataId: fragment["id"] as? String)
-        return NamedLifecycleCommand(name: name, command: command)
+        let id = fragment["id"] as? String
+        let name = (fragment["x-adevcontainer-hook-name"] as? String)
+            .flatMap { $0.isEmpty ? nil : $0 } ?? FeatureRef.hookDisplayName(metadataId: id)
+        // Older labels contain only the display name; it is not a unique identity.
+        let reference = id.flatMap { $0.contains("/") ? $0 : nil }
+        return NamedLifecycleCommand(name: name, command: command, featureReference: reference)
     }
 
     private static func union(_ a: FeatureContributions, _ b: FeatureContributions) -> FeatureContributions {

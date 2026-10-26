@@ -65,19 +65,19 @@ public enum FeatureContributionMerge {
             }
             let name = FeatureRef.hookDisplayName(metadataId: meta.id, reference: f.admitted.reference)
             if let c = meta.onCreateCommand {
-                result.onCreateCommands.append(NamedLifecycleCommand(name: name, command: c))
+                result.onCreateCommands.append(NamedLifecycleCommand(name: name, command: c, featureReference: f.admitted.reference))
             }
             if let c = meta.updateContentCommand {
-                result.updateContentCommands.append(NamedLifecycleCommand(name: name, command: c))
+                result.updateContentCommands.append(NamedLifecycleCommand(name: name, command: c, featureReference: f.admitted.reference))
             }
             if let c = meta.postCreateCommand {
-                result.postCreateCommands.append(NamedLifecycleCommand(name: name, command: c))
+                result.postCreateCommands.append(NamedLifecycleCommand(name: name, command: c, featureReference: f.admitted.reference))
             }
             if let c = meta.postStartCommand {
-                result.postStartCommands.append(NamedLifecycleCommand(name: name, command: c))
+                result.postStartCommands.append(NamedLifecycleCommand(name: name, command: c, featureReference: f.admitted.reference))
             }
             if let c = meta.postAttachCommand {
-                result.postAttachCommands.append(NamedLifecycleCommand(name: name, command: c))
+                result.postAttachCommands.append(NamedLifecycleCommand(name: name, command: c, featureReference: f.admitted.reference))
             }
         }
         return result

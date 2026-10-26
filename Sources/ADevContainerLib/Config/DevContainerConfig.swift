@@ -5,10 +5,13 @@ import Foundation
 public struct NamedLifecycleCommand: Equatable, Sendable {
     public var name: String
     public var command: LifecycleCommand
+    /// Full feature reference, separate from the shortened display name.
+    public var featureReference: String?
 
-    public init(name: String, command: LifecycleCommand) {
+    public init(name: String, command: LifecycleCommand, featureReference: String? = nil) {
         self.name = name
         self.command = command
+        self.featureReference = featureReference
     }
 
     public var execArguments: [String] { command.execArguments }
