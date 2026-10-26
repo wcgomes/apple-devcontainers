@@ -185,12 +185,15 @@ public enum PostAttachConfigLoader {
         _ existing: [NamedLifecycleCommand],
         _ named: [NamedLifecycleCommand]
     ) -> [NamedLifecycleCommand] {
-        existing.map { entry in
+        // A repeated command has no reliable correspondence to a particular feature.
+        // Leave those legacy hooks anonymous instead of inventing their identities.
+        return existing.map { entry in
             if !entry.name.isEmpty { return entry }
-            guard let match = named.first(where: { $0.command == entry.command && !$0.name.isEmpty }) else {
-                return entry
-            }
-            return NamedLifecycleCommand(name: match.name, command: entry.command)
+            let candidates = named.filter { $0.command == entry.command && !$0.name.isEmpty }
+            guard existing.filter({ $0.command == entry.command }).count == 1,
+                  candidates.count == 1, let match = candidates.first else { return entry }
+            return NamedLifecycleCommand(name: match.name, command: entry.command,
+                                         featureReference: match.featureReference)
         }
     }
 
@@ -199,14 +202,35 @@ public enum PostAttachConfigLoader {
         _ second: [NamedLifecycleCommand]
     ) -> [NamedLifecycleCommand] {
         var out = first
-        for cmd in second {
-            if let idx = out.firstIndex(where: { $0.command == cmd.command }) {
-                if out[idx].name.isEmpty && !cmd.name.isEmpty {
+        var used = Set<Int>()
+        var matched = Set<Int>()
+        // Match full identities first, before legacy fallback can consume them.
+        for (index, cmd) in second.enumerated() {
+            guard let reference = cmd.featureReference,
+                  let idx = first.indices.first(where: {
+                      !used.contains($0) && first[$0].command == cmd.command && first[$0].featureReference == reference
+                  }) else { continue }
+            used.insert(idx)
+            matched.insert(index)
+        }
+        // Legacy labels cannot identify identical occurrences across sources: pair
+        // them one-to-one and retain anonymous names when attribution is ambiguous.
+        for (index, cmd) in second.enumerated() where !matched.contains(index) {
+            if let idx = first.indices.first(where: {
+                let candidate = first[$0]
+                return !used.contains($0) && candidate.command == cmd.command
+                    && (candidate.featureReference == nil || cmd.featureReference == nil)
+                    && (candidate.name == cmd.name || candidate.name.isEmpty || cmd.name.isEmpty)
+            }) {
+                used.insert(idx)
+                let unambiguous = first.filter { $0.command == cmd.command }.count == 1
+                    && second.filter { $0.command == cmd.command }.count == 1
+                if unambiguous && (out[idx].name.isEmpty || (out[idx].featureReference == nil && cmd.featureReference != nil)) {
                     out[idx] = cmd
                 }
-                continue
+            } else {
+                out.append(cmd)
             }
-            out.append(cmd)
         }
         return out
     }
