@@ -16,7 +16,7 @@ public struct DoctorReport: Equatable, Sendable {
     }
 }
 
-/// Apple CLI plugin `dev` layout under the parent of Apple `container`'s `bin/`.
+/// Apple CLI plugin `dev` layout under the parent of the resolved `container` executable's `bin/`.
 public enum ContainerPluginLayout {
     public static let pluginName = "dev"
     public static let relativeDirectory = "libexec/container-plugins/dev"
@@ -26,6 +26,7 @@ public enum ContainerPluginLayout {
 
     public static func installRoot(containerBinaryPath: String) -> String {
         URL(fileURLWithPath: containerBinaryPath)
+            .resolvingSymlinksInPath()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .path
