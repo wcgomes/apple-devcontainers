@@ -784,6 +784,95 @@ nonisolated(unsafe) let configReaderTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!config!.hasApplyableVscodeCustomizations, "start must not apply vscode from stub")
     }),
 
+    ("mergeFeaturePostAttachPreservesDistinctFeaturesWithIdenticalHooks", {
+        var config = ResolvedDevContainerConfig(
+            image: "alpine:3.20", workspaceFolder: "/workspaces/app",
+            featurePostStartCommands: [NamedLifecycleCommand(name: "first", command: .shell("echo shared"))]
+        )
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.starts(with: ["image", "inspect"]) {
+                let obj: [String: Any] = ["labels": [DevContainerMetadataLabel.labelKey:
+                    #"[{"id":"first","postStartCommand":"echo shared"},{"id":"second","postStartCommand":"echo shared"}]"#]]
+                return ProcessResult(exitCode: 0, stdout: try! JSONSerialization.data(withJSONObject: obj), stderr: Data())
+            }
+            return nil
+        }]
+        PostAttachConfigLoader.mergeFeaturePostAttach(into: &config, imageRef: "alpine:3.20", runtime: mockRuntime(mock))
+        try MiniTest.expectEqual(config.featurePostStartCommands.map(\.name), ["first", "second"])
+    }),
+
+    ("resumeCollidingFeatureNamesExecuteEveryOccurrence", {
+        let previousEnabled = StatusPrinter.enabled
+        StatusPrinter.enabled = true
+        defer { StatusPrinter.enabled = previousEnabled }
+        let metadata = #"[{"id":"ghcr.io/one/shared:0","postStartCommand":"echo same","postAttachCommand":"echo attach"},{"id":"ghcr.io/two/shared:0","postStartCommand":"echo same","postAttachCommand":"echo attach"}]"#
+        let labels = [DevContainerMetadataLabel.labelKey: metadata]
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.starts(with: ["image", "inspect"]) {
+                return ProcessResult(exitCode: 0, stdout: try! JSONSerialization.data(withJSONObject: ["labels": labels]), stderr: Data())
+            }
+            return nil
+        }]
+        var config = ResolvedDevContainerConfig(image: "alpine", workspaceFolder: "/workspaces/app", userEnvProbe: .none)
+        PostAttachConfigLoader.mergeFeaturePostAttach(into: &config, labels: labels, imageRef: "alpine", runtime: mockRuntime(mock))
+        try MiniTest.expectEqual(config.featurePostStartCommands.map(\.featureReference), ["ghcr.io/one/shared:0", "ghcr.io/two/shared:0"])
+        try MiniTest.expectEqual(config.featurePostAttachCommands.map(\.featureReference), ["ghcr.io/one/shared:0", "ghcr.io/two/shared:0"])
+        var stderr = ""
+        try withCapturedStderr({
+            try LifecycleRunner.runCreatePath(containerId: "c1", config: config, runtime: mockRuntime(mock))
+            try LifecycleRunner.runRestartPostStart(containerId: "c1", config: config, runtime: mockRuntime(mock))
+            try LifecycleRunner.runPostAttach(containerId: "c1", config: config, runtime: mockRuntime(mock))
+        }, capture: &stderr)
+        let calls = mock.calls.filter { $0.arguments.first == "exec" && $0.arguments.contains("echo same") }
+        try MiniTest.expectEqual(calls.count, 4)
+        try MiniTest.expect(calls.allSatisfy { $0.streamStderr == true && $0.teeStdoutToStderr == true }, "all hooks stream both outputs to stderr")
+        try MiniTest.expectEqual(stderr.components(separatedBy: "Running postStartCommand (shared)").count - 1, 4)
+        let attachCalls = mock.calls.filter { $0.arguments.first == "exec" && $0.arguments.contains("echo attach") }
+        try MiniTest.expectEqual(attachCalls.count, 2)
+        try MiniTest.expect(attachCalls.allSatisfy { $0.streamStderr == true && $0.teeStdoutToStderr == true }, "postAttach hooks stream both outputs")
+        try MiniTest.expectEqual(stderr.components(separatedBy: "Running postAttachCommand (shared)").count - 1, 2)
+    }),
+
+    ("resumeLegacyAnonymousHooksPreserveMultiplicity", {
+        let previousEnabled = StatusPrinter.enabled
+        StatusPrinter.enabled = true
+        defer { StatusPrinter.enabled = previousEnabled }
+        let metadata = #"[{"postStartCommand":"echo same"},{"postStartCommand":"echo same"}]"#
+        let labels = [DevContainerMetadataLabel.labelKey: metadata]
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.starts(with: ["image", "inspect"]) {
+                return ProcessResult(exitCode: 0, stdout: try! JSONSerialization.data(withJSONObject: ["labels": labels]), stderr: Data())
+            }
+            return nil
+        }]
+        var config = ResolvedDevContainerConfig(image: "alpine", workspaceFolder: "/workspaces/app", userEnvProbe: .none)
+        PostAttachConfigLoader.mergeFeaturePostAttach(into: &config, labels: labels, imageRef: "alpine", runtime: mockRuntime(mock))
+        try MiniTest.expectEqual(config.featurePostStartCommands.count, 2)
+        var stderr = ""
+        try withCapturedStderr({ try LifecycleRunner.runRestartPostStart(containerId: "c1", config: config, runtime: mockRuntime(mock)) }, capture: &stderr)
+        try MiniTest.expectEqual(mock.calls.filter { $0.arguments.first == "exec" && $0.arguments.contains("echo same") }.count, 2)
+        try MiniTest.expect(stderr.contains("postStartCommand (feature 1)") && stderr.contains("postStartCommand (feature 2)"), "anonymous hooks have distinct log labels")
+    }),
+
+    ("resumeLegacyAmbiguousHooksDoNotInventIdentity", {
+        let legacy = #"[{"postStartCommand":"echo same"},{"postStartCommand":"echo same"}]"#
+        let modern = #"[{"id":"ghcr.io/one/shared:0","postStartCommand":"echo same"}]"#
+        let mock = MockProcessRunner()
+        mock.handlers = [{ args in
+            if args.starts(with: ["image", "inspect"]) {
+                return ProcessResult(exitCode: 0, stdout: try! JSONSerialization.data(withJSONObject: ["labels": [DevContainerMetadataLabel.labelKey: modern]]), stderr: Data())
+            }
+            return nil
+        }]
+        var config = ResolvedDevContainerConfig(image: "alpine", workspaceFolder: "/workspaces/app")
+        PostAttachConfigLoader.mergeFeaturePostAttach(into: &config, labels: [DevContainerMetadataLabel.labelKey: legacy], imageRef: "alpine", runtime: mockRuntime(mock))
+        try MiniTest.expectEqual(config.featurePostStartCommands.count, 2)
+        try MiniTest.expect(config.featurePostStartCommands.allSatisfy { $0.name.isEmpty && $0.featureReference == nil }, "ambiguous legacy occurrences remain anonymous")
+    }),
+
     ("mergeFeaturePostAttachUnionsExistingApplyHooks", {
         var config = ResolvedDevContainerConfig(
             image: "alpine:3.20",

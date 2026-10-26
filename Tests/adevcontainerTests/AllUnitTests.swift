@@ -4870,12 +4870,29 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         ])
         try MiniTest.expectEqual(
             parsed.postStartCommands,
-            [NamedLifecycleCommand(name: "hook-feature", command: .shell("echo baked-postStart"))]
+            [NamedLifecycleCommand(name: "hook-feature", command: .shell("echo baked-postStart"), featureReference: "./hook-feature")]
         )
         try MiniTest.expectEqual(
             parsed.postAttachCommands,
-            [NamedLifecycleCommand(name: "hook-feature", command: .shell("echo baked-postAttach"))]
+            [NamedLifecycleCommand(name: "hook-feature", command: .shell("echo baked-postAttach"), featureReference: "./hook-feature")]
         )
+    }),
+    ("featureMetadataRoundTripPreservesDisplayNameAndReference", {
+        let reference = "ghcr.io/example/actual-package:0"
+        let ordered = [FeatureOrder.OrderedFeature(
+            admitted: AdmittedFeature(reference: reference, options: [:]),
+            metadata: FeatureMetadata(id: "custom-name", postStartCommand: .shell("echo start"), postAttachCommand: .shell("echo attach"))
+        )]
+        let collected = try FeatureContributionMerge.collect(from: ordered)
+        let encoded = DevContainerMetadataLabel.encodeFragments(collected)!
+        let parsed = DevContainerMetadataLabel.parseContributions(from: [DevContainerMetadataLabel.labelKey: encoded])
+        try MiniTest.expectEqual(parsed.postStartCommands, collected.postStartCommands)
+        try MiniTest.expectEqual(parsed.postAttachCommands, collected.postAttachCommands)
+        try MiniTest.expectEqual(parsed.postStartCommands.first?.name, "custom-name")
+        try MiniTest.expectEqual(parsed.postStartCommands.first?.featureReference, reference)
+        let legacy = DevContainerMetadataLabel.parseContributions(from: [DevContainerMetadataLabel.labelKey: #"[{"id":"ghcr.io/example/actual-package:0","postStartCommand":"echo start"}]"#])
+        try MiniTest.expectEqual(legacy.postStartCommands.first?.name, "actual-package")
+        try MiniTest.expectEqual(legacy.postStartCommands.first?.featureReference, reference)
     }),
     ("featureDockerfileGeneratorBakesUnionedBaseAndFeatureMetadata", {
         // Derived LABEL must persist base-image hooks, not overwrite with features-only.
