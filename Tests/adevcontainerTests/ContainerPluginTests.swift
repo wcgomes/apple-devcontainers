@@ -410,6 +410,40 @@ nonisolated(unsafe) let containerPluginTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!FileManager.default.fileExists(atPath: pluginDir), "doctor does not restage")
     }),
 
+    ("pluginInstallResolvesHomebrewContainerSymlinks", {
+        let root = try PluginTestSupport.makeInstallRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fm = FileManager.default
+        let keg = root.appendingPathComponent("Cellar/container/1.6.1")
+        let container = keg.appendingPathComponent("bin/container")
+        try PluginTestSupport.writeExecutable(at: container)
+        let opt = root.appendingPathComponent("opt/container")
+        try fm.createDirectory(at: opt.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.createSymbolicLink(atPath: opt.path, withDestinationPath: "../Cellar/container/1.6.1")
+        let linkedContainer = root.appendingPathComponent("bin/container")
+        try fm.removeItem(at: linkedContainer)
+        try fm.createSymbolicLink(atPath: linkedContainer.path, withDestinationPath: "../opt/container/bin/container")
+        let source = root.appendingPathComponent("installed/adevcontainer")
+        try PluginTestSupport.writeExecutable(at: source)
+        let resolvedKeg = keg.resolvingSymlinksInPath().path
+        try MiniTest.expectEqual(ContainerPluginLayout.installRoot(containerBinaryPath: linkedContainer.path), resolvedKeg)
+        let runtime = try PluginTestSupport.readyRuntime(executablePath: linkedContainer.path)
+        try PluginCommand.run(install: true, uninstall: false, runtime: runtime, currentExecutablePath: source.path)
+        try PluginTestSupport.expectSymlink(
+            at: ContainerPluginLayout.binaryPath(installRoot: resolvedKeg),
+            target: source.path,
+            "plugin installed in resolved container keg"
+        )
+        try PluginTestSupport.expectRegularCLIConfig(installRoot: resolvedKeg)
+        try MiniTest.expect(!fm.fileExists(atPath: ContainerPluginLayout.pluginDirectory(installRoot: root.path)))
+        let doctorRuntime = try PluginTestSupport.readyRuntime(executablePath: linkedContainer.path)
+        _ = try DoctorCommand.run(runtime: doctorRuntime)
+        try PluginCommand.run(install: false, uninstall: true, runtime: runtime)
+        try MiniTest.expect(!fm.fileExists(atPath: ContainerPluginLayout.binaryPath(installRoot: resolvedKeg)))
+        try MiniTest.expect(!fm.fileExists(atPath: ContainerPluginLayout.configPath(installRoot: resolvedKeg)))
+        try MiniTest.expect(fm.fileExists(atPath: source.path), "uninstall preserves plugin target")
+    }),
+
     ("pluginInstallCreatesAbsoluteSymlinkAndConfig", {
         let root = try PluginTestSupport.makeInstallRoot()
         defer { try? FileManager.default.removeItem(at: root) }
