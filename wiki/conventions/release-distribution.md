@@ -62,6 +62,14 @@ Do not paste workflow YAML into the wiki — edit the files under `.github/workf
 2. **GitHub Release curl/tar** — download tarball + verify sha256; fallback for non-brew users.
 3. **Source build** — documented in README (`swift build -c release` on macOS 26+ Apple Silicon).
 
+## Adoption measurement
+
+- **Release downloads:** GitHub release assets are the public download signal — `GET /repos/wcgomes/apple-devcontainers/releases` → `assets[].download_count`; the only binary asset is `adevcontainer-macos-arm64.tar.gz` (plus a `.sha256` companion, not a download target).
+- **Homebrew installs:** publicly queryable at `https://formulae.brew.sh/api/analytics/install/{30d,90d,365d}.json` (and the matching `install-on-request/...` paths); tap events appear as keys of the form `wcgomes/tap/adevcontainer`, so read the tap aggregate — per-formula tap drill-down paths return 404 and the formula is not in homebrew-core.
+- **Never add brew numbers to release-asset numbers:** the bottle-free formula builds nothing itself and points at the GitHub tarball, so `brew install` traffic is already counted in `download_count` — summing double-counts.
+- **Brew analytics is a floor, not a user count:** it is opt-out and counts install events (upgrades included), so treat it as a lower bound on installs, never as unique users.
+- **Clone/visitor history is unavailable:** GitHub `/traffic/clones` and `/traffic/views` retain only 14 days (uniques capped at 100), so lifetime clone history cannot be reconstructed; source builds (`swift build -c release`) are untrackable, so no metric covers that install path.
+
 ## Agent checklist (changing release)
 
 - Touch workflows under `.github/workflows/`, not ad-hoc publish scripts, unless intentionally adding a new path.
