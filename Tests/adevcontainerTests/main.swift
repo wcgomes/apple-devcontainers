@@ -54,6 +54,7 @@ let allTests: [(String, () throws -> Void)] = credentialTests
     + phase4UnitTests
     + phase4CommandTests
     + featuresUnitTests
+    + privateFeatureGitCloneTests
     + featuresCommandTests
     + cloneIdentityTests
     + gitClientTests
