@@ -105,13 +105,17 @@ static void wait_socket(const char *dir) {
     }
     assert(!"relay socket not created");
 }
-static void malformed_client(const char *dir, unsigned char *frame_data, size_t size) {
+static void malformed_client(const char *dir, unsigned char *frame_data, size_t size, int racing) {
     struct sockaddr_un address = {0}; address.sun_family = AF_UNIX;
     assert(snprintf(address.sun_path, sizeof(address.sun_path), "%s/credential.sock", dir) < (int)sizeof(address.sun_path));
     int fd = socket(AF_UNIX, SOCK_STREAM, 0); assert(fd >= 0);
     assert(connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0);
     write_all(fd, frame_data, size);
-    assert(shutdown(fd, SHUT_WR) == 0);
+    if (shutdown(fd, SHUT_WR) != 0) {
+        /* Darwin reports ENOTCONN once the relay has already closed on a complete malformed frame. */
+        if (!racing || errno != ENOTCONN) perror("malformed frame shutdown");
+        assert(racing && errno == ENOTCONN);
+    }
     struct pollfd p = {fd, POLLIN, 0}; assert(poll(&p, 1, 3000) > 0);
     unsigned char byte; assert(read(fd, &byte, 1) == 0); close(fd);
 }
@@ -147,15 +151,15 @@ int main(int argc, char **argv) {
     answer(roundtrip, "username=u@:/é\npassword=synthetic@:/é\n\n");
     unsigned char invalid[256] = {0}; memcpy(invalid, "AGCR\0\1\0\2", 8);
     invalid[25] = 1; /* 65536-byte payload exceeds the full-frame bound. */
-    malformed_client(dir, invalid, HEADER);
+    malformed_client(dir, invalid, HEADER, 1);
     invalid[25] = 0; invalid[27] = 10;
     (void)field(invalid + HEADER, 4, "x"); (void)field(invalid + HEADER + 5, 4, "y");
-    malformed_client(dir, invalid, HEADER + 10);
-    invalid[27] = 5; invalid[HEADER + 4] = '\n'; malformed_client(dir, invalid, HEADER + 5);
-    invalid[HEADER + 4] = 0; malformed_client(dir, invalid, HEADER + 5);
-    invalid[HEADER + 4] = 0xff; malformed_client(dir, invalid, HEADER + 5);
-    invalid[HEADER + 4] = 'x'; invalid[15] = 1; malformed_client(dir, invalid, HEADER + 5);
-    invalid[15] = 0; malformed_client(dir, invalid, HEADER - 1);
+    malformed_client(dir, invalid, HEADER + 10, 1);
+    invalid[27] = 5; invalid[HEADER + 4] = '\n'; malformed_client(dir, invalid, HEADER + 5, 1);
+    invalid[HEADER + 4] = 0; malformed_client(dir, invalid, HEADER + 5, 1);
+    invalid[HEADER + 4] = 0xff; malformed_client(dir, invalid, HEADER + 5, 1);
+    invalid[HEADER + 4] = 'x'; invalid[15] = 1; malformed_client(dir, invalid, HEADER + 5, 1);
+    invalid[15] = 0; malformed_client(dir, invalid, HEADER - 1, 0);
     /* Store never crosses the channel, even if no relay exists. */
     empty(query(dir, "store", "username=synthetic\npassword=synthetic\n\n"), 1);
     struct pollfd p = {relay.out, POLLIN, 0}; assert(poll(&p, 1, 30) == 0);
