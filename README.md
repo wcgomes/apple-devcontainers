@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml/badge.svg)](https://github.com/wcgomes/apple-devcontainers/actions/workflows/ci.yml)
-[![synthetic tests](https://img.shields.io/badge/synthetic%20tests-1218%20passed%2C%201%20skipped-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
+[![synthetic tests](https://img.shields.io/badge/synthetic%20tests-1257%20passed%2C%200%20skipped-brightgreen)](https://github.com/wcgomes/apple-devcontainers)
 [![downloads](https://img.shields.io/badge/downloads-144%2B-blue.svg)](https://github.com/wcgomes/apple-devcontainers/releases)
 
 Native Swift CLI that reads `devcontainer.json` and runs development environments on Apple [`container`](https://github.com/apple/container).
