@@ -5876,5 +5876,113 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!mock.calls.contains {
             $0.arguments.contains(dfTag)
         })
+    }),
+    ("upPrivateOCI401LoadsThroughProductionFetcher", {
+        let ref = PrivateFeatureGitCloneSupport.tagRef
+        let git = PrivateFeatureGitCloneSupport.FakeGit()
+        let restoreSeam = PrivateFeatureGitCloneSupport.install(git: git)
+        defer { restoreSeam() }
+        let tree = try PrivateFeatureGitCloneSupport.makeCollection(
+            featureIds: ["feature"],
+            srcMarkers: ["feature": "up-loaded"]
+        )
+        git.treesByURL[PrivateFeatureGitCloneSupport.collectionURL] = tree
+        PrivateFeatureGitCloneSupport.script.hosts = [
+            "some.private.registry": PrivateFeatureGitCloneSupport.authRule(401)
+        ]
+        let original = """
+        {
+          "image": "alpine:3.20",
+          "features": { "\(ref)": {} }
+        }
+        """
+        let ws = try TestRepo.makeTempWorkspace(configJSON: original)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let configPath = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+        let before = try Data(contentsOf: URL(fileURLWithPath: configPath))
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-up-oci-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+        let previousFetcher = UpCommand.featuresFetcherOverride
+        let previousCache = UpCommand.featuresCacheRootOverride
+        let previousEnsure = UpCommand.ensureNativeArmBuildOverride
+        UpCommand.featuresFetcherOverride = nil
+        UpCommand.featuresCacheRootOverride = cache
+        UpCommand.ensureNativeArmBuildOverride = {}
+        defer {
+            UpCommand.featuresFetcherOverride = previousFetcher
+            UpCommand.featuresCacheRootOverride = previousCache
+            UpCommand.ensureNativeArmBuildOverride = previousEnsure
+        }
+        try MiniTest.expect(UpCommand.featuresFetcherOverride == nil)
+        let mock = MockProcessRunner()
+        mock.handlers = [FeaturesUpTestSupport.mockHandler()]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        let result = try UpCommand.run(
+            options: UpOptions(workspacePath: ws.path, skipPull: true),
+            runtime: runtime,
+            localEnv: [:]
+        )
+        try MiniTest.expectEqual(result.outcome, "success")
+        try MiniTest.expectEqual(try Data(contentsOf: URL(fileURLWithPath: configPath)), before)
+        try MiniTest.expect(git.cloneCalls.contains { $0.arguments.contains(PrivateFeatureGitCloneSupport.collectionURL) })
+        if let build = mock.calls.first(where: { $0.arguments.first == "build" }),
+           let fIdx = build.arguments.firstIndex(of: "-f"),
+           fIdx + 1 < build.arguments.count {
+            let dockerfile = try String(contentsOfFile: build.arguments[fIdx + 1], encoding: .utf8)
+            try MiniTest.expect(dockerfile.contains(ref), "OCI key must stay the feature ref")
+            try MiniTest.expect(!dockerfile.contains("./features/feature"), "must not rewrite the OCI key to a local path")
+        } else {
+            throw MiniTest.Failure(message: "expected a features image build")
+        }
+        let labels = mock.calls.filter { $0.arguments.first == "create" }.flatMap(\.arguments).joined(separator: "\n")
+        try PrivateFeatureGitCloneSupport.assertNoToken(labels, "create labels")
+        try MiniTest.expect(UpCommand.featuresFetcherOverride == nil)
+    }),
+    ("upPrivateOCIFallbackFailureDoesNotInstall", {
+        let git = PrivateFeatureGitCloneSupport.FakeGit()
+        git.exitCode = 128
+        git.stderr = Data(PrivateFeatureGitCloneSupport.fixtureToken.utf8)
+        let restoreSeam = PrivateFeatureGitCloneSupport.install(git: git)
+        defer { restoreSeam() }
+        PrivateFeatureGitCloneSupport.script.hosts = [
+            "some.private.registry": PrivateFeatureGitCloneSupport.authRule(403)
+        ]
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "features": { "\(PrivateFeatureGitCloneSupport.tagRef)": {} }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("feat-up-fail-\(UUID().uuidString)", isDirectory: true).path
+        defer { try? FileManager.default.removeItem(atPath: cache) }
+        let previousFetcher = UpCommand.featuresFetcherOverride
+        let previousCache = UpCommand.featuresCacheRootOverride
+        let previousEnsure = UpCommand.ensureNativeArmBuildOverride
+        UpCommand.featuresFetcherOverride = nil
+        UpCommand.featuresCacheRootOverride = cache
+        UpCommand.ensureNativeArmBuildOverride = {}
+        defer {
+            UpCommand.featuresFetcherOverride = previousFetcher
+            UpCommand.featuresCacheRootOverride = previousCache
+            UpCommand.ensureNativeArmBuildOverride = previousEnsure
+        }
+        let mock = MockProcessRunner()
+        mock.handlers = [FeaturesUpTestSupport.mockHandler()]
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: ws.path, skipPull: true),
+                runtime: runtime,
+                localEnv: [:]
+            )
+        }) { error in
+            try PrivateFeatureGitCloneSupport.assertFallbackError(error, ref: PrivateFeatureGitCloneSupport.tagRef)
+        }
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "build" }, "install must not run")
+        try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
+        try MiniTest.expect(UpCommand.featuresFetcherOverride == nil)
     })
 ]

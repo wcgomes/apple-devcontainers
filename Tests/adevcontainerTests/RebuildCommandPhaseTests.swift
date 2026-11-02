@@ -4167,6 +4167,398 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
             s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.last == s.newContainerId },
             "hook failure still deletes the replacement"
         )
+    }),
+
+    ("rebuildBindPrivateOCIFallbackLoadsWithoutRewrite", {
+        let ref = PrivateFeatureGitCloneSupport.tagRef
+        let git = PrivateFeatureGitCloneSupport.FakeGit()
+        let restoreSeam = PrivateFeatureGitCloneSupport.install(git: git)
+        defer { restoreSeam() }
+        let tree = try PrivateFeatureGitCloneSupport.makeCollection(
+            featureIds: ["feature"],
+            srcMarkers: ["feature": "bind-loaded"]
+        )
+        git.treesByURL[PrivateFeatureGitCloneSupport.collectionURL] = tree
+        PrivateFeatureGitCloneSupport.script.hosts = [
+            "some.private.registry": PrivateFeatureGitCloneSupport.authRule(401)
+        ]
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "features": { "\(ref)": {} }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let configPath = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+        let before = try Data(contentsOf: URL(fileURLWithPath: configPath))
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "bind-oci",
+            labels: s.bindLabels(localFolder: ws.path, configFile: configPath)
+        )
+        s.containers = [info]
+        s.install()
+        var dockerfile = ""
+        try withRebuildLiveFeatureFetcher {
+            let result = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+            try MiniTest.expectEqual(result.outcome, "success")
+            if let build = s.mock.calls.first(where: { $0.arguments.first == "build" }),
+               let fIdx = build.arguments.firstIndex(of: "-f"),
+               fIdx + 1 < build.arguments.count {
+                dockerfile = try String(contentsOfFile: build.arguments[fIdx + 1], encoding: .utf8)
+            }
+        }
+        try MiniTest.expectEqual(try Data(contentsOf: URL(fileURLWithPath: configPath)), before)
+        try MiniTest.expect(git.cloneCalls.contains { $0.arguments.contains(PrivateFeatureGitCloneSupport.collectionURL) })
+        try MiniTest.expect(RebuildCommand.featuresFetcherOverride == nil)
+        try MiniTest.expect(dockerfile.contains(ref), "OCI key must stay the feature ref")
+        try MiniTest.expect(!dockerfile.contains("./features/feature"), "must not rewrite the OCI key to a local path")
+        let labels = s.mock.calls.filter { $0.arguments.first == "create" }.flatMap(\.arguments).joined(separator: "\n")
+        try PrivateFeatureGitCloneSupport.assertNoToken(labels, "create labels")
+    }),
+
+    ("rebuildVolumeOCIOnlyFallbackLoadsWithoutRewrite", {
+        let ref = PrivateFeatureGitCloneSupport.tagRef
+        let git = PrivateFeatureGitCloneSupport.FakeGit()
+        let restoreSeam = PrivateFeatureGitCloneSupport.install(git: git)
+        defer { restoreSeam() }
+        let tree = try PrivateFeatureGitCloneSupport.makeCollection(
+            featureIds: ["feature"],
+            srcMarkers: ["feature": "volume-oci"]
+        )
+        git.treesByURL[PrivateFeatureGitCloneSupport.collectionURL] = tree
+        PrivateFeatureGitCloneSupport.script.hosts = [
+            "some.private.registry": PrivateFeatureGitCloneSupport.authRule(403),
+            "ghcr.io": try PrivateFeatureGitCloneSupport.gitFeatureRule()
+        ]
+        let s = RebuildScenario()
+        var labels = s.volumeLabels()
+        labels[ContainerIdentity.labelLocalFolder] = "volume://adev-repo-ws"
+        let info = RebuildScenario.container(id: "vol-oci", labels: labels)
+        s.containers = [info]
+        s.volumes = ["adev-repo-ws"]
+        s.volumeConfigText = """
+        {
+          "image": "alpine:3.20",
+          "features": { "\(ref)": {} }
+        }
+        """
+        s.install()
+        var dockerfile = ""
+        try withRebuildLiveFeatureFetcher {
+            let result = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+            try MiniTest.expectEqual(result.outcome, "success")
+            if let build = s.mock.calls.first(where: { $0.arguments.first == "build" }),
+               let fIdx = build.arguments.firstIndex(of: "-f"),
+               fIdx + 1 < build.arguments.count {
+                dockerfile = try String(contentsOfFile: build.arguments[fIdx + 1], encoding: .utf8)
+            }
+        }
+        try MiniTest.expect(git.cloneCalls.contains { $0.arguments.contains(PrivateFeatureGitCloneSupport.collectionURL) })
+        try MiniTest.expect(!git.cloneCalls.contains { $0.arguments.contains { $0.contains("ghcr.io") } })
+        try MiniTest.expect(RebuildCommand.featuresFetcherOverride == nil)
+        try MiniTest.expect(dockerfile.contains(ref), "OCI key must stay the feature ref")
+        try MiniTest.expect(!dockerfile.contains("./features/feature"), "must not rewrite the OCI key to a local path")
+    }),
+
+    ("rebuildBindReFetchesFallbackWhenDerivedTagUnchanged", {
+        let ref = PrivateFeatureGitCloneSupport.tagRef
+        let git = PrivateFeatureGitCloneSupport.FakeGit()
+        let restoreSeam = PrivateFeatureGitCloneSupport.install(git: git)
+        defer { restoreSeam() }
+        let tree = try PrivateFeatureGitCloneSupport.makeCollection(
+            featureIds: ["feature"],
+            srcMarkers: ["feature": "refetch"]
+        )
+        git.treesByURL[PrivateFeatureGitCloneSupport.collectionURL] = tree
+        PrivateFeatureGitCloneSupport.script.hosts = [
+            "some.private.registry": PrivateFeatureGitCloneSupport.authRule(401)
+        ]
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "features": { "\(ref)": {} }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let meta = try FeatureMetadata.parse(
+            data: Data(#"{ "id": "feature", "version": "1.0.0" }"#.utf8),
+            featureRef: ref
+        )
+        let nameBase = ContainerIdentity.humanBase(workspacePath: ws.path)
+        let derivedTag = DerivedImageTag.compute(
+            baseImage: "alpine:3.20",
+            ordered: [FeatureOrder.OrderedFeature(admitted: AdmittedFeature(reference: ref, options: [:]), metadata: meta)],
+            nameBase: nameBase
+        )
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "bind-reuse",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.existingImages = [derivedTag]
+        s.install()
+        try withRebuildLiveFeatureFetcher {
+            _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+        }
+        try MiniTest.expect(
+            git.cloneCalls.contains { $0.arguments.contains(PrivateFeatureGitCloneSupport.collectionURL) },
+            "unchanged derived-tag identity must still re-fetch and take the fallback"
+        )
+        let creates = s.mock.calls.filter { $0.arguments.first == "create" }
+        try MiniTest.expect(creates.contains { $0.arguments.contains(derivedTag) })
+    }),
+
+    ("rebuildFallbackFailureKeepsOldContainer", {
+        let ref = PrivateFeatureGitCloneSupport.tagRef
+        let git = PrivateFeatureGitCloneSupport.FakeGit()
+        git.exitCode = 128
+        git.stderr = Data(PrivateFeatureGitCloneSupport.fixtureToken.utf8)
+        let restoreSeam = PrivateFeatureGitCloneSupport.install(git: git)
+        defer { restoreSeam() }
+        PrivateFeatureGitCloneSupport.script.hosts = [
+            "some.private.registry": PrivateFeatureGitCloneSupport.authRule(401),
+            "ghcr.io": try PrivateFeatureGitCloneSupport.gitFeatureRule()
+        ]
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "features": { "\(ref)": {} }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let bind = RebuildScenario()
+        let bindInfo = RebuildScenario.container(
+            id: "bind-keep",
+            labels: bind.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        bind.containers = [bindInfo]
+        bind.install()
+        try MiniTest.expectThrows({
+            try withRebuildLiveFeatureFetcher {
+                _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: bind.runtime)
+            }
+        }) { error in
+            try PrivateFeatureGitCloneSupport.assertFallbackError(error, ref: ref)
+        }
+        try MiniTest.expect(!bind.mock.calls.contains { $0.arguments.first == "delete" }, "bind fallback failure must keep the old container")
+        try MiniTest.expect(!bind.mock.calls.contains { $0.arguments.first == "build" })
+
+        let volume = RebuildScenario()
+        var labels = volume.volumeLabels()
+        labels[ContainerIdentity.labelLocalFolder] = "volume://adev-repo-ws"
+        volume.containers = [RebuildScenario.container(id: "vol-keep", labels: labels)]
+        volume.volumes = ["adev-repo-ws"]
+        volume.volumeConfigText = """
+        {
+          "image": "alpine:3.20",
+          "features": { "\(ref)": {} }
+        }
+        """
+        volume.install()
+        try MiniTest.expectThrows({
+            try withRebuildLiveFeatureFetcher {
+                _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: volume.runtime)
+            }
+        }) { error in
+            try PrivateFeatureGitCloneSupport.assertFallbackError(error, ref: ref)
+        }
+        try MiniTest.expect(!volume.mock.calls.contains { $0.arguments.first == "delete" }, "volume fallback failure must keep the old container")
+        try MiniTest.expect(!volume.mock.calls.contains { $0.arguments.first == "build" })
+    }),
+
+    ("rebuildBindLocalPathWithSeamDoesNotStartFeatureGit", {
+        let git = PrivateFeatureGitCloneSupport.FakeGit()
+        let restoreSeam = PrivateFeatureGitCloneSupport.install(git: git)
+        defer { restoreSeam() }
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "features": { "./features/kubesecret": {} }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let featuresRoot = ws.appendingPathComponent(".devcontainer/features", isDirectory: true)
+        try FileManager.default.createDirectory(at: featuresRoot, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            atPath: TestRepo.root().appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path,
+            toPath: featuresRoot.appendingPathComponent("kubesecret").path
+        )
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "bind-local",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.install()
+        try withRebuildLiveFeatureFetcher {
+            let result = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+            try MiniTest.expectEqual(result.outcome, "success")
+        }
+        try MiniTest.expect(git.calls.isEmpty, "bind local-path load must not start feature git")
+    }),
+
+    ("rebuildVolumeMissingLocalPathWithSeamDoesNotStartFeatureGit", {
+        let git = PrivateFeatureGitCloneSupport.FakeGit()
+        let restoreSeam = PrivateFeatureGitCloneSupport.install(git: git)
+        defer { restoreSeam() }
+        let s = RebuildScenario()
+        var labels = s.volumeLabels()
+        labels[ContainerIdentity.labelLocalFolder] = "volume://adev-repo-ws"
+        s.containers = [RebuildScenario.container(id: "vol-missing", labels: labels)]
+        s.volumes = ["adev-repo-ws"]
+        s.volumeConfigText = """
+        {
+          "image": "alpine:3.20",
+          "features": {
+            "./features/kubesecret": {},
+            "./features/git": {}
+          }
+        }
+        """
+        s.guestDevcontainerTar = try makeGuestDevcontainerArchive(files: [
+            "devcontainer.json": s.volumeConfigText
+        ].merging(try rebuildFixtureFeatureFiles("git")) { _, new in new })
+        s.install()
+        try MiniTest.expectThrows({
+            try withRebuildLiveFeatureFetcher {
+                _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+            }
+        }) { error in
+            let err = error as! CLIError
+            try MiniTest.expect(err.code == CLIErrorCode.featureFetch || err.code == CLIErrorCode.featureMetadata)
+            try MiniTest.expect(err.message.contains("./features/kubesecret"))
+        }
+        try MiniTest.expect(git.calls.isEmpty, "missing local-path must not start feature git")
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "delete" })
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "cp" })
+    }),
+
+    ("rebuildBindMixedLocalAndOCIAuthFailureFallsBackOnlyForOCI", {
+        let ref = PrivateFeatureGitCloneSupport.tagRef
+        let git = PrivateFeatureGitCloneSupport.FakeGit()
+        let restoreSeam = PrivateFeatureGitCloneSupport.install(git: git)
+        defer { restoreSeam() }
+        let tree = try PrivateFeatureGitCloneSupport.makeCollection(
+            featureIds: ["feature"],
+            srcMarkers: ["feature": "bind-mixed"]
+        )
+        git.treesByURL[PrivateFeatureGitCloneSupport.collectionURL] = tree
+        PrivateFeatureGitCloneSupport.script.hosts = [
+            "some.private.registry": PrivateFeatureGitCloneSupport.authRule(401)
+        ]
+        let ws = try TestRepo.makeTempWorkspace(configJSON: """
+        {
+          "image": "alpine:3.20",
+          "features": {
+            "./features/kubesecret": {},
+            "\(ref)": {}
+          }
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let featuresRoot = ws.appendingPathComponent(".devcontainer/features", isDirectory: true)
+        try FileManager.default.createDirectory(at: featuresRoot, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            atPath: TestRepo.root().appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path,
+            toPath: featuresRoot.appendingPathComponent("kubesecret").path
+        )
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "bind-mixed",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.install()
+        var dockerfile = ""
+        try withRebuildLiveFeatureFetcher {
+            let result = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+            try MiniTest.expectEqual(result.outcome, "success")
+            if let build = s.mock.calls.first(where: { $0.arguments.first == "build" }),
+               let fIdx = build.arguments.firstIndex(of: "-f"),
+               fIdx + 1 < build.arguments.count {
+                dockerfile = try String(contentsOfFile: build.arguments[fIdx + 1], encoding: .utf8)
+            }
+        }
+        try MiniTest.expectEqual(git.cloneCalls.count, 1)
+        try MiniTest.expect(git.cloneCalls[0].arguments.contains(PrivateFeatureGitCloneSupport.collectionURL))
+        try MiniTest.expect(dockerfile.contains("./features/kubesecret"))
+        try MiniTest.expect(dockerfile.contains(ref))
+    }),
+
+    ("rebuildVolumeMixedLocalAndOCIAuthFailureFallsBackOnlyForOCI", {
+        let ref = PrivateFeatureGitCloneSupport.tagRef
+        let git = PrivateFeatureGitCloneSupport.FakeGit()
+        let restoreSeam = PrivateFeatureGitCloneSupport.install(git: git)
+        defer { restoreSeam() }
+        let tree = try PrivateFeatureGitCloneSupport.makeCollection(
+            featureIds: ["feature"],
+            srcMarkers: ["feature": "vol-mixed"]
+        )
+        git.treesByURL[PrivateFeatureGitCloneSupport.collectionURL] = tree
+        PrivateFeatureGitCloneSupport.script.hosts = [
+            "some.private.registry": PrivateFeatureGitCloneSupport.authRule(403)
+        ]
+        let s = RebuildScenario()
+        var labels = s.volumeLabels()
+        labels[ContainerIdentity.labelLocalFolder] = "volume://adev-repo-ws"
+        s.containers = [RebuildScenario.container(id: "vol-mixed", labels: labels)]
+        s.volumes = ["adev-repo-ws"]
+        s.volumeConfigText = """
+        {
+          "image": "alpine:3.20",
+          "features": {
+            "./features/kubesecret": {},
+            "./features/git": {},
+            "\(ref)": {}
+          }
+        }
+        """
+        var archiveFiles = ["devcontainer.json": s.volumeConfigText]
+        for (key, value) in try rebuildFixtureFeatureFiles("sample-a", destName: "kubesecret") {
+            archiveFiles[key] = value
+        }
+        for (key, value) in try rebuildFixtureFeatureFiles("git") {
+            archiveFiles[key] = value
+        }
+        s.guestDevcontainerTar = try makeGuestDevcontainerArchive(files: archiveFiles)
+        s.install()
+        let beforeTemps = PrivateFeatureGitCloneSupport.tempChildren(prefix: "adev-feat-")
+        var dockerfile = ""
+        try withRebuildLiveFeatureFetcher {
+            let result = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime)
+            try MiniTest.expectEqual(result.outcome, "success")
+            if let build = s.mock.calls.first(where: { $0.arguments.first == "build" }),
+               let fIdx = build.arguments.firstIndex(of: "-f"),
+               fIdx + 1 < build.arguments.count {
+                dockerfile = try String(contentsOfFile: build.arguments[fIdx + 1], encoding: .utf8)
+            }
+        }
+        try MiniTest.expect(
+            s.mock.calls.contains { $0.arguments.contains("tar") && $0.arguments.contains("cf") },
+            "volume mixed rebuild must stage via exec tar"
+        )
+        try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "cp" }, "must not container cp")
+        let afterTemps = PrivateFeatureGitCloneSupport.tempChildren(prefix: "adev-feat-")
+        try MiniTest.expect(afterTemps.subtracting(beforeTemps).isEmpty, "staged temp must be removed")
+        try MiniTest.expectEqual(git.cloneCalls.count, 1)
+        try MiniTest.expect(git.cloneCalls[0].arguments.contains(PrivateFeatureGitCloneSupport.collectionURL))
+        try MiniTest.expect(dockerfile.contains("./features/kubesecret"))
+        try MiniTest.expect(dockerfile.contains(ref))
+        try MiniTest.expect(!dockerfile.contains("./features/feature"))
     })
 ]
 
