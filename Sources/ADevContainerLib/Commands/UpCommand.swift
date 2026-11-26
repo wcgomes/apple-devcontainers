@@ -251,6 +251,7 @@ public enum UpCommand {
             } else {
                 // Start stopped: no rebuild (features already baked on create).
                 SSHForwardingPolicy.warnForExisting(labels: existing.labels, name: existing.name, environment: localEnv)
+                try VolumeHealth.gate(volumes: VolumeHealth.managedVolumes(labels: existing.labels), runtime: runtime)
                 StatusPrinter.status("Starting container")
                 do {
                     try runtime.start(nameOrId: existing.id)
@@ -463,6 +464,11 @@ public enum UpCommand {
             enableSSHForward: ssh.automatic
         )
 
+        // Refuse a reused named volume whose ext4 records errors (not config-edit recoverable).
+        try VolumeHealth.gate(
+            volumes: effectiveConfig.mounts.filter { $0.type == .volume }.map(\.source),
+            runtime: runtime
+        )
         StatusPrinter.status("Creating container", item: resolved.containerName)
         let id: String
         do {
@@ -484,7 +490,7 @@ public enum UpCommand {
                 )
             } catch {
                 try? runtime.delete(nameOrId: id, force: true)
-                throw BringUpRecovery.eligible(error)
+                throw ownershipFailure(error)
             }
         }
         StatusPrinter.status("Starting container")
@@ -507,7 +513,7 @@ public enum UpCommand {
                 )
             } catch {
                 try? runtime.delete(nameOrId: id, force: true)
-                throw BringUpRecovery.eligible(error)
+                throw ownershipFailure(error)
             }
         }
 
@@ -523,7 +529,7 @@ public enum UpCommand {
             )
         } catch {
             try? runtime.delete(nameOrId: id, force: true)
-            throw BringUpRecovery.eligible(error)
+            throw ownershipFailure(error)
         }
 
         // Connected before create hooks; setup failure never enters recovery.
@@ -719,6 +725,12 @@ public enum UpCommand {
 
     private static func shellQuoteCommand(_ args: [String]) -> String {
         args.map(shellQuote).joined(separator: " ")
+    }
+
+    /// Ownership failures are eligible for config-edit recovery, except on-disk volume
+    /// corruption: editing the config cannot repair it, so it fails fast with its guidance.
+    private static func ownershipFailure(_ error: Error) -> Error {
+        WorkspaceOwnership.isVolumeCorruption(error) ? error : BringUpRecovery.eligible(error)
     }
 
     private static func upRetryCommand(options: UpOptions) -> String {

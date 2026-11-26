@@ -16,7 +16,7 @@ enum TestRepo {
     }
 
     static func makeTempWorkspace(configJSON: String, prefix: String = "adev") throws -> URL {
-        let ws = FileManager.default.temporaryDirectory
+        let ws = StateDirectories.temporaryDirectory()
             .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
         let dc = ws.appendingPathComponent(".devcontainer", isDirectory: true)
         try FileManager.default.createDirectory(at: dc, withIntermediateDirectories: true)
@@ -398,7 +398,7 @@ nonisolated(unsafe) let errorModelTests: [(String, () throws -> Void)] = [
 
 nonisolated(unsafe) let discoveryTests: [(String, () throws -> Void)] = [
     ("preferNestedOverRoot", {
-        let tempDir = FileManager.default.temporaryDirectory
+        let tempDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-discovery-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
         let nestedDir = tempDir.appendingPathComponent(".devcontainer", isDirectory: true)
@@ -411,7 +411,7 @@ nonisolated(unsafe) let discoveryTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(found, nested.path)
     }),
     ("fallbackToRoot", {
-        let tempDir = FileManager.default.temporaryDirectory
+        let tempDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-discovery-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -421,7 +421,7 @@ nonisolated(unsafe) let discoveryTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(found, root.path)
     }),
     ("missingConfig", {
-        let tempDir = FileManager.default.temporaryDirectory
+        let tempDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-discovery-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -1360,7 +1360,7 @@ nonisolated(unsafe) let admissionTests: [(String, () throws -> Void)] = [
             "features-triple.json"
         ] {
             let path = root.appendingPathComponent("Tests/Fixtures/\(name)").path
-            let ws = FileManager.default.temporaryDirectory
+            let ws = StateDirectories.temporaryDirectory()
                 .appendingPathComponent("admit-\(UUID().uuidString)", isDirectory: true)
             let dc = ws.appendingPathComponent(".devcontainer", isDirectory: true)
             try FileManager.default.createDirectory(at: dc, withIntermediateDirectories: true)
@@ -2065,7 +2065,7 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
     ("lifecycleHooksFixtureAdmits", {
         let root = TestRepo.root()
         let fixture = root.appendingPathComponent("Tests/Fixtures/lifecycle-hooks.json")
-        let ws = FileManager.default.temporaryDirectory
+        let ws = StateDirectories.temporaryDirectory()
             .appendingPathComponent("p4-hooks-\(UUID().uuidString)", isDirectory: true)
         let dc = ws.appendingPathComponent(".devcontainer", isDirectory: true)
         try FileManager.default.createDirectory(at: dc, withIntermediateDirectories: true)
@@ -2081,7 +2081,7 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
     ("runargsHostFixtureAdmitsAndMaps", {
         let root = TestRepo.root()
         let fixture = root.appendingPathComponent("Tests/Fixtures/runargs-host.json")
-        let ws = FileManager.default.temporaryDirectory
+        let ws = StateDirectories.temporaryDirectory()
             .appendingPathComponent("p4-run-\(UUID().uuidString)", isDirectory: true)
         let dc = ws.appendingPathComponent(".devcontainer", isDirectory: true)
         try FileManager.default.createDirectory(at: dc, withIntermediateDirectories: true)
@@ -2305,7 +2305,7 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         let id = try runtime.create(request: request)
         try MiniTest.expectEqual(id, "my-ctr")
         try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "list", "--format", "json"] })
-        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "create", "data"] })
+        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "create", "--opt", "journal=ordered", "data"] })
         let args = mock.calls.last!.arguments
         try MiniTest.expectEqual(args[0], "create")
         try MiniTest.expect(args.contains("my-ctr"))
@@ -2356,7 +2356,7 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
                 if args == ["volume", "list", "--format", "json"] {
                     return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
                 }
-                if args == ["volume", "create", "data-vol"] {
+                if args == ["volume", "create", "--opt", "journal=ordered", "data-vol"] {
                     return ProcessResult(
                         exitCode: 1,
                         stdout: Data(),
@@ -2368,7 +2368,7 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
         ]
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         try runtime.ensureVolume(name: "data-vol")
-        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "create", "data-vol"] })
+        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "create", "--opt", "journal=ordered", "data-vol"] })
     }),
     ("createDoesNotInitializeExistingNamedVolume", {
         let mock = MockProcessRunner()
@@ -2412,7 +2412,7 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
                 if args == ["volume", "list", "--format", "json"] {
                     return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
                 }
-                if args == ["volume", "create", "mnt-data"] {
+                if args == ["volume", "create", "--opt", "journal=ordered", "mnt-data"] {
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
                 if args.first == "create" {
@@ -2457,7 +2457,7 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
                 if args == ["volume", "list", "--format", "json"] {
                     return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
                 }
-                if args == ["volume", "create", "root-data"]
+                if args == ["volume", "create", "--opt", "journal=ordered", "root-data"]
                     || args == ["volume", "delete", "root-data"] {
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
@@ -2493,7 +2493,7 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
                 if args == ["volume", "list", "--format", "json"] {
                     return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
                 }
-                if args == ["volume", "create", "cargo-data"]
+                if args == ["volume", "create", "--opt", "journal=ordered", "cargo-data"]
                     || args == ["volume", "delete", "cargo-data"] {
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
@@ -2540,7 +2540,7 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
                 if args == ["volume", "list", "--format", "json"] {
                     return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
                 }
-                if args == ["volume", "create", "cargo-data"] {
+                if args == ["volume", "create", "--opt", "journal=ordered", "cargo-data"] {
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
                 if args == ["volume", "delete", "cargo-data"] {
@@ -2586,7 +2586,7 @@ nonisolated(unsafe) let phase4UnitTests: [(String, () throws -> Void)] = [
                 if args == ["volume", "list", "--format", "json"] {
                     return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
                 }
-                if args == ["volume", "create", "cargo-data"] {
+                if args == ["volume", "create", "--opt", "journal=ordered", "cargo-data"] {
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
                 if args.first == "create" {
@@ -4181,7 +4181,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(meta.optionDefaults["greeting"]?.stringValue, "hello")
     }),
     ("featureMetadataMissingFails", {
-        let dir = FileManager.default.temporaryDirectory
+        let dir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-missing-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -4286,7 +4286,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(env["MODE"], "x")
     }),
     ("featureMockFetchSuccessAnd404", {
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-fetch-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: cache) }
         let mock = MockFeatureFetcher(packagesByRef: [
@@ -4324,7 +4324,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             atPath: sampleA,
             toPath: featuresRoot.appendingPathComponent("sample-a").path
         )
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-local-load-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: cache) }
         let dest = cache.appendingPathComponent("a").path
@@ -4349,7 +4349,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             atPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"),
             toPath: featuresRoot.appendingPathComponent("kubesecret").path
         )
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-local-subdir-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: cache) }
         let dest = cache.appendingPathComponent("k").path
@@ -4376,7 +4376,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             atPath: FeaturesTestSupport.fixtureFeatureDir("sample-a"),
             toPath: beside.path
         )
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-local-beside-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: cache) }
         let dest = cache.appendingPathComponent("k").path
@@ -4398,7 +4398,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
     ("featureLocalLoadMissingPathErrors", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
         defer { try? FileManager.default.removeItem(at: ws) }
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-local-miss-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: cache) }
         let fetcher = DefaultFeatureFetcher(workspacePath: ws.path)
@@ -4423,7 +4423,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
     ("featureLocalLoadMissingConfigDirRefErrorsWithoutOCI", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: #"{ "image": "alpine:3.20" }"#)
         defer { try? FileManager.default.removeItem(at: ws) }
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-local-miss-cfg-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: cache) }
         let fetcher = DefaultFeatureFetcher(workspacePath: ws.path)
@@ -4454,7 +4454,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             atomically: true,
             encoding: .utf8
         )
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-local-noinst-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: cache) }
         let fetcher = DefaultFeatureFetcher(workspacePath: ws.path)
@@ -4514,7 +4514,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
                 toPath: featuresRoot.appendingPathComponent(name).path
             )
         }
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-local-run-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         let fetcher = DefaultFeatureFetcher(workspacePath: ws.path)
@@ -4594,7 +4594,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
                 .appendingPathComponent("devcontainer-feature.json")),
             featureRef: FeaturesTestSupport.refA
         )
-        let ctxDir = FileManager.default.temporaryDirectory
+        let ctxDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-df-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: ctxDir) }
         let ordered = [
@@ -4644,7 +4644,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(FileManager.default.fileExists(atPath: ctx.dockerfilePath))
     }),
     ("featureDockerfileGeneratorUsesRefSegmentWhenIdEmpty", {
-        let ctxDir = FileManager.default.temporaryDirectory
+        let ctxDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-df-idless-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: ctxDir) }
         let pkgDir = (ctxDir as NSString).appendingPathComponent("pkg")
@@ -4708,7 +4708,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         }
         try MiniTest.expectEqual(Set(names).count, names.count)
 
-        let ctxDir = FileManager.default.temporaryDirectory
+        let ctxDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-df-collide-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: ctxDir) }
         func writePkg(_ name: String) throws -> String {
@@ -4761,7 +4761,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
                 .appendingPathComponent("devcontainer-feature.json")),
             featureRef: FeaturesTestSupport.refA
         )
-        let ctxDir = FileManager.default.temporaryDirectory
+        let ctxDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-df-empty-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: ctxDir) }
         let ordered = [
@@ -4792,7 +4792,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
                 .appendingPathComponent("devcontainer-feature.json")),
             featureRef: FeaturesTestSupport.refA
         )
-        let ctxDir = FileManager.default.temporaryDirectory
+        let ctxDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-df-node-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: ctxDir) }
         let ordered = [
@@ -4826,7 +4826,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             postStartCommand: .shell("echo baked-postStart"),
             postAttachCommand: .shell("echo baked-postAttach")
         )
-        let ctxDir = FileManager.default.temporaryDirectory
+        let ctxDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-df-meta-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: ctxDir) }
         let pkgDir = (ctxDir as NSString).appendingPathComponent("pkg")
@@ -4901,7 +4901,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             postStartCommand: .shell("echo feature-postStart"),
             postAttachCommand: .shell("echo feature-postAttach")
         )
-        let ctxDir = FileManager.default.temporaryDirectory
+        let ctxDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-df-union-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: ctxDir) }
         let pkgDir = (ctxDir as NSString).appendingPathComponent("pkg")
@@ -4980,7 +4980,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             featureRef: FeaturesTestSupport.refA
         )
         meta.containerEnv["DOTNET_ROOT"] = "/usr/share/dotnet"
-        let ctxDir = FileManager.default.temporaryDirectory
+        let ctxDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-df-cenv-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: ctxDir) }
         let ordered = [
@@ -5024,7 +5024,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         )
         meta.containerEnv["DOTNET_ROOT"] = "/usr/share/dotnet"
         meta.containerEnv["PATH"] = "$PATH:$DOTNET_ROOT"
-        let ctxDir = FileManager.default.temporaryDirectory
+        let ctxDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-df-path-refs-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: ctxDir) }
         let ordered = [
@@ -5075,7 +5075,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             containerEnv: [:],
             optionDefaults: ["greeting": .string("hello")]
         )
-        let ctxDir = FileManager.default.temporaryDirectory
+        let ctxDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-df-empty-cenv-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: ctxDir) }
         // Need a real package with install.sh — use sample-a package path but empty-cenv metadata.
@@ -5120,7 +5120,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             featureRef: FeaturesTestSupport.refA
         )
         meta.containerEnv["DOTNET_ROOT"] = "/usr/share/dotnet"
-        let ctxDir = FileManager.default.temporaryDirectory
+        let ctxDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-df-coexist-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: ctxDir) }
         let ordered = [
@@ -5160,7 +5160,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(lastUserLine.map(String.init), "USER root")
     }),
     ("featuresRunnerFailsClosedOnBaseInspectFailure", {
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-inspect-fail-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         let mockFetch = MockFeatureFetcher(packagesByRef: [
@@ -5269,7 +5269,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(added.contains("cpus = 4"))
     }),
     ("ensureNativeArmAlreadyFalseNoWriteNoPrompt", {
-        let dir = FileManager.default.temporaryDirectory
+        let dir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-rosetta-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -5311,7 +5311,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(onDisk, "[build]\nrosetta = false\n")
     }),
     ("ensureNativeArmDeclineErrors", {
-        let dir = FileManager.default.temporaryDirectory
+        let dir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-rosetta-d-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -5349,7 +5349,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!FileManager.default.fileExists(atPath: configPath))
     }),
     ("ensureNativeArmEnvAutoAcceptWrites", {
-        let dir = FileManager.default.temporaryDirectory
+        let dir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-rosetta-a-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -5648,7 +5648,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(c.containerEnv["OK"], "1")
     }),
     ("featuresRunnerBuildWithPlatformNoRosetta", {
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-run-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         let mockFetch = MockFeatureFetcher(packagesByRef: [
@@ -5728,7 +5728,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         }
     }),
     ("featuresRunnerReusesExistingTag", {
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-reuse-tag-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         let mockFetch = MockFeatureFetcher(packagesByRef: [
@@ -5768,7 +5768,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!mockProc.calls.contains { $0.arguments.first == "build" })
     }),
     ("featuresRunnerForceBuildRebuildsExistingTag", {
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-force-tag-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         let mockFetch = MockFeatureFetcher(packagesByRef: [
@@ -5813,7 +5813,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!builds[0].arguments.contains("--no-cache"))
     }),
     ("featuresRunnerBakesUnionedBaseImageMetadataLabel", {
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-bake-union-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         let pkgDir = (cache as NSString).appendingPathComponent("hook-pkg")
@@ -6261,7 +6261,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(mock.calls.filter { $0.arguments.first == "build" }.count, 1)
     }),
     ("featureDockerfileGeneratorFromsSuppliedBaseImage", {
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("df-from-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         try FileManager.default.createDirectory(atPath: cache, withIntermediateDirectories: true)
@@ -6553,7 +6553,7 @@ nonisolated(unsafe) let featuresUnitTests: [(String, () throws -> Void)] = [
             data: Data(#"{ "id": "sshd", "entrypoint": "/usr/local/share/ssh-init.sh" }"#.utf8),
             featureRef: "./sshd"
         )
-        let ctxDir = FileManager.default.temporaryDirectory
+        let ctxDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-df-ep-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: ctxDir) }
         let pkgDir = (ctxDir as NSString).appendingPathComponent("pkg")
@@ -6736,7 +6736,7 @@ nonisolated(unsafe) let compatibilityContractTests: [(String, () throws -> Void)
         )
         try MiniTest.expect(ignored.compatibilityReport.hasDegradation)
 
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("compat-bind-\(UUID().uuidString)", isDirectory: true)
         let kubeDir = root.appendingPathComponent(".kube", isDirectory: true)
         try FileManager.default.createDirectory(at: kubeDir, withIntermediateDirectories: true)

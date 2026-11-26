@@ -328,7 +328,7 @@ public enum ConfigReader {
 
         // Write to a temp file so ConfigResolver/JSONCParser can load it.
         // Temp root uses FileManager.default (matches the pre-existing loader behavior).
-        let tempDir = FileManager.default.temporaryDirectory
+        let tempDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-postattach-\(UUID().uuidString)", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)

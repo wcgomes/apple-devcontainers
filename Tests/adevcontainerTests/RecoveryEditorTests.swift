@@ -340,7 +340,7 @@ nonisolated(unsafe) let recoveryEditorTests: [(String, () throws -> Void)] = [
     }),
 
     ("recoveryEditorReturnsInvalidConfigForCallerToReopen", {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-editor-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }

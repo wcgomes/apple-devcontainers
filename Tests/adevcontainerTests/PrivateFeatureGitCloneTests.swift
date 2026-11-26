@@ -206,7 +206,7 @@ enum PrivateFeatureGitCloneSupport {
         rootMarker: String? = nil,
         srcPartial: Set<String> = []
     ) throws -> String {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-coll-\(UUID().uuidString)", isDirectory: true).path
         try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
         for id in featureIds {
@@ -231,7 +231,7 @@ enum PrivateFeatureGitCloneSupport {
     }
 
     static func featureTar(id: String, marker: String) throws -> Data {
-        let dir = FileManager.default.temporaryDirectory
+        let dir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-oci-pkg-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: dir) }
         try writePackage(at: dir, id: id, marker: marker)
@@ -239,7 +239,7 @@ enum PrivateFeatureGitCloneSupport {
     }
 
     static func tarOfNamedFiles(_ files: [String: String]) throws -> Data {
-        let dir = FileManager.default.temporaryDirectory
+        let dir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-oci-files-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: dir) }
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -250,7 +250,7 @@ enum PrivateFeatureGitCloneSupport {
                 encoding: .utf8
             )
         }
-        let tar = FileManager.default.temporaryDirectory
+        let tar = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-oci-layer-\(UUID().uuidString).tar").path
         defer { try? FileManager.default.removeItem(atPath: tar) }
         let result = try FoundationProcessRunner().run(
@@ -266,7 +266,7 @@ enum PrivateFeatureGitCloneSupport {
     }
 
     static func tarOfPackage(_ directory: String) throws -> Data {
-        let tar = FileManager.default.temporaryDirectory
+        let tar = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-oci-layer-\(UUID().uuidString).tar").path
         defer { try? FileManager.default.removeItem(atPath: tar) }
         let result = try FoundationProcessRunner().run(
@@ -282,7 +282,7 @@ enum PrivateFeatureGitCloneSupport {
     }
 
     static func destination() -> String {
-        FileManager.default.temporaryDirectory
+        StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-feat-dest-\(UUID().uuidString)", isDirectory: true).path
     }
 
@@ -369,7 +369,7 @@ enum PrivateFeatureGitCloneSupport {
     }
 
     static func tempChildren(prefix: String) -> Set<String> {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
         let names = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
         return Set(names.filter { $0.hasPrefix(prefix) })
     }
@@ -523,7 +523,7 @@ nonisolated(unsafe) let privateFeatureGitCloneTests: [(String, () throws -> Void
             PrivateFeatureGitCloneSupport.script.hosts = [
                 "some.private.registry": PrivateFeatureGitCloneSupport.authRule(status)
             ]
-            let configDir = FileManager.default.temporaryDirectory
+            let configDir = StateDirectories.temporaryDirectory()
                 .appendingPathComponent("adev-cfg-\(UUID().uuidString)", isDirectory: true).path
             try FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
             let configPath = (configDir as NSString).appendingPathComponent("devcontainer.json")
@@ -863,7 +863,7 @@ nonisolated(unsafe) let privateFeatureGitCloneTests: [(String, () throws -> Void
         let git = PrivateFeatureGitCloneSupport.FakeGit()
         let restore = PrivateFeatureGitCloneSupport.install(git: git)
         defer { restore() }
-        let workspace = FileManager.default.temporaryDirectory
+        let workspace = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-ws-\(UUID().uuidString)", isDirectory: true).path
         try FileManager.default.createDirectory(atPath: workspace, withIntermediateDirectories: true)
         try "keep\n".write(toFile: (workspace as NSString).appendingPathComponent("marker.txt"), atomically: true, encoding: .utf8)
@@ -1111,7 +1111,7 @@ nonisolated(unsafe) let privateFeatureGitCloneTests: [(String, () throws -> Void
 
     ("gitCloneStripsTraceVariablesAndDoesNotWriteWorkspaceTrace", {
         let leakName = "adev-git-trace-leak.log"
-        let workspace = FileManager.default.temporaryDirectory
+        let workspace = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-trace-ws-\(UUID().uuidString)", isDirectory: true).path
         try FileManager.default.createDirectory(atPath: workspace, withIntermediateDirectories: true)
         let sock = "/tmp/adev-feature-agent.sock"

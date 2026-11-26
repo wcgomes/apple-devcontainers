@@ -53,6 +53,11 @@ final class RebuildScenario {
     var guestDevcontainerTar: Data?
     /// Basenames returned by guest `find -maxdepth 1 -type f` (root-sibling context staging).
     var guestRootFiles: [String] = []
+    /// Extra raw `list --all` entries (for example unmanaged containers with mounts).
+    var extraListEntries: [[String: Any]] = []
+    /// Emit an empty `mounts` array per scenario container (Apple list shape) so volume
+    /// attachment checks can parse the listing.
+    var listIncludesMounts = false
 
     var runtime: AppleContainerRuntime {
         AppleContainerRuntime(executablePath: "container", runner: mock)
@@ -208,17 +213,19 @@ final class RebuildScenario {
 
     private func listJSON() -> Data {
         let arr = containers.map { c -> [String: Any] in
-            [
+            var configuration: [String: Any] = [
                 "id": c.id,
-                "configuration": [
-                    "id": c.id,
-                    "image": c.image ?? "",
-                    "labels": c.labels
-                ],
+                "image": c.image ?? "",
+                "labels": c.labels
+            ]
+            if listIncludesMounts { configuration["mounts"] = [Any]() }
+            return [
+                "id": c.id,
+                "configuration": configuration,
                 "status": ["state": c.state]
             ]
         }
-        return try! JSONSerialization.data(withJSONObject: arr)
+        return try! JSONSerialization.data(withJSONObject: arr + extraListEntries)
     }
 
     private func ok(_ data: Data) -> ProcessResult {
@@ -362,7 +369,7 @@ func withRebuildFeatureOverrides(
 
 /// Host-side `tar cf -` of a `.devcontainer/` tree for volume-mode initialize tests.
 func makeGuestDevcontainerArchive(files: [String: String]) throws -> Data {
-    let root = FileManager.default.temporaryDirectory
+    let root = StateDirectories.temporaryDirectory()
         .appendingPathComponent("adev-init-tar-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
     let dc = root.appendingPathComponent(".devcontainer", isDirectory: true)
@@ -389,7 +396,7 @@ func makeGuestDevcontainerArchive(files: [String: String]) throws -> Data {
 
 /// Host-side `tar cf -` of workspace-root members (sibling Dockerfile, not `.devcontainer/`).
 func makeGuestWorkspaceArchive(files: [String: String]) throws -> Data {
-    let root = FileManager.default.temporaryDirectory
+    let root = StateDirectories.temporaryDirectory()
         .appendingPathComponent("adev-ws-tar-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -419,7 +426,7 @@ func makeGuestWorkspaceArchive(files: [String: String]) throws -> Data {
 
 /// Live DefaultFeatureFetcher (no mock) plus cache/ensure overrides.
 func withRebuildLiveFeatureFetcher(_ body: () throws -> Void) throws {
-    let cache = FileManager.default.temporaryDirectory
+    let cache = StateDirectories.temporaryDirectory()
         .appendingPathComponent("feat-rebuild-live-\(UUID().uuidString)", isDirectory: true).path
     defer { try? FileManager.default.removeItem(atPath: cache) }
     let prevFetcher = RebuildCommand.featuresFetcherOverride
@@ -456,7 +463,7 @@ func rebuildFixtureFeatureFiles(_ name: String, destName: String? = nil) throws 
 /// Feature overrides for volume-mode scenarios: volume mode injects the git feature,
 /// so map the git ref to the sample fixture and no-op the native-arm rosetta probe.
 func withRebuildVolumeOverrides(_ body: () throws -> Void) throws {
-    let cache = FileManager.default.temporaryDirectory
+    let cache = StateDirectories.temporaryDirectory()
         .appendingPathComponent("feat-rebuild-vol-\(UUID().uuidString)", isDirectory: true).path
     defer { try? FileManager.default.removeItem(atPath: cache) }
     try withRebuildFeatureOverrides(
@@ -719,7 +726,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         let ref = "ghcr.io/adevcontainer/features/sample-a:1"
         let fixture = TestRepo.root()
             .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-rebuild-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
@@ -759,7 +766,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         let ref = "ghcr.io/adevcontainer/features/sample-a:1"
         let fixture = TestRepo.root()
             .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-rebuild-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
@@ -796,7 +803,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         let ref = "ghcr.io/adevcontainer/features/sample-a:1"
         let fixture = TestRepo.root()
             .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-rebuild-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
@@ -837,7 +844,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         let ref = "ghcr.io/adevcontainer/features/sample-a:1"
         let fixture = TestRepo.root()
             .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-rebuild-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
@@ -2115,7 +2122,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         // Incident: delete crossed the boundary, the process exited with the secure session
         // still on disk, and no helper was created. openRetry cannot run. A later
         // `rebuild --name` must resume that session and must not create a blank workspace volume.
-        let name = "plantsuite"
+        let name = "sample-app"
         defer {
             if let resume = try? VolumeRecoveryResume.load(name: name) {
                 if let dir = try? RecoveryConfigSession.directoryURL(forSessionID: resume.sessionID) {
@@ -2207,7 +2214,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         // retain() runs before delete. If delete throws the Apple stale-exec diagnostic,
         // crossedDeleteBoundary is never set. The published session must stay, and a later
         // rebuild --name must resume without a helper and refuse a blank workspace volume.
-        let name = "plantsuite-delete-throw"
+        let name = "sample-app-delete-throw"
         let configToken = "adev-delete-throw-config-token"
         let configText = #"{"image":"alpine:3.20","postCreateCommand":"echo \#(configToken)"}"#
         defer {
@@ -2302,7 +2309,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
     }),
 
     ("rebuildVolumeResumeRefusesBlankWorkspaceVolume", {
-        let name = "plantsuite-missing-ws"
+        let name = "sample-app-missing-ws"
         let labels = RebuildScenario().volumeLabels()
         let info = RebuildScenario.container(id: name, labels: labels)
         let raw = RawVolumeConfig(
@@ -2347,6 +2354,259 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!s.mock.calls.contains { $0.arguments.starts(with: ["volume", "create"]) }, "missing workspace volume is not created")
         try MiniTest.expect(!s.mock.calls.contains { $0.arguments.first == "create" }, "no replacement or helper when the workspace volume is gone")
         try MiniTest.expect(try VolumeRecoveryResume.load(name: name) != nil, "refusing a blank volume keeps the resumable session")
+    }),
+
+    ("rebuildVolumeResumeStagesLocalFeaturesFromWorkspaceVolume", {
+        // The old container is gone, so `exec test -d` into it cannot see the guest
+        // `.devcontainer/`. Staging must read the retained workspace volume through a
+        // short-lived pinned helper instead of silently staging devcontainer.json alone.
+        let name = "sample-app-resume-local-feature"
+        let configText = """
+        {
+          "image": "alpine:3.20",
+          "features": {
+            "./features/local-feature": {},
+            "./features/git": {}
+          }
+        }
+        """
+        let labels = RebuildScenario().volumeLabels()
+        let info = RebuildScenario.container(id: name, labels: labels)
+        let raw = RawVolumeConfig(
+            bytes: Data(configText.utf8),
+            pathInContainer: "/workspaces/edge/.devcontainer/devcontainer.json",
+            workspaceFolder: "/workspaces/edge",
+            workspaceFolderBasename: "edge"
+        )
+        let session = try RecoveryConfigSession.capture(
+            rawVolumeConfig: raw,
+            container: info,
+            sessionID: "resume-feat-\(String(UUID().uuidString.prefix(8)).lowercased())"
+        )
+        defer {
+            try? session.cleanup()
+            try? VolumeRecoveryResume.cleanup(name: name)
+        }
+        try VolumeRecoveryResume.retain(
+            container: info,
+            sessionID: session.sessionID,
+            authorName: nil,
+            authorEmail: nil
+        )
+
+        let s = RebuildScenario()
+        s.containers = []
+        s.volumes = ["adev-repo-ws"]
+        s.existingImages = [RecoveryHelper.helperImageReference]
+        var archiveFiles = ["devcontainer.json": configText]
+        for (key, value) in try rebuildFixtureFeatureFiles("sample-a", destName: "local-feature") {
+            archiveFiles[key] = value
+        }
+        for (key, value) in try rebuildFixtureFeatureFiles("git") {
+            archiveFiles[key] = value
+        }
+        s.guestDevcontainerTar = try makeGuestDevcontainerArchive(files: archiveFiles)
+        let helperMountJSON = try JSONSerialization.data(withJSONObject: [[
+            "configuration": [
+                "id": s.newContainerId,
+                "mounts": [[
+                    "source": "/var/lib/container/volumes/adev-repo-ws.img",
+                    "destination": "/workspaces/edge",
+                    "options": [],
+                    "type": ["volume": ["name": "adev-repo-ws"]]
+                ]]
+            ]
+        ]])
+        let helperID = s.newContainerId
+        var builtDockerfile: String?
+        s.mock.handlers.append { args in
+            if args.first == "build", let fIdx = args.firstIndex(of: "-f"), fIdx + 1 < args.count {
+                builtDockerfile = try? String(contentsOfFile: args[fIdx + 1], encoding: .utf8)
+                return nil
+            }
+            // The deleted old container rejects every exec.
+            if args.first == "exec", args.contains(name) {
+                return ProcessResult(exitCode: 1, stdout: Data(), stderr: Data("container not found: \(name)".utf8))
+            }
+            if args == ["inspect", helperID] {
+                return ProcessResult(exitCode: 0, stdout: helperMountJSON, stderr: Data())
+            }
+            return nil
+        }
+        s.install()
+        try withRebuildLiveFeatureFetcher {
+            let result = try RebuildCommand.run(
+                options: RebuildOptions(name: name, skipPull: true, jsonOutput: true),
+                runtime: s.runtime,
+                isTTY: false
+            )
+            try MiniTest.expectEqual(result.outcome, "success")
+        }
+        let calls = s.mock.calls.map(\.arguments)
+        guard let helperCreate = calls.firstIndex(where: {
+            $0.first == "create" && $0.contains(RecoveryHelper.helperImageReference)
+        }) else {
+            throw MiniTest.Failure(message: "resume must stage through a pinned helper on the workspace volume")
+        }
+        guard let tarIdx = calls.firstIndex(where: { $0.first == "exec" && $0.contains("tar") && $0.contains("cf") }) else {
+            throw MiniTest.Failure(message: "guest .devcontainer was not archived")
+        }
+        try MiniTest.expect(calls[tarIdx].contains(helperID), "archive runs in the helper, not the deleted container")
+        try MiniTest.expect(helperCreate < tarIdx, "helper exists before staging")
+        guard let helperDelete = calls.firstIndex(where: { $0.first == "delete" && $0.contains(helperID) }) else {
+            throw MiniTest.Failure(message: "staging helper must be removed")
+        }
+        try MiniTest.expect(tarIdx < helperDelete, "helper removed after staging")
+        guard let replacement = calls.firstIndex(where: {
+            $0.first == "create" && !$0.contains(RecoveryHelper.helperImageReference)
+        }) else {
+            throw MiniTest.Failure(message: "replacement container was not created")
+        }
+        try MiniTest.expect(helperDelete < replacement, "helper is gone before the replacement mounts the volume")
+        try MiniTest.expect(!calls.contains { $0.starts(with: ["volume", "create"]) }, "no blank workspace volume")
+        guard let builtDockerfile else {
+            throw MiniTest.Failure(message: "features build was not invoked")
+        }
+        try MiniTest.expect(builtDockerfile.contains("./features/local-feature"), "staged local feature is installed")
+    }),
+
+    ("rebuildVolumeResumeStagingHelperDeleteFailureReportsRetainedHelper", {
+        let name = "sample-app-resume-helper-retained"
+        let configText = #"{"image":"alpine:3.20","features":{"./features/local-feature":{}}}"#
+        let labels = RebuildScenario().volumeLabels()
+        let info = RebuildScenario.container(id: name, labels: labels)
+        let session = try RecoveryConfigSession.capture(
+            rawVolumeConfig: RawVolumeConfig(
+                bytes: Data(configText.utf8),
+                pathInContainer: "/workspaces/edge/.devcontainer/devcontainer.json",
+                workspaceFolder: "/workspaces/edge",
+                workspaceFolderBasename: "edge"
+            ),
+            container: info,
+            sessionID: "helper-kept-\(String(UUID().uuidString.prefix(8)).lowercased())"
+        )
+        defer {
+            try? session.cleanup()
+            try? VolumeRecoveryResume.cleanup(name: name)
+        }
+        try VolumeRecoveryResume.retain(container: info, sessionID: session.sessionID, authorName: nil, authorEmail: nil)
+
+        // Staging fails (empty archive) and the helper delete fails, then staging succeeds
+        // and the helper delete fails: both must say the helper is retained and mounted.
+        for stagingSucceeds in [false, true] {
+            let s = RebuildScenario()
+            s.containers = []
+            s.volumes = ["adev-repo-ws"]
+            s.existingImages = [RecoveryHelper.helperImageReference]
+            s.deleteFails = true
+            if stagingSucceeds {
+                var files = ["devcontainer.json": configText]
+                for (key, value) in try rebuildFixtureFeatureFiles("sample-a", destName: "local-feature") {
+                    files[key] = value
+                }
+                s.guestDevcontainerTar = try makeGuestDevcontainerArchive(files: files)
+            }
+            let helperID = s.newContainerId
+            let mountJSON = try JSONSerialization.data(withJSONObject: [[
+                "configuration": [
+                    "id": helperID,
+                    "mounts": [[
+                        "source": "/volumes/adev-repo-ws/volume.img",
+                        "destination": "/workspaces/edge",
+                        "options": [],
+                        "type": ["volume": ["name": "adev-repo-ws"]]
+                    ]]
+                ]
+            ]])
+            s.mock.handlers.append { args in
+                args == ["inspect", helperID] ? ProcessResult(exitCode: 0, stdout: mountJSON, stderr: Data()) : nil
+            }
+            s.install()
+            try withRebuildLiveFeatureFetcher {
+                try MiniTest.expectThrows({
+                    _ = try RebuildCommand.run(
+                        options: RebuildOptions(name: name, skipPull: true, jsonOutput: true),
+                        runtime: s.runtime,
+                        isTTY: false
+                    )
+                }) { error in
+                    let cli = error as? CLIError
+                    try MiniTest.expect(
+                        cli?.message.contains("was retained and still mounts workspace volume 'adev-repo-ws'") == true,
+                        cli?.message ?? "\(error)"
+                    )
+                    try MiniTest.expect(cli?.hint?.contains("rebuild --name '\(name)'") == true, "reuse guidance")
+                    try MiniTest.expect(cli?.hint?.contains("delete --name '\(name)'") == true, "cleanup guidance")
+                    if !stagingSucceeds {
+                        try MiniTest.expect(cli?.message.contains("Failed to archive guest") == true, "staging cause kept")
+                    }
+                }
+            }
+            try MiniTest.expect(
+                !s.mock.calls.contains { $0.arguments.first == "create" && !$0.arguments.contains(RecoveryHelper.helperImageReference) },
+                "no replacement is created while the helper still mounts the volume"
+            )
+        }
+        try MiniTest.expect(try VolumeRecoveryResume.load(name: name) != nil, "resume stays available")
+    }),
+
+    ("rebuildStoppedOldContainerWarnsOncePerVolume", {
+        // Both health checks of one rebuild (before the bare start, and before the
+        // replacement create) see the same unjournaled volume: one warning only.
+        let unjournaled = try makeSyntheticExt4Image(syntheticExt4Superblock(compat: 0))
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(id: "vol-stopped-warn", state: "stopped", labels: s.volumeLabels())
+        s.containers = [info]
+        s.listIncludesMounts = true
+        s.mock.handlers.append(volumeInspectHandler(["adev-repo-ws": unjournaled]))
+        s.install()
+        defer {
+            if let resume = try? VolumeRecoveryResume.load(name: info.name),
+               let dir = try? RecoveryConfigSession.directoryURL(forSessionID: resume.sessionID) {
+                try? FileManager.default.removeItem(at: dir)
+            }
+            try? VolumeRecoveryResume.cleanup(name: info.name)
+        }
+        let previous = StatusPrinter.onWarning
+        var warnings: [String] = []
+        StatusPrinter.onWarning = { warnings.append($0) }
+        defer { StatusPrinter.onWarning = previous }
+        try withRebuildVolumeOverrides {
+            _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime, isTTY: false)
+        }
+        let inspects = s.mock.calls.filter { $0.arguments == ["volume", "inspect", "adev-repo-ws"] }.count
+        try MiniTest.expect(inspects >= 2, "both health checks ran (inspects: \(inspects))")
+        try MiniTest.expectEqual(
+            warnings.filter { $0.contains("'adev-repo-ws'") && $0.contains("no ext4 journal") }.count,
+            1,
+            "one warning per volume per rebuild run"
+        )
+        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "create" }, "rebuild continues after the warning")
+    }),
+
+    ("rebuildStoppedOldContainerCorruptVolumeRefusedBeforeStart", {
+        let corrupt = try makeSyntheticExt4Image(syntheticExt4Superblock(errorCount: 1))
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(id: "vol-stopped", state: "stopped", labels: s.volumeLabels())
+        s.containers = [info]
+        s.listIncludesMounts = true
+        s.mock.handlers.append(volumeInspectHandler(["adev-repo-ws": corrupt]))
+        s.install()
+        defer { try? VolumeRecoveryResume.cleanup(name: info.name) }
+        try withRebuildVolumeOverrides {
+            try MiniTest.expectThrows({
+                _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: s.runtime, isTTY: false)
+            }) { error in
+                let cli = error as? CLIError
+                try MiniTest.expectEqual(cli?.code, CLIErrorCode.volumeCorrupt)
+                try MiniTest.expect(cli?.message.contains("'adev-repo-ws'") == true)
+            }
+        }
+        let first = s.mock.calls.map(\.arguments.first)
+        try MiniTest.expect(!first.contains("start"), "old container is not started")
+        try MiniTest.expect(!first.contains("delete"), "old container is not deleted")
+        try MiniTest.expect(!first.contains("create"), "nothing is created")
+        try MiniTest.expect(try VolumeRecoveryResume.load(name: info.name) == nil, "no resume is published")
     }),
 
     ("rebuildCreatesNewlyDeclaredConfigVolume", {
@@ -2431,7 +2691,7 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         let sampleRef = "ghcr.io/adevcontainer/features/sample-a:1"
         let fixture = TestRepo.root()
             .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-rebuild-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
 
@@ -2675,6 +2935,170 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
             !s.mock.calls.contains { $0.arguments.first == "exec" && $0.arguments.last?.contains("postCreate") == true },
             "lifecycle hooks do not run after ownership failure"
         )
+    }),
+
+    ("rebuildVolumeCorruptionFailsFastAndKeepsRecoveryState", {
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(id: "vol-corrupt", labels: s.volumeLabels())
+        s.containers = [info]
+        s.volumes = ["cache-vol"]
+        s.volumeConfigText = #"{"image":"alpine:3.20","mounts":[{"type":"volume","source":"cache-vol","target":"/data"}]}"#
+        s.mock.handlers.append { args in
+            guard args.first == "exec", args.last?.contains("chown -R") == true,
+                  args.last?.contains("/data") == true else { return nil }
+            return ProcessResult(
+                exitCode: 1,
+                stdout: Data(),
+                stderr: Data("chown: changing ownership of '/data/lost+found': Structure needs cleaning\n".utf8)
+            )
+        }
+        s.install()
+        defer {
+            if let resume = try? VolumeRecoveryResume.load(name: info.name),
+               let dir = try? RecoveryConfigSession.directoryURL(forSessionID: resume.sessionID) {
+                try? FileManager.default.removeItem(at: dir)
+            }
+            try? VolumeRecoveryResume.cleanup(name: info.name)
+        }
+        final class Prompts: @unchecked Sendable { var lines: [String] = [] }
+        let prompts = Prompts()
+        try withRebuildVolumeOverrides {
+            try MiniTest.expectThrows({
+                _ = try RebuildCommand.run(
+                    options: RebuildOptions(skipPull: true),
+                    runtime: s.runtime,
+                    isTTY: true,
+                    openEditorPrompt: RecoveryOpenEditorPrompt(
+                        readLine: { "y" },
+                        writeError: { prompts.lines.append($0) }
+                    )
+                )
+            }) { error in
+                let cli = error as? CLIError
+                try MiniTest.expectEqual(cli?.code, CLIErrorCode.volumeCorrupt)
+                try MiniTest.expect(cli?.recovery == nil, "no config-edit recovery session details")
+                try MiniTest.expect(cli?.message.contains("'cache-vol' mounted at /data") == true)
+                try MiniTest.expect(cli?.hint?.contains("cp -c") == true)
+                try MiniTest.expect(cli?.hint?.contains("e2fsck -fy") == true)
+                try MiniTest.expect(cli?.hint?.contains("rebuild --name 'vol-corrupt'") == true)
+            }
+        }
+        try MiniTest.expect(prompts.lines.isEmpty, "corruption never enters the config-edit prompt")
+        try MiniTest.expect(
+            !s.mock.calls.contains { $0.arguments.first == "create" && $0.arguments.contains(RecoveryHelper.helperImageReference) },
+            "no recovery helper is created for corruption"
+        )
+        try MiniTest.expect(
+            s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.contains(s.newContainerId) },
+            "the failed replacement is removed so the volume can be repaired offline"
+        )
+        try MiniTest.expect(
+            !s.mock.calls.contains { $0.arguments.starts(with: ["volume", "delete"]) || $0.arguments.starts(with: ["volume", "rm"]) },
+            "volumes are never deleted"
+        )
+        let resume = try VolumeRecoveryResume.load(name: info.name)
+        try MiniTest.expect(resume != nil, "name-indexed recovery session is kept for rebuild --name")
+        if let resume {
+            let dir = try RecoveryConfigSession.directoryURL(forSessionID: resume.sessionID)
+            try MiniTest.expect(FileManager.default.fileExists(atPath: dir.path), "secure session kept on disk")
+        }
+    }),
+
+    ("rebuildVolumeHealthGateRefusesWarnsAndSkips", {
+        let config = #"{"image":"alpine:3.20","mounts":[{"type":"volume","source":"cache-vol","target":"/data"}]}"#
+        let corrupt = try makeSyntheticExt4Image(syntheticExt4Superblock(errorCount: 2))
+        let unclean = try makeSyntheticExt4Image(syntheticExt4Superblock(state: 0, compat: 0))
+
+        func scenario(name: String, images: [String: String], cacheInUse: Bool = false) -> RebuildScenario {
+            let s = RebuildScenario()
+            s.containers = [RebuildScenario.container(id: name, labels: s.volumeLabels())]
+            s.volumes = ["cache-vol"]
+            s.volumeConfigText = config
+            s.listIncludesMounts = true
+            if cacheInUse {
+                s.extraListEntries = [containerListEntryMounting(volume: "cache-vol", id: "other-app", state: "running")]
+            }
+            s.mock.handlers.append(volumeInspectHandler(images))
+            s.install()
+            return s
+        }
+        func cleanupResume(_ name: String) {
+            if let resume = try? VolumeRecoveryResume.load(name: name),
+               let dir = try? RecoveryConfigSession.directoryURL(forSessionID: resume.sessionID) {
+                try? FileManager.default.removeItem(at: dir)
+            }
+            try? VolumeRecoveryResume.cleanup(name: name)
+        }
+        func warnings(_ body: () throws -> Void) throws -> [String] {
+            let previous = StatusPrinter.onWarning
+            var collected: [String] = []
+            StatusPrinter.onWarning = { collected.append($0) }
+            defer { StatusPrinter.onWarning = previous }
+            try body()
+            return collected
+        }
+
+        // Errors recorded on the reused workspace volume: refuse before the replacement.
+        let refused = scenario(name: "vol-gate-corrupt", images: ["adev-repo-ws": corrupt])
+        defer { cleanupResume("vol-gate-corrupt") }
+        final class Prompts: @unchecked Sendable { var lines: [String] = [] }
+        let prompts = Prompts()
+        try withRebuildVolumeOverrides {
+            try MiniTest.expectThrows({
+                _ = try RebuildCommand.run(
+                    options: RebuildOptions(skipPull: true),
+                    runtime: refused.runtime,
+                    isTTY: true,
+                    openEditorPrompt: RecoveryOpenEditorPrompt(
+                        readLine: { "y" },
+                        writeError: { prompts.lines.append($0) }
+                    )
+                )
+            }) { error in
+                let cli = error as? CLIError
+                try MiniTest.expectEqual(cli?.code, CLIErrorCode.volumeCorrupt)
+                try MiniTest.expect(cli?.message.contains("'adev-repo-ws'") == true)
+                try MiniTest.expect(cli?.hint?.contains("rebuild --name 'vol-gate-corrupt'") == true)
+            }
+        }
+        try MiniTest.expect(prompts.lines.isEmpty, "no config-edit recovery prompt")
+        try MiniTest.expect(!refused.mock.calls.contains { $0.arguments.first == "create" }, "no replacement or helper is created")
+        try MiniTest.expect(
+            !refused.mock.calls.contains { $0.arguments.starts(with: ["volume", "delete"]) },
+            "volumes are never deleted"
+        )
+        try MiniTest.expect(try VolumeRecoveryResume.load(name: "vol-gate-corrupt") != nil, "recovery session kept for rebuild --name")
+
+        // Bare not-clean without journal: warn and continue.
+        let warned = scenario(name: "vol-gate-unclean", images: ["cache-vol": unclean])
+        defer { cleanupResume("vol-gate-unclean") }
+        let uncleanWarnings = try warnings {
+            try withRebuildVolumeOverrides {
+                _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: warned.runtime, isTTY: false)
+            }
+        }
+        try MiniTest.expect(uncleanWarnings.contains { $0.contains("'cache-vol'") && $0.contains("e2fsck") })
+        try MiniTest.expect(warned.mock.calls.contains { $0.arguments.first == "create" }, "rebuild continues after the warning")
+
+        // In use by a running container, or unreadable: skip silently.
+        let inUse = scenario(name: "vol-gate-in-use", images: ["cache-vol": corrupt], cacheInUse: true)
+        defer { cleanupResume("vol-gate-in-use") }
+        let inUseWarnings = try warnings {
+            try withRebuildVolumeOverrides {
+                _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: inUse.runtime, isTTY: false)
+            }
+        }
+        try MiniTest.expect(!inUseWarnings.contains { $0.contains("'cache-vol'") })
+        try MiniTest.expect(
+            !inUse.mock.calls.contains { $0.arguments == ["volume", "inspect", "cache-vol"] },
+            "a volume mounted by a running container is not inspected"
+        )
+        let unreadable = scenario(name: "vol-gate-unreadable", images: [:])
+        defer { cleanupResume("vol-gate-unreadable") }
+        try withRebuildVolumeOverrides {
+            _ = try RebuildCommand.run(options: RebuildOptions(skipPull: true), runtime: unreadable.runtime, isTTY: false)
+        }
+        try MiniTest.expect(unreadable.mock.calls.contains { $0.arguments.first == "create" }, "unreadable images do not block rebuild")
     }),
 
     ("rebuildHookOrderOnNewContainer", {

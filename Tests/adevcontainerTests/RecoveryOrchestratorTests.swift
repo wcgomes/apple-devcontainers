@@ -185,6 +185,81 @@ private func runJSONDispatchError() throws -> (stdout: Data, stderr: Data, exitC
 }
 
 nonisolated(unsafe) let recoveryOrchestratorTests: [(String, () throws -> Void)] = [
+    ("recoveryReasonIncludesBoundedNonHookMessage", {
+        let chown = CLIError(
+            code: CLIErrorCode.populateFailed,
+            message: "Failed to chown named volume mount for remoteUser vscode: chown: /data/x: Operation not permitted\nsecond line",
+            hint: "hint"
+        )
+        let reason = RecoveryOrchestrator.failureReason(chown, failureKind: chown.code)
+        try MiniTest.expect(reason.hasPrefix("populate_failed failure: "), reason)
+        try MiniTest.expect(reason.contains("chown: /data/x: Operation not permitted second line"), "message is flattened into the reason")
+
+        let long = CLIError(code: CLIErrorCode.runtimeFailed, message: String(repeating: "a", count: 1000))
+        let bounded = RecoveryOrchestrator.failureReason(long, failureKind: long.code)
+        try MiniTest.expect(bounded.hasSuffix("…"), "long messages are truncated")
+        try MiniTest.expect(
+            bounded.count <= "runtime_failed failure: ".count + RecoveryOrchestrator.failureExcerptLimit + 1,
+            "excerpt is bounded"
+        )
+
+        // Retained recovery errors carry the excerpt in their message.
+        let session = try RecoveryConfigSession.capture(
+            rawVolumeConfig: RawVolumeConfig(
+                bytes: Data(#"{"image":"alpine:3.20"}"#.utf8),
+                pathInContainer: "/workspaces/repo/.devcontainer/devcontainer.json",
+                workspaceFolder: "/workspaces/repo",
+                workspaceFolderBasename: "repo"
+            ),
+            container: ContainerInfo(id: "c1", name: "c1", state: "running", labels: orchestratorLabels(), image: nil),
+            sessionID: "reason-\(String(UUID().uuidString.prefix(8)).lowercased())"
+        )
+        defer { try? session.cleanup() }
+        let retained = RecoveryOrchestrator.retainedUnavailableFailure(
+            session: session,
+            helperID: "h1",
+            selectedName: "c1",
+            failure: chown,
+            environment: [:]
+        )
+        try MiniTest.expect(retained.message.contains("Operation not permitted"), retained.message)
+    }),
+
+    ("recoveryReasonRedactsURLUserinfo", {
+        let failure = CLIError(
+            code: CLIErrorCode.runtimeFailed,
+            message: "fetch https://user:s3cret@git.example.test/repo.git failed; retry ssh://tok3n@git.example.test/x and https://a:p@ss@host.example.test/y"
+                + String(repeating: " pad", count: 200)
+        )
+        let reason = RecoveryOrchestrator.failureReason(failure, failureKind: failure.code)
+        for secret in ["s3cret", "tok3n", "user:", "p@ss", "ss@host"] {
+            try MiniTest.expect(!reason.contains(secret), "credential leaked: \(secret) in \(reason)")
+        }
+        try MiniTest.expect(reason.contains("https://***@git.example.test/repo.git"))
+        try MiniTest.expect(reason.contains("ssh://***@git.example.test/x"))
+        try MiniTest.expect(reason.contains("https://***@host.example.test/y"))
+        try MiniTest.expect(reason.hasSuffix("…"), "redaction happens before truncation")
+        try MiniTest.expectEqual(
+            RecoveryOrchestrator.redactURLUserinfo("see https://git.example.test/repo and user@example.test"),
+            "see https://git.example.test/repo and user@example.test",
+            "URLs without userinfo and bare addresses are unchanged"
+        )
+    }),
+
+    ("recoveryReasonOmitsHookOutput", {
+        let secret = "token-should-not-leak"
+        let hooks = [
+            CLIError(code: CLIErrorCode.lifecycleFailed, property: "postCreateCommand", message: "hook printed \(secret)"),
+            CLIError(code: CLIErrorCode.postCreateFailed, message: "hook printed \(secret)"),
+            CLIError(code: CLIErrorCode.runtimeFailed, property: "postStartCommand", message: "hook printed \(secret)")
+        ]
+        for hook in hooks {
+            let reason = RecoveryOrchestrator.failureReason(hook, failureKind: hook.code)
+            try MiniTest.expect(!reason.contains(secret), "hook output must not appear: \(reason)")
+            try MiniTest.expect(reason.hasPrefix("\(hook.code) failure"), reason)
+        }
+    }),
+
     ("recoveryOrchestratorEligibilityMatrix", {
         let labels = orchestratorLabels()
         try MiniTest.expect(RecoveryHelper.isEligible(labels: labels))
@@ -1477,7 +1552,7 @@ nonisolated(unsafe) let recoveryOrchestratorTests: [(String, () throws -> Void)]
     // MARK: - §15 Bind recovery
 
     ("bindRecoveryEligibilityMatrix", {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-bind-elig-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1511,7 +1586,7 @@ nonisolated(unsafe) let recoveryOrchestratorTests: [(String, () throws -> Void)]
     }),
 
     ("bindRecoveryNonTTYRetainsHostPathWithoutHelper", {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-bind-nontty-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1601,7 +1676,7 @@ nonisolated(unsafe) let recoveryOrchestratorTests: [(String, () throws -> Void)]
     }),
 
     ("bindTTYPromptDeclineRetainsResumeWithoutEditor", {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-bind-decline-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1662,7 +1737,7 @@ nonisolated(unsafe) let recoveryOrchestratorTests: [(String, () throws -> Void)]
     }),
 
     ("bindTTYPromptEOFDefersWithoutEditor", {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-bind-eof-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1714,7 +1789,7 @@ nonisolated(unsafe) let recoveryOrchestratorTests: [(String, () throws -> Void)]
     }),
 
     ("bindTTYInvalidReopenDoesNotRePrompt", {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-bind-noreprompt-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1771,7 +1846,7 @@ nonisolated(unsafe) let recoveryOrchestratorTests: [(String, () throws -> Void)]
     }),
 
     ("bindRecoveryTTYOpensHostPathAndRetries", {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-bind-tty-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1854,7 +1929,7 @@ nonisolated(unsafe) let recoveryOrchestratorTests: [(String, () throws -> Void)]
     }),
 
     ("bindRecoveryTTYInvalidEditReopensWithoutRetry", {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-bind-invalid-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1914,7 +1989,7 @@ nonisolated(unsafe) let recoveryOrchestratorTests: [(String, () throws -> Void)]
     }),
 
     ("bindRecoveryTTYCancelLeavesHostFileNoHelperCleanup", {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-bind-cancel-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1973,7 +2048,7 @@ nonisolated(unsafe) let recoveryOrchestratorTests: [(String, () throws -> Void)]
     }),
 
     ("bindRecoveryHardFailureMatrixCleansNewNoHelper", {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-bind-matrix-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -2058,7 +2133,7 @@ nonisolated(unsafe) let recoveryOrchestratorTests: [(String, () throws -> Void)]
     }),
 
     ("bindRecoveryDoesNotRecoverPostAttach", {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-bind-pa-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }

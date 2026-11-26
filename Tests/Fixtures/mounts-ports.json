@@ -28,7 +28,7 @@
   "forwardPorts": [14200, 14201, 15000, 15001],
   "portsAttributes": {
     "14200": {
-      "label": "PlantSuite Portal",
+      "label": "SampleApp Portal",
       "onAutoForward": "openBrowser"
     },
     "14201": {

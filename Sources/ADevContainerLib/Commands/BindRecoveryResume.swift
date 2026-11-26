@@ -30,7 +30,7 @@ public enum BindRecoveryResume {
 
     /// Private root under the process temporary directory.
     public static func rootURL(fileManager: FileManager = .default) -> URL {
-        fileManager.temporaryDirectory
+        StateDirectories.temporaryDirectory(fileManager)
             .appendingPathComponent("adevcontainer-bind-recovery", isDirectory: true)
     }
 

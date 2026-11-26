@@ -71,6 +71,7 @@ public enum StartCommand {
         )
 
         SSHForwardingPolicy.warnForExisting(labels: info.labels, name: info.name, environment: localEnv)
+        try VolumeHealth.gate(volumes: VolumeHealth.managedVolumes(labels: info.labels), runtime: runtime)
         StatusPrinter.status("Starting container", item: info.id)
         do {
             try runtime.start(nameOrId: info.id)

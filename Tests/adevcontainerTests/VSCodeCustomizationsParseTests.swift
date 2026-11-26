@@ -96,7 +96,7 @@ nonisolated(unsafe) let vscodeCustomizationsParseTests: [(String, () throws -> V
 
     ("vscodeCustomizationsOutsideIdentityHash", {
         // Same workspaceFolder basename so default folder does not confound identity.
-        let base = FileManager.default.temporaryDirectory
+        let base = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-hash-ws-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: base) }
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -201,7 +201,7 @@ nonisolated(unsafe) let vscodeCustomizationsParseTests: [(String, () throws -> V
             "vscode-customizations-empty.json"
         ] {
             let path = root.appendingPathComponent("Tests/Fixtures/\(name)").path
-            let ws = FileManager.default.temporaryDirectory
+            let ws = StateDirectories.temporaryDirectory()
                 .appendingPathComponent("vsc-fix-\(UUID().uuidString)", isDirectory: true)
             let dc = ws.appendingPathComponent(".devcontainer", isDirectory: true)
             try FileManager.default.createDirectory(at: dc, withIntermediateDirectories: true)
@@ -212,7 +212,7 @@ nonisolated(unsafe) let vscodeCustomizationsParseTests: [(String, () throws -> V
             try MiniTest.expect(!resolved.config.image.isEmpty, name)
         }
         let well = root.appendingPathComponent("Tests/Fixtures/vscode-customizations-wellformed.json")
-        let ws = FileManager.default.temporaryDirectory
+        let ws = StateDirectories.temporaryDirectory()
             .appendingPathComponent("vsc-well-\(UUID().uuidString)", isDirectory: true)
         let dc = ws.appendingPathComponent(".devcontainer", isDirectory: true)
         try FileManager.default.createDirectory(at: dc, withIntermediateDirectories: true)

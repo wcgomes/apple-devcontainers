@@ -14,7 +14,7 @@ final class CollectionCloneStore: @unchecked Sendable {
     let root: String
 
     init() {
-        root = FileManager.default.temporaryDirectory
+        root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-feature-git-\(UUID().uuidString)", isDirectory: true)
             .path
     }

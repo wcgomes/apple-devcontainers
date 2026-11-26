@@ -27,7 +27,7 @@ final class RemoveRecordingFileManager: FileManager, @unchecked Sendable {
 
 enum PluginTestSupport {
     static func makeInstallRoot() throws -> URL {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-plugin-\(UUID().uuidString)", isDirectory: true)
         let bin = root.appendingPathComponent("bin", isDirectory: true)
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
@@ -597,7 +597,7 @@ nonisolated(unsafe) let containerPluginTests: [(String, () throws -> Void)] = [
     ("pluginInstallHomebrewBareArgv0LinksOptPath", {
         let root = try PluginTestSupport.makeInstallRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let cwd = FileManager.default.temporaryDirectory
+        let cwd = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-sudo-argv0-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: cwd) }
@@ -694,7 +694,7 @@ nonisolated(unsafe) let containerPluginTests: [(String, () throws -> Void)] = [
     ("pluginInstallBareArgv0IsNotRelativeSourcePath", {
         let root = try PluginTestSupport.makeInstallRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let cwd = FileManager.default.temporaryDirectory
+        let cwd = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-bare-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: cwd) }
@@ -1062,7 +1062,7 @@ nonisolated(unsafe) let containerPluginTests: [(String, () throws -> Void)] = [
     ("pluginInstallUnresolvableBareArgv0NamesUsablePath", {
         let root = try PluginTestSupport.makeInstallRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let cwd = FileManager.default.temporaryDirectory
+        let cwd = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-missing-argv0-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: cwd) }
@@ -1228,7 +1228,7 @@ nonisolated(unsafe) let containerPluginTests: [(String, () throws -> Void)] = [
         let root = try PluginTestSupport.makeInstallRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         try PluginTestSupport.stagePluginLayout(installRoot: root)
-        let empty = FileManager.default.temporaryDirectory
+        let empty = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-noconfig-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: empty) }

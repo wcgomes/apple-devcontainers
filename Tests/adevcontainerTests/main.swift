@@ -81,6 +81,7 @@ let allTests: [(String, () throws -> Void)] = credentialTests
     + cloneRecoveryTests
     + startCommandRecoveryTests
     + upCommandRecoveryTests
+    + volumeHealthTests
     + integrationTests
 
 // Optional PTY probes: run under a fresh controlling terminal so job-control
@@ -101,6 +102,24 @@ if ProcessInfo.processInfo.environment["ADEVCONTAINER_CREDENTIAL_SMOKE"] == "1" 
     FileHandle.standardError.write(Data((reason + "\n").utf8))
     exit(2)
 }
+// Isolate every product temp / retained-state root (recovery sessions, resume indexes,
+// staging, clone recovery) in a per-run scratch directory that is removed on exit.
+// Foundation ignores TMPDIR on macOS, so without this the suite would read and delete
+// real recovery state. Set up after the probe branches: re-launched probes exit early
+// and must not create (and leak) a root.
+let isolatedStateRoot = FileManager.default.temporaryDirectory
+    .appendingPathComponent("adt-\(UUID().uuidString.prefix(8).lowercased())", isDirectory: true)
+    .resolvingSymlinksInPath()
+StateDirectories.isolatedRoot = isolatedStateRoot
+do {
+    try FileManager.default.createDirectory(
+        at: StateDirectories.temporaryDirectory(),
+        withIntermediateDirectories: true
+    )
+} catch {
+    FileHandle.standardError.write(Data("Cannot create the isolated test state root: \(error)\n".utf8))
+    exit(1)
+}
 
 let legacyCredentialTests = gitClientTests.filter { ["hostGitCredentialFillParsesOutput", "hostGitCredentialTokenEnvEscapeHatch", "hostGitCredentialFillFailureReturnsNil", "parseCredentialOutputKeys"].contains($0.0) }
 let automaticCloneTests = cloneCommandTests.filter { ["cloneHTTPSNonAzureUsesAutomaticConnectionBeforePopulate", "cloneHTTPSAzureUsesURLScopedHelper", "cloneHappyPathVolumeMountLabelsInContainerCloneJSON", "cloneHTTPSPublicWorksWithoutHostCredentials", "cloneHTTPSCloneFailWithoutCredsHintsCredentials", "cloneSSHInjectsCreateSSHFlag", "cloneLegacyHTTPPreservesDiscoveredScheme", "cloneReuseVolumePromptYesKeepsTree", "cloneGlobalAuthorFailureWarnsAndRunsHook", "cloneLocalAuthorFailureSkipsGlobalAndRunsHook"].contains($0.0) }
@@ -118,5 +137,14 @@ if ProcessInfo.processInfo.environment["ADEVCONTAINER_SSH_TESTS_ONLY"] == "1" {
     selectedTests = Array(allTests.dropLast(integrationTests.count))
     print("Excluded \(integrationTests.count) live integration tests (not executed; no target-runtime coverage claimed).")
 } else { selectedTests = allTests }
-let code = MiniTest.runAll(selectedTests)
+// Optional comma-separated test-name filter for targeted runs (test runner only).
+let nameFilter = Set(
+    (ProcessInfo.processInfo.environment["ADEVCONTAINER_TEST_FILTER"] ?? "")
+        .split(separator: ",")
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty }
+)
+let filteredTests = nameFilter.isEmpty ? selectedTests : selectedTests.filter { nameFilter.contains($0.0) }
+let code = MiniTest.runAll(filteredTests)
+try? FileManager.default.removeItem(at: isolatedStateRoot)
 exit(code)

@@ -161,7 +161,7 @@ nonisolated(unsafe) let cloneRecoveryTests: [(String, () throws -> Void)] = [
     ("cloneConfigParseFailureRecoversButFetchFailureDoesNot", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
-        let retainedRoot = FileManager.default.temporaryDirectory
+        let retainedRoot = StateDirectories.temporaryDirectory()
             .appendingPathComponent("clone-rec-root-\(UUID().uuidString)", isDirectory: true).path
         CloneCommand.retainedCheckoutRootOverride = retainedRoot
         defer {
@@ -215,7 +215,7 @@ nonisolated(unsafe) let cloneRecoveryTests: [(String, () throws -> Void)] = [
     ("cloneResumeRejectsExternalCheckoutWithoutDeletingIt", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
-        let retainedRoot = FileManager.default.temporaryDirectory
+        let retainedRoot = StateDirectories.temporaryDirectory()
             .appendingPathComponent("clone-rec-root-\(UUID().uuidString)", isDirectory: true)
         CloneCommand.retainedCheckoutRootOverride = retainedRoot.path
         defer {
@@ -223,7 +223,7 @@ nonisolated(unsafe) let cloneRecoveryTests: [(String, () throws -> Void)] = [
             try? FileManager.default.removeItem(at: retainedRoot)
         }
 
-        let external = FileManager.default.temporaryDirectory
+        let external = StateDirectories.temporaryDirectory()
             .appendingPathComponent("external-checkout-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: external) }
@@ -261,7 +261,7 @@ nonisolated(unsafe) let cloneRecoveryTests: [(String, () throws -> Void)] = [
     ("cloneCreateFailureRetainsCheckoutAndRetriesWithoutRefetch", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
-        let retainedRoot = FileManager.default.temporaryDirectory
+        let retainedRoot = StateDirectories.temporaryDirectory()
             .appendingPathComponent("clone-rec-root-\(UUID().uuidString)", isDirectory: true).path
         CloneCommand.retainedCheckoutRootOverride = retainedRoot
         defer {
@@ -296,7 +296,7 @@ nonisolated(unsafe) let cloneRecoveryTests: [(String, () throws -> Void)] = [
     ("cloneNonTTYRetainsCheckoutAndEmitsExactResumeCommand", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
-        let retainedRoot = FileManager.default.temporaryDirectory
+        let retainedRoot = StateDirectories.temporaryDirectory()
             .appendingPathComponent("clone-rec-root-\(UUID().uuidString)", isDirectory: true).path
         CloneCommand.retainedCheckoutRootOverride = retainedRoot
         defer {
@@ -351,7 +351,7 @@ nonisolated(unsafe) let cloneRecoveryTests: [(String, () throws -> Void)] = [
     ("cloneDeclineRethrowsOriginalErrorAndRetainsCheckout", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
-        let retainedRoot = FileManager.default.temporaryDirectory
+        let retainedRoot = StateDirectories.temporaryDirectory()
             .appendingPathComponent("clone-rec-root-\(UUID().uuidString)", isDirectory: true).path
         CloneCommand.retainedCheckoutRootOverride = retainedRoot
         defer {
@@ -390,7 +390,7 @@ nonisolated(unsafe) let cloneRecoveryTests: [(String, () throws -> Void)] = [
     ("cloneInvalidConfigReopensEditorBeforeRetry", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
-        let retainedRoot = FileManager.default.temporaryDirectory
+        let retainedRoot = StateDirectories.temporaryDirectory()
             .appendingPathComponent("clone-rec-root-\(UUID().uuidString)", isDirectory: true).path
         CloneCommand.retainedCheckoutRootOverride = retainedRoot
         defer {
@@ -439,7 +439,7 @@ nonisolated(unsafe) let cloneRecoveryTests: [(String, () throws -> Void)] = [
     ("cloneResumeReusesRetainedCheckoutWithoutRefetching", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
-        let retainedRoot = FileManager.default.temporaryDirectory
+        let retainedRoot = StateDirectories.temporaryDirectory()
             .appendingPathComponent("clone-rec-root-\(UUID().uuidString)", isDirectory: true).path
         CloneCommand.retainedCheckoutRootOverride = retainedRoot
         defer {
@@ -493,7 +493,7 @@ nonisolated(unsafe) let cloneRecoveryTests: [(String, () throws -> Void)] = [
     ("cloneTTYRecoveryPersistsEditedConfigAfterPopulate", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
-        let retainedRoot = FileManager.default.temporaryDirectory
+        let retainedRoot = StateDirectories.temporaryDirectory()
             .appendingPathComponent("clone-rec-root-\(UUID().uuidString)", isDirectory: true).path
         CloneCommand.retainedCheckoutRootOverride = retainedRoot
         defer {
@@ -539,7 +539,7 @@ nonisolated(unsafe) let cloneRecoveryTests: [(String, () throws -> Void)] = [
     ("cloneResumePersistsEditedConfigAfterPopulate", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
-        let retainedRoot = FileManager.default.temporaryDirectory
+        let retainedRoot = StateDirectories.temporaryDirectory()
             .appendingPathComponent("clone-rec-root-\(UUID().uuidString)", isDirectory: true).path
         CloneCommand.retainedCheckoutRootOverride = retainedRoot
         defer {
@@ -672,7 +672,7 @@ nonisolated(unsafe) let cloneRecoveryTests: [(String, () throws -> Void)] = [
     ("cloneTTYRenamePersistsNameWithoutEditorAndOverlaysAfterPopulate", {
         let restore = CloneGitFeatureTestSupport.installOverrides()
         defer { restore() }
-        let retainedRoot = FileManager.default.temporaryDirectory
+        let retainedRoot = StateDirectories.temporaryDirectory()
             .appendingPathComponent("clone-rename-\(UUID().uuidString)", isDirectory: true).path
         CloneCommand.retainedCheckoutRootOverride = retainedRoot
         defer {
