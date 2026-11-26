@@ -10,6 +10,17 @@ if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "__adevcontaine
 if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "__adevcontainer_git_activate" {
     exit(GitCredentialDetachedProbe.activate(CommandLine.arguments[2], id: CommandLine.arguments[3] == "-" ? nil : CommandLine.arguments[3]))
 }
+// Prints its own inherited signal mask before any suite work: the spawn-clearing
+// test must not spend its read deadline on an external interpreter start. Reached
+// only as the guardian-spawned provider argv, never by the suite itself.
+if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "__adevcontainer_signal_mask_probe" {
+    var mask = sigset_t()
+    guard sigprocmask(SIG_SETMASK, nil, &mask) == 0 else { exit(1) }
+    var blocked: UInt32 = 0
+    for signal: Int32 in 1...31 where sigismember(&mask, signal) == 1 { blocked |= 1 << UInt32(signal - 1) }
+    print(blocked)
+    exit(0)
+}
 // Keep progress + warning stderr off during the suite (noise + non-deterministic output).
 // onWarning still fires for assertions; product QUIET only silences progress, not warnings.
 StatusPrinter.enabled = false

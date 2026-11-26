@@ -40,6 +40,7 @@ Do not paste workflow YAML into the wiki — edit the files under `.github/workf
 - **Formula SoT:** only `wcgomes/homebrew-tap` `Formula/adevcontainer.rb`. No in-repo formula mirror (`packaging/homebrew/` removed).
 - **Formula render:** `scripts/render-homebrew-formula.sh` produces the formula content used by the tap bump.
 - **Branch protection (configured 2026-08 on `main`):** require PR before merge (0 approving reviews — solo OK); require status check `build-and-test` (strict, branch up to date); `enforce_admins: true`; no force push, no branch deletion. Tags remain free for release.
+- **`Run tests` flake:** the Release workflow's `Run tests` can intermittently fail with `Git credential connection unavailable (deadline exceeded)` in `credentials.process.spawnClearsBlockedSignalMask` — a 3-second child-process read deadline in `Tests/adevcontainerTests/CredentialDuplexProcessTests.swift` — while CI passes on the same commit. Remedy: rerun the same failed workflow run once and confirm test success before the release publishes.
 - No extra process (no changelog tooling, no notarize) unless this page is updated.
 
 ## Versioning

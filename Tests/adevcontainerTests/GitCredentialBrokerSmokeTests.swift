@@ -42,7 +42,8 @@ import Darwin
         try MiniTest.expect(config.contains("https://credential-smoke.invalid"))
         try MiniTest.expect(!config.contains("ADEVCONTAINER_GIT_TOKEN"))
         let environment = GitCredentialBrokerSmokeHarness.syntheticProviderEnvironment(state: manifest.state)
-        let query = try CredentialProviderProcessRunner(timeout: 3).run(executable: "/usr/bin/git", arguments: ["-c", "credential.helper=", "-c", "credential.helper=!\(manifest.helper)", "credential", "fill"], environment: environment, currentDirectory: nil, stdinData: Data("protocol=https\nhost=credential-smoke.invalid\n\n".utf8))
+        // Default deadline: /usr/bin/git is an xcrun shim whose cold start can exceed a short one.
+        let query = try CredentialProviderProcessRunner().run(executable: "/usr/bin/git", arguments: ["-c", "credential.helper=", "-c", "credential.helper=!\(manifest.helper)", "credential", "fill"], environment: environment, currentDirectory: nil, stdinData: Data("protocol=https\nhost=credential-smoke.invalid\n\n".utf8))
         try MiniTest.expect(query.succeeded)
         try MiniTest.expect(query.stdoutString.contains("password=synthetic-smoke\n"))
         // A recorded test-owned process is terminated by the manifest alone.
