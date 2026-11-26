@@ -53,13 +53,9 @@ import Darwin
             sigprocmask(SIG_SETMASK, &blocked, &previous)
             defer { sigprocmask(SIG_SETMASK, &previous, nil) }
             do {
-                let process = try CredentialDuplexProcess(executable: "/usr/bin/python3", arguments: ["-c", """
-import ctypes
-libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
-current = ctypes.c_uint32()
-libc.sigprocmask(0, None, ctypes.byref(current))
-print(current.value)
-"""], environment: ["PATH": "/usr/bin:/bin"], guarded: true)
+                // In-binary probe: an interpreter start would burn the read deadline below.
+                guard let probe = Bundle.main.executableURL else { throw GitCredentialFailure.transport }
+                let process = try CredentialDuplexProcess(executable: probe.path, arguments: ["__adevcontainer_signal_mask_probe"], environment: [:], guarded: true)
                 defer { process.cancel() }
                 process.closeInput()
                 var output = Data()
