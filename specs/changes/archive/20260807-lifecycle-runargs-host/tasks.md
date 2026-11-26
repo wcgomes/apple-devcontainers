@@ -5,7 +5,7 @@ Base contract: union of `specs/<domain>.md`
 Binary: `adevcontainer`  
 Library: `Sources/ADevContainerLib/`  
 Tests: `Tests/adevcontainerTests/` (MiniTest; run with `swift run adevcontainerTests`)  
-Package root: `/Users/wyller/Repos/dev-containerization/`  
+Package root: `~/Repos/dev-containerization/`  
 
 Assume Swift 6.x / SPM and Apple `container` already on the host. Do **not** install toolchains or run network package installs. Test-first: write failing tests before implementation in each section.
 

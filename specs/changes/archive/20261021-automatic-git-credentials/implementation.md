@@ -355,4 +355,4 @@ documents the operator procedure. Task 6.11 was not run.
 - `swift build --product adevcontainer`: succeeds. Only the previously known CLT missing-search-directory linker warnings. No new source diagnostic.
 - `git diff --check`: passes. Wiki files were not edited.
 
-Not run, and not claimed: native harness, artifact/package relocation, release build, `swift run adevcontainerTests` without the synthetic exclusion, Linux amd64 execution, GitHub Actions, Homebrew install, real LaunchAgent, plantsuite, keychain, or provider authentication. Phase 1 and the release/live-smoke checkpoints stay unchecked for that reason.
+Not run, and not claimed: native harness, artifact/package relocation, release build, `swift run adevcontainerTests` without the synthetic exclusion, Linux amd64 execution, GitHub Actions, Homebrew install, real LaunchAgent, sample-app, keychain, or provider authentication. Phase 1 and the release/live-smoke checkpoints stay unchecked for that reason.
