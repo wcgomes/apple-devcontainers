@@ -770,7 +770,9 @@ public struct AppleContainerRuntime: Sendable {
             StatusPrinter.status("Reusing existing volume", item: name)
             return false
         }
-        let result = try invoke(["volume", "create", name], streamStderr: true)
+        // Journaled ext4 survives an unclean VM stop (host shutdown/logout) without
+        // corruption; Apple creates volumes without a journal unless asked.
+        let result = try invoke(["volume", "create", "--opt", "journal=ordered", name], streamStderr: true)
         if result.succeeded { return true }
         // Belt and suspenders: treat race / already-exists create failure as reuse.
         let combined = (result.stdoutString + result.stderrString).lowercased()
@@ -811,6 +813,26 @@ public struct AppleContainerRuntime: Sendable {
                let n = cfg["name"] as? String, n == name { return true }
         }
         return false
+    }
+
+    /// Host path of a named volume's backing image (`volume inspect` source), or nil when
+    /// the volume cannot be inspected or the image file is absent.
+    public func volumeImagePath(_ name: String) -> String? {
+        guard let result = try? invoke(["volume", "inspect", name]), result.succeeded,
+              let entries = try? parseJSONArray(result.stdout, requireObjectEntries: true)
+        else { return nil }
+        for entry in entries {
+            let configuration = entry["configuration"] as? [String: Any]
+            let entryName = (entry["name"] ?? configuration?["name"]) as? String
+            guard entryName == nil || entryName == name else { continue }
+            if let source = (entry["source"] ?? configuration?["source"]) as? String,
+               !source.isEmpty,
+               FileManager.default.fileExists(atPath: source)
+            {
+                return source
+            }
+        }
+        return nil
     }
 
     public func deleteVolume(name: String) throws {

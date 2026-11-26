@@ -613,6 +613,124 @@ nonisolated(unsafe) let upCommandRecoveryTests: [(String, () throws -> Void)] = 
         try MiniTest.expectEqual(editorRunner.launches, 1)
     }),
 
+    ("upVolumeCorruptionFailsFastWithoutConfigEditRecovery", {
+        let initial = #"{ "image": "alpine:3.20", "remoteUser": "vscode", "mounts": [{ "type": "volume", "source": "up-data", "target": "/home/vscode/data" }] }"#
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: initial)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let mock = MockProcessRunner()
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        installUpCreatePathHandlers(mock, resolved: resolved)
+        mock.handlers.insert({ args in
+            guard args.first == "exec", args.joined(separator: " ").contains("chown -R") else { return nil }
+            return ProcessResult(
+                exitCode: 1,
+                stdout: Data(),
+                stderr: Data("chown: /home/vscode/data/cache/index: Structure needs cleaning\n".utf8)
+            )
+        }, at: 0)
+        let editorRunner = UpRecoveryEditorRunner(payloads: [Data(initial.utf8)])
+        final class Prompts: @unchecked Sendable { var lines: [String] = [] }
+        let prompts = Prompts()
+        let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
+
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: workspace.path, skipPull: true),
+                runtime: runtime,
+                localEnv: [:],
+                isTTY: true,
+                recoveryEditor: upRecoveryEditor(runner: editorRunner),
+                openEditorPrompt: upRecoveryPrompt(answers: ["y"], onWrite: { prompts.lines.append($0) })
+            )
+        }) { error in
+            let cli = error as? CLIError
+            try MiniTest.expectEqual(cli?.code, CLIErrorCode.volumeCorrupt)
+            try MiniTest.expect(cli?.message.contains("'up-data' mounted at /home/vscode/data") == true)
+            try MiniTest.expect(cli?.hint?.contains("cp -c") == true, "backup-first clone guidance")
+            try MiniTest.expect(cli?.hint?.contains("e2fsck -fy") == true, "offline repair guidance")
+        }
+        try MiniTest.expectEqual(editorRunner.launches, 0, "corruption never opens the config editor")
+        try MiniTest.expect(prompts.lines.isEmpty, "corruption never prompts for config-edit recovery")
+        try MiniTest.expectEqual(mock.calls.filter { $0.arguments.first == "create" }.count, 2, "no retry create")
+        try MiniTest.expect(
+            !mock.calls.contains { $0.arguments.starts(with: ["volume", "delete"]) || $0.arguments.starts(with: ["volume", "rm"]) },
+            "the corrupt volume is never deleted"
+        )
+    }),
+
+    ("upVolumeHealthGateRefusesWarnsAndSkips", {
+        let config = #"{ "image": "alpine:3.20", "remoteUser": "vscode", "mounts": [{ "type": "volume", "source": "up-data", "target": "/home/vscode/data" }] }"#
+        let workspace = try TestRepo.makeTempWorkspace(configJSON: config)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let resolved = try ConfigResolver.resolve(workspacePath: workspace.path, localEnv: [:])
+        let corrupt = try makeSyntheticExt4Image(syntheticExt4Superblock(errorCount: 4))
+        let unclean = try makeSyntheticExt4Image(syntheticExt4Superblock(state: 0, compat: 0))
+
+        func runUp(image: String?, inUse: Bool, editor: UpRecoveryEditorRunner) throws -> (UpResult, MockProcessRunner, [String]) {
+            let mock = MockProcessRunner()
+            installUpCreatePathHandlers(mock, resolved: resolved)
+            if let image {
+                mock.handlers.insert(volumeInspectHandler(["up-data": image]), at: 0)
+            }
+            if inUse {
+                mock.handlers.insert({ args in
+                    guard args.starts(with: ["list"]) else { return nil }
+                    let entries = [containerListEntryMounting(volume: "up-data", id: "other-app", state: "running")]
+                    return ProcessResult(exitCode: 0, stdout: try! JSONSerialization.data(withJSONObject: entries), stderr: Data())
+                }, at: 0)
+            }
+            let previous = StatusPrinter.onWarning
+            var warnings: [String] = []
+            StatusPrinter.onWarning = { warnings.append($0) }
+            defer { StatusPrinter.onWarning = previous }
+            let result = try UpCommand.run(
+                options: UpOptions(workspacePath: workspace.path, skipPull: true),
+                runtime: AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock),
+                localEnv: [:],
+                isTTY: true,
+                recoveryEditor: upRecoveryEditor(runner: editor),
+                openEditorPrompt: upRecoveryPrompt(answers: ["y"])
+            )
+            return (result, mock, warnings)
+        }
+
+        // Errors recorded: refuse before create, never offer config-edit recovery.
+        let editor = UpRecoveryEditorRunner(payloads: [Data(config.utf8)])
+        let refusedMock = MockProcessRunner()
+        installUpCreatePathHandlers(refusedMock, resolved: resolved)
+        refusedMock.handlers.insert(volumeInspectHandler(["up-data": corrupt]), at: 0)
+        try MiniTest.expectThrows({
+            _ = try UpCommand.run(
+                options: UpOptions(workspacePath: workspace.path, skipPull: true),
+                runtime: AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: refusedMock),
+                localEnv: [:],
+                isTTY: true,
+                recoveryEditor: upRecoveryEditor(runner: editor),
+                openEditorPrompt: upRecoveryPrompt(answers: ["y"])
+            )
+        }) { error in
+            let cli = error as? CLIError
+            try MiniTest.expectEqual(cli?.code, CLIErrorCode.volumeCorrupt)
+            try MiniTest.expect(cli?.message.contains("'up-data'") == true)
+        }
+        try MiniTest.expectEqual(editor.launches, 0, "corruption never opens the config editor")
+        try MiniTest.expect(!refusedMock.calls.contains { $0.arguments.first == "create" }, "no container is created")
+
+        // Bare not-clean without journal: warn and continue.
+        let (uncleanResult, _, uncleanWarnings) = try runUp(image: unclean, inUse: false, editor: editor)
+        try MiniTest.expectEqual(uncleanResult.outcome, "success")
+        try MiniTest.expect(uncleanWarnings.contains { $0.contains("'up-data'") && $0.contains("e2fsck") })
+
+        // In use by a running container, or unreadable: skip silently.
+        let (inUseResult, inUseMock, inUseWarnings) = try runUp(image: corrupt, inUse: true, editor: editor)
+        try MiniTest.expectEqual(inUseResult.outcome, "success")
+        try MiniTest.expect(!inUseWarnings.contains { $0.contains("'up-data'") })
+        try MiniTest.expect(!inUseMock.calls.contains { $0.arguments.starts(with: ["volume", "inspect"]) })
+        let (unreadableResult, _, unreadableWarnings) = try runUp(image: nil, inUse: false, editor: editor)
+        try MiniTest.expectEqual(unreadableResult.outcome, "success")
+        try MiniTest.expect(!unreadableWarnings.contains { $0.contains("'up-data'") })
+    }),
+
     ("upParentFixupFailureDeletesAndStaysRecoveryEligible", {
         // No named volumes: the first chown-containing exec on the create path is the
         // parents-only fix-up. Its failure must delete the created container and stay

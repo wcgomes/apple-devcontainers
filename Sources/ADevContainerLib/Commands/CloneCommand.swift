@@ -126,7 +126,7 @@ public enum CloneCommand {
             )
         } else {
             isResume = false
-            checkoutDir = fileManager.temporaryDirectory
+            checkoutDir = StateDirectories.temporaryDirectory(fileManager)
                 .appendingPathComponent("adev-clone-cfg-\(UUID().uuidString)", isDirectory: true)
         }
 
@@ -970,8 +970,7 @@ public enum CloneCommand {
     /// `~/Library/Application Support/adevcontainer/clone-recovery` (tests override).
     public static func retainedCheckoutRoot(fileManager: FileManager = .default) -> String {
         if let override = retainedCheckoutRootOverride { return override }
-        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let base = StateDirectories.applicationSupportDirectory(fileManager)
         return base
             .appendingPathComponent("adevcontainer", isDirectory: true)
             .appendingPathComponent("clone-recovery", isDirectory: true)

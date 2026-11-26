@@ -329,7 +329,7 @@ nonisolated(unsafe) let compatibilityStrictModeTests: [(String, () throws -> Voi
         })
     }),
     ("strictFeatureFileBindPromotionBlocksBeforeBuild", {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-bind-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -397,7 +397,7 @@ nonisolated(unsafe) let compatibilityStrictModeTests: [(String, () throws -> Voi
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "create" })
     }),
     ("strictFeatureFileBindPromotionBlocksUpBeforeBuildAndCreate", {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-bind-up-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }

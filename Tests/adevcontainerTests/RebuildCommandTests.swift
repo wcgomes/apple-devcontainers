@@ -789,7 +789,7 @@ nonisolated(unsafe) let rebuildCommandTests: [(String, () throws -> Void)] = [
         let ref = "ghcr.io/adevcontainer/features/sample-a:1"
         let fixture = TestRepo.root()
             .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("df-rebuild-feat-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
@@ -852,7 +852,7 @@ nonisolated(unsafe) let rebuildCommandTests: [(String, () throws -> Void)] = [
         let ref = "ghcr.io/adevcontainer/features/sample-a:1"
         let fixture = TestRepo.root()
             .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("df-rebuild-feat-force-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         let ws = try TestRepo.makeTempWorkspace(configJSON: """

@@ -7,7 +7,7 @@ Core and lifecycle/`runArgs`/`hostRequirements` ship a usable Apple-container pa
 ## Scope
 
 - Change id: **`features-runner`**
-- Package root: `/Users/wyller/Repos/dev-containerization/`
+- Package root: `~/Repos/dev-containerization/`
 - Library paths under `Sources/ADevContainerLib/`; suite under `Tests/adevcontainerTests/`; fixtures under `Tests/Fixtures/`
 - Realized base contract: union of `specs/<domain>.md`. This delta **adds** Features runner requirements and **modifies** unsupported-property policy + supported property surface + `up` create image selection.
 

@@ -54,6 +54,17 @@ Apple named volumes present as **root:root** at the mount target. Without a prod
 
 Apple named-volume `volume.img` is raw ext4 (magic `0xEF53` at offset 1080). In-place `e2fsck` is valid only while unmounted. The backup is a same-volume APFS `cp -c` taken only while unmounted and outside the container volume store: it clones the sparse image without copying allocated extents. A naive copy of the sparse image is still forbidden. `e2fsck -n` aborts at the first refused directory salvage, so a non-zero `-n` is not a full pass 3–5 scan. Repair only while unmounted, after that clone exists. `errors=Continue` does not remount read-only and keeps a corrupt named volume read-write, so further rm/chown/install adds errors. `Structure needs cleaning` on chown is ext4 `EUCLEAN`, not a chown-logic bug.
 
+**Journal and corruption (Apple ≥1.0.0, verified 1.7.1):**
+
+- Apple formats named volumes with its own ext4 formatter: **no journal** by default, `errors=continue`. A journal is opt-in via `container volume create --opt journal=ordered`.
+- Mechanism: `container-runtime-linux` has no SIGTERM handler, so macOS shutdown/logout (launchd SIGTERM), host crash, power loss, or jetsam kill the VM without guest teardown. Unjournaled volumes are then left "not clean" with bitmap/free-count errors. `container stop`, `container dev stop`, and `delete --force` left volumes clean in tests.
+- On unjournaled ext4 the "not clean" state is sticky until `e2fsck`: a mount writes back the state it saw at mount time.
+- No in-container fix: unmount, remount, or `fsfreeze` need `CAP_SYS_ADMIN`. Two containers cannot attach the same volume concurrently (VZ "storage device attachment is invalid"), so a helper cannot repair a volume while another container holds it.
+- Existing-volume migration is offline and backup-first: `e2fsck -fy`, then `tune2fs -O has_journal -c -1 -i 0`. `tune2fs` accepts a not-clean filesystem, so always fsck first.
+- A journal gives consistency, not durability: the last ~5 s of writes can still be lost on a hard kill.
+
+**Product:** journaled creation for managed volumes, a pre-start superblock health gate, and `volume_corrupt` — contract in [`specs/managed-lifecycle.md`](../../specs/managed-lifecycle.md) (**Bring-up recovery offer on up and clone**); implementation `Runtime/VolumeHealth.swift`.
+
 ### File bind mounts
 
 Apple `container` rejects bind mounts whose host source is a **file** (source must be a directory). File-path binds in `devcontainer.json` (e.g. `~/.kube/config`) must be promoted to the parent directory on both host and container sides before create. Product behavior: [cli-runtime-boundary.md](../conventions/cli-runtime-boundary.md) (`MountNormalizer`).

@@ -787,15 +787,7 @@ public enum RecoveryOrchestrator {
             ? "\(CommandSurface.commandPrefix) delete --name \(shellQuote(selectedName)); rm -rf -- \(shellQuote(session.directoryURL.path))"
             : "rm -rf -- \(shellQuote(session.directoryURL.path))"
         let failureKind = (failure as? CLIError)?.code ?? "runtime_failure"
-        let reason: String
-        if let cli = failure as? CLIError {
-            // Never embed raw failure messages here — they may contain hook stdout/stderr
-            // secrets. Surface code/property only; detailed verification text stays on the
-            // originating CLIError when callers inspect it before wrapping.
-            reason = cli.property.map { "\(failureKind) failure (\($0))" } ?? "\(failureKind) failure"
-        } else {
-            reason = "runtime failure"
-        }
+        let reason = failureReason(failure, failureKind: failureKind)
         let details = RecoveryErrorDetails(
             helperContainerID: sanitizedHelperID(helperID),
             helperContainerName: selectedName,
@@ -843,12 +835,7 @@ public enum RecoveryOrchestrator {
             ?? "recovery editor unavailable"
         let retry = "\(CommandSurface.commandPrefix) \(shellQuoteCommand(["rebuild", "--name", selected.name]))"
         let failureKind = (failure as? CLIError)?.code ?? "runtime_failure"
-        let reason: String
-        if let cli = failure as? CLIError {
-            reason = cli.property.map { "\(failureKind) failure (\($0))" } ?? "\(failureKind) failure"
-        } else {
-            reason = "runtime failure"
-        }
+        let reason = failureReason(failure, failureKind: failureKind)
         let details = RecoveryErrorDetails.bindHostPath(
             containerName: selected.name,
             containerID: selected.id,
@@ -869,6 +856,45 @@ public enum RecoveryOrchestrator {
             hint: hint,
             recovery: details
         )
+    }
+
+    static let failureExcerptLimit = 300
+
+    /// Code/property plus a bounded excerpt of the underlying message, so the operator sees
+    /// the real cause (for example chown stderr). Hook failures never embed their message:
+    /// it can carry hook stdout/stderr secrets, so only code/property are surfaced.
+    static func failureReason(_ failure: Error, failureKind: String) -> String {
+        guard let cli = failure as? CLIError else { return "runtime failure" }
+        let base = cli.property.map { "\(failureKind) failure (\($0))" } ?? "\(failureKind) failure"
+        guard !isHookFailure(cli) else { return base }
+        let flattened = redactURLUserinfo(cli.message
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " "))
+        guard !flattened.isEmpty else { return base }
+        let excerpt = flattened.count > failureExcerptLimit
+            ? String(flattened.prefix(failureExcerptLimit)) + "…"
+            : flattened
+        return "\(base): \(excerpt)"
+    }
+
+    /// `scheme://user:pass@host` and `scheme://token@host` → `scheme://***@host`, so embedded
+    /// credentials never reach the excerpt (applied before truncation).
+    static func redactURLUserinfo(_ text: String) -> String {
+        text.replacingOccurrences(
+            of: #"([A-Za-z][A-Za-z0-9+.-]*://)[^\s/]+@"#,
+            with: "$1***@",
+            options: .regularExpression
+        )
+    }
+
+    private static func isHookFailure(_ error: CLIError) -> Bool {
+        if [CLIErrorCode.lifecycleFailed, CLIErrorCode.postCreateFailed].contains(error.code) {
+            return true
+        }
+        guard let property = error.property else { return false }
+        return property.hasSuffix("Command") || property.contains("Command (")
     }
 
     private static func shellQuoteCommand(_ args: [String]) -> String {

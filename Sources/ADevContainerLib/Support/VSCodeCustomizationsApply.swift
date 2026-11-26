@@ -221,7 +221,7 @@ public struct ExecVSCodeGuestOps: VSCodeGuestOperating {
 
         // Host temp → tar-pipe into guest /tmp (avoids ARG_MAX from embedding multi-MB base64 in exec argv).
         let fm = FileManager.default
-        let hostDir = fm.temporaryDirectory
+        let hostDir = StateDirectories.temporaryDirectory(fm)
             .appendingPathComponent("adevcontainer-vsix-\(UUID().uuidString)", isDirectory: true)
         defer { try? fm.removeItem(at: hostDir) }
         try fm.createDirectory(at: hostDir, withIntermediateDirectories: true)

@@ -625,7 +625,7 @@ nonisolated(unsafe) let gitClientTests: [(String, () throws -> Void)] = [
         runner.defaultResult = ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
         let gitPath = "/usr/bin/mock-git"
         let client = HostGitClient(runner: runner, gitPathOverride: .some(gitPath))
-        let dir = FileManager.default.temporaryDirectory
+        let dir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("git-fetch-\(UUID().uuidString)").path
         // Don't actually create — mock doesn't need it
         try client.fetchConfig(url: "https://example.com/r.git", into: dir)
@@ -1058,7 +1058,7 @@ enum CloneGitFeatureTestSupport {
     static func installOverrides(extraPackages: [String: String] = [:]) -> () -> Void {
         var packages = extraPackages
         packages[FeatureGitEnsure.gitFeatureRef] = gitFixturePath
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("clone-git-feat-\(UUID().uuidString)", isDirectory: true).path
         let previousFetcher = CloneCommand.featuresFetcherOverride
         let previousCache = CloneCommand.featuresCacheRootOverride
@@ -1076,7 +1076,7 @@ enum CloneGitFeatureTestSupport {
 
     /// Live DefaultFeatureFetcher (no mock). Local git package must be on disk so inject is skipped.
     static func installLiveOverrides() -> () -> Void {
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("clone-live-feat-\(UUID().uuidString)", isDirectory: true).path
         let previousFetcher = CloneCommand.featuresFetcherOverride
         let previousCache = CloneCommand.featuresCacheRootOverride
@@ -1814,7 +1814,7 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
     }),
     ("configResolverWorkspaceFolderBasenameOverride", {
         let fm = FileManager.default
-        let root = fm.temporaryDirectory.appendingPathComponent("adev-clone-cfg-\(UUID().uuidString)")
+        let root = StateDirectories.temporaryDirectory().appendingPathComponent("adev-clone-cfg-\(UUID().uuidString)")
         defer { try? fm.removeItem(at: root) }
         let nested = root.appendingPathComponent(".devcontainer")
         try fm.createDirectory(at: nested, withIntermediateDirectories: true)
@@ -2876,7 +2876,7 @@ nonisolated(unsafe) let cloneCommandTests: [(String, () throws -> Void)] = [
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         let result = try CloneCommand.run(
             options: CloneOptions(
-                gitURL: "https://dev.azure.com/plantsuite/PlantSuite/_git/PlantSuite",
+                gitURL: "https://dev.azure.com/sample-org/SampleApp/_git/SampleApp",
                 skipPull: true
             ),
             runtime: runtime,
@@ -4001,9 +4001,9 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(result.outcome, "success")
         try MiniTest.expectEqual(result.workspaceVolume, wsVol)
         try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "delete", wsVol] })
-        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "create", wsVol] })
+        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "create", "--opt", "journal=ordered", wsVol] })
         let deleteIdx = mock.calls.firstIndex { $0.arguments == ["volume", "delete", wsVol] }!
-        let createIdx = mock.calls.firstIndex { $0.arguments == ["volume", "create", wsVol] }!
+        let createIdx = mock.calls.firstIndex { $0.arguments == ["volume", "create", "--opt", "journal=ordered", wsVol] }!
         try MiniTest.expect(deleteIdx < createIdx)
     }),
     ("cloneReuseVolumePromptYesKeepsTree", {
@@ -4147,9 +4147,9 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(result.outcome, "success")
         try MiniTest.expectEqual(prompt.reads, 1)
         try MiniTest.expect(!volumeDeleteCalls(mock, name: wsVol).isEmpty)
-        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "create", wsVol] })
+        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "create", "--opt", "journal=ordered", wsVol] })
         let deleteIdx = mock.calls.firstIndex { $0.arguments == ["volume", "delete", wsVol] }!
-        let createIdx = mock.calls.firstIndex { $0.arguments == ["volume", "create", wsVol] }!
+        let createIdx = mock.calls.firstIndex { $0.arguments == ["volume", "create", "--opt", "journal=ordered", wsVol] }!
         try MiniTest.expect(deleteIdx < createIdx)
         try MiniTest.expect(!gitCloneCalls(mock).isEmpty, "replace still populates")
         try MiniTest.expect(
@@ -4322,7 +4322,7 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(prompt.reads, 0, "missing volume must not prompt")
         try MiniTest.expect(prompt.written.isEmpty)
         try MiniTest.expect(volumeDeleteCalls(mock, name: wsVol).isEmpty)
-        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "create", wsVol] })
+        try MiniTest.expect(mock.calls.contains { $0.arguments == ["volume", "create", "--opt", "journal=ordered", wsVol] })
         try MiniTest.expect(!gitCloneCalls(mock).isEmpty)
     }),
     ("cloneBothVolumeFlagsIsStructuredError", {
@@ -4370,7 +4370,7 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
         func assertNoWorkspaceDelete(_ mock: MockProcessRunner) throws {
             try MiniTest.expect(volumeDeleteCalls(mock, name: wsVol).isEmpty, "list failure must not delete")
             try MiniTest.expect(
-                !mock.calls.contains { $0.arguments == ["volume", "create", wsVol] },
+                !mock.calls.contains { $0.arguments == ["volume", "create", "--opt", "journal=ordered", wsVol] },
                 "list failure must not create a workspace volume"
             )
             try MiniTest.expect(
@@ -4477,7 +4477,7 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
             "container create ran after ensureVolume reused the volume"
         )
         try MiniTest.expect(
-            !mock.calls.contains { $0.arguments == ["volume", "create", wsVol] },
+            !mock.calls.contains { $0.arguments == ["volume", "create", "--opt", "journal=ordered", wsVol] },
             "ensureVolume must reuse rather than create"
         )
         try MiniTest.expect(
@@ -4562,7 +4562,7 @@ nonisolated(unsafe) let managedLifecycleTests: [(String, () throws -> Void)] = [
             configName: nil
         )
         let wsVol = identity.workspaceVolumeName
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("clone-reuse-resume-\(UUID().uuidString)", isDirectory: true).path
         let child = (root as NSString).appendingPathComponent("kept")
         try FileManager.default.createDirectory(atPath: child, withIntermediateDirectories: true)

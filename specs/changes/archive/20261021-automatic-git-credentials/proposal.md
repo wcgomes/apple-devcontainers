@@ -25,7 +25,7 @@ Use a per-user launchd-supervised mode of the existing adevcontainer executable.
 - **Q:** Is a background host component acceptable after considering foreground-only operation?
   **A:** Yes. Use the existing executable supervised by a per-user LaunchAgent, with automatic activation and no sudo.
 - **Q:** Does the previous runtime/GCM experiment prove real OAuth renewal?
-  **A:** No. The supplied evidence demonstrates exec duplex/concurrency and successful Azure authentication through the channel, not changed tokens or refresh-token use. plantsuite was stopped before and after that experiment.
+  **A:** No. The supplied evidence demonstrates exec duplex/concurrency and successful Azure authentication through the channel, not changed tokens or refresh-token use. sample-app was stopped before and after that experiment.
 - **Q:** How is the dependency-free Linux socket relay delivered for release and source builds?
   **A:** The user approved shipping a small static Linux helper together with the CLI, including build/distribution changes, without installing guest runtime packages. Embed both architecture variants in generated Swift source to preserve a relocatable single host executable; source/CI builds explicitly prepare the checksum-pinned toolchain and assets first.
 - **Q:** Does the new strict HTTPS boundary intentionally change existing plain-HTTP credential behavior?
@@ -40,7 +40,7 @@ Inspected before archive, without re-running suites, containers, authentication,
 - `GitCredentialDiag.event` does not write `diag.log`. The optional `traceDirectory` argument exists only so a temporary test can target an existing broker directory; production calls and that test must not create `diag.log`, including `~/.adevcontainer/git-broker/diag.log`.
 - Each broker get calls host acquisition again. `GitCredentialBrokerPolicy.deliver` returns the password just acquired and does not substitute a previous guest token. `credentials.broker.secondGetReturnsChangedProviderPassword` requires the second get to return `second-synthetic` after two provider queries. That matches C07 at the synthetic broker boundary.
 
-User-reported evidence accepted for this archive and not re-executed here: 87 focused credential tests passed, and `swift build` debug passed. Earlier real evidence, also not re-run here: the helper returned a credential in plantsuite, and concurrency plus a partial restart were observed. OAuth refresh was not proven and is not required.
+User-reported evidence accepted for this archive and not re-executed here: 87 focused credential tests passed, and `swift build` debug passed. Earlier real evidence, also not re-run here: the helper returned a credential in sample-app, and concurrency plus a partial restart were observed. OAuth refresh was not proven and is not required.
 
 Not executed, and not claimed as executed. The user authorized archive with these limits as non-blocking:
 

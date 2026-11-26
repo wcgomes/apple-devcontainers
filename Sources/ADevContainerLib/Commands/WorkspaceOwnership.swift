@@ -50,7 +50,10 @@ public enum WorkspaceOwnership {
             paths: [workspaceFolder],
             remoteUser: remoteUser,
             runtime: runtime,
-            failureNoun: "workspace volume"
+            failureNoun: "workspace volume",
+            volumeNames: createRequest
+                .flatMap { $0.workspaceMountMode == .volume ? [workspaceFolder: $0.workspaceBindHost] : nil }
+                ?? [:]
         )
     }
 
@@ -115,7 +118,11 @@ public enum WorkspaceOwnership {
             paths: writableVolumes.map(\.target),
             remoteUser: remoteUser,
             runtime: runtime,
-            failureNoun: "named volume mount"
+            failureNoun: "named volume mount",
+            volumeNames: Dictionary(
+                writableVolumes.map { ($0.target, $0.source) },
+                uniquingKeysWith: { first, _ in first }
+            )
         )
     }
 
@@ -211,7 +218,14 @@ public enum WorkspaceOwnership {
                 workdir: "/"
             )
             if !result.succeeded {
-                throw ownershipError(result: result, failureNoun: failureNoun, user: user)
+                throw ownershipError(
+                    result: result,
+                    failureNoun: failureNoun,
+                    user: user,
+                    volumes: zip(mounts, helperMounts).map {
+                        OwnedVolume(name: $0.source, target: $0.target, scriptPath: $1.target)
+                    }
+                )
             }
         } catch {
             operationError = error
@@ -260,7 +274,8 @@ public enum WorkspaceOwnership {
         remoteUser: String?,
         runtime: AppleContainerRuntime,
         failureNoun: String,
-        scope: WorkspaceOwnershipScope = .targetAndParents
+        scope: WorkspaceOwnershipScope = .targetAndParents,
+        volumeNames: [String: String] = [:]
     ) throws {
         let user = remoteUser?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !user.isEmpty, user != "root" else { return }
@@ -310,24 +325,80 @@ public enum WorkspaceOwnership {
             env: [:]
         )
         guard result.succeeded else {
-            throw ownershipError(result: result, failureNoun: failureNoun, user: user)
+            throw ownershipError(
+                result: result,
+                failureNoun: failureNoun,
+                user: user,
+                volumes: cleaned.map {
+                    OwnedVolume(name: volumeNames[$0], target: $0, scriptPath: $0)
+                }
+            )
         }
     }
 
-    private static func ownershipError(
+    /// A chown target: named volume (when known), its mount target in the main container,
+    /// and the path the chown script used (differs on the scoped ownership helper).
+    struct OwnedVolume {
+        let name: String?
+        let target: String
+        let scriptPath: String
+    }
+
+    /// ext4 `EUCLEAN` text: the filesystem is corrupt, not a chown or config problem.
+    static let filesystemCorruptionMarker = "Structure needs cleaning"
+
+    /// True when an ownership failure reports on-disk volume corruption. Editing the config
+    /// and retrying cannot fix it, so callers must not enter config-edit recovery.
+    public static func isVolumeCorruption(_ error: Error) -> Bool {
+        (error as? CLIError)?.code == CLIErrorCode.volumeCorrupt
+    }
+
+    static func ownershipError(
         result: ProcessResult,
         failureNoun: String,
-        user: String
+        user: String,
+        volumes: [OwnedVolume] = []
     ) -> CLIError {
         let detail = [
             result.stderrString.trimmingCharacters(in: .whitespacesAndNewlines),
             result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
         ].filter { !$0.isEmpty }.joined(separator: " | ")
+        if let corruptLine = detail
+            .split(whereSeparator: { $0.isNewline || $0 == "|" })
+            .map({ $0.trimmingCharacters(in: .whitespaces) })
+            .first(where: { $0.localizedCaseInsensitiveContains(filesystemCorruptionMarker) })
+        {
+            return volumeCorruptError(line: corruptLine, volumes: volumes)
+        }
         return CLIError(
             code: CLIErrorCode.populateFailed,
             message: "Failed to chown \(failureNoun) for remoteUser \(user)"
                 + (detail.isEmpty ? "" : ": \(detail)"),
             hint: "Named volumes are root-owned; chown as root before running as remoteUser"
+        )
+    }
+
+    private static func volumeCorruptError(line: String, volumes: [OwnedVolume]) -> CLIError {
+        // Prefer the volume whose path appears in the failing chown line.
+        let matched = volumes.filter { volume in
+            let path = volume.scriptPath
+            return line.contains(path + "/") || line.contains(path + ":") || line.contains("'\(path)'")
+        }
+        let suspects = matched.isEmpty ? volumes : matched
+        let described = suspects.map { volume in
+            volume.name.map { "'\($0)' mounted at \(volume.target)" } ?? "mounted at \(volume.target)"
+        }
+        let subject = described.isEmpty
+            ? "A named volume"
+            : "Named volume " + described.joined(separator: ", ")
+        let image = suspects.count == 1 && suspects[0].name != nil
+            ? "the volume.img of '\(suspects[0].name!)' (see `container volume inspect \(suspects[0].name!)`)"
+            : "the affected volume.img (see `container volume inspect <volume>`)"
+        let excerpt = line.count > 300 ? String(line.prefix(300)) + "…" : line
+        return CLIError(
+            code: CLIErrorCode.volumeCorrupt,
+            message: "\(subject) has a corrupted ext4 filesystem (EUCLEAN): \(excerpt)",
+            hint: "Editing devcontainer.json cannot fix this. " + VolumeHealth.repairHint(image: image)
         )
     }
 

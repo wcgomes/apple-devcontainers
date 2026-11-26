@@ -40,7 +40,7 @@ public enum VolumeRecoveryResume {
     }
 
     public static func rootURL(fileManager: FileManager = .default) -> URL {
-        fileManager.temporaryDirectory
+        StateDirectories.temporaryDirectory(fileManager)
             .appendingPathComponent("adevcontainer-volume-recovery", isDirectory: true)
     }
 

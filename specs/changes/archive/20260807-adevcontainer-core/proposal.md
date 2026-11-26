@@ -6,7 +6,7 @@ macOS developers need a native CLI that reads `devcontainer.json` and runs works
 
 ## Scope
 
-- Greenfield Swift SPM executable **`adevcontainer`** at package root `/Users/wyller/Repos/dev-containerization/` (Package.swift, Sources/, Tests/).
+- Greenfield Swift SPM executable **`adevcontainer`** at package root `~/Repos/dev-containerization/` (Package.swift, Sources/, Tests/).
 - Host: macOS 26+ Apple Silicon; sole external user runtime dependency: Apple `container` (already on host; no install tasks).
 - Product commands: `doctor`, `up`, `exec`, `stop`, `delete`, `prune`, `inspect`.
 - Phases 0→3 feature surface (each assumes prior phases):

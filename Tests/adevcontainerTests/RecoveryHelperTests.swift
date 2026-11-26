@@ -309,7 +309,7 @@ nonisolated(unsafe) let recoveryHelperTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(create.contains("devcontainer.recovery=adevcontainer"))
         try MiniTest.expect(create.contains("devcontainer.recovery_session=session"))
         try MiniTest.expect(create.contains("type=volume,source=adev-repo-ws,target=/workspaces/repo"))
-        try MiniTest.expect(!mock.calls.contains { $0.arguments == ["volume", "create", "adev-repo-ws"] })
+        try MiniTest.expect(!mock.calls.contains { $0.arguments == ["volume", "create", "--opt", "journal=ordered", "adev-repo-ws"] })
         try MiniTest.expect(!mock.calls.contains { $0.arguments.first == "cp" || $0.arguments.first == "copy" })
     }),
 

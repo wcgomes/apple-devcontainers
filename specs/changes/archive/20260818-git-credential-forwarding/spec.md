@@ -35,15 +35,15 @@ Non-create paths MUST NOT seed: `up` reuse of a running matching container, `up`
 
 #### Scenario: up bind fresh create seeds the store before hooks
 
-- Given a bind-mode `up` fresh create whose host workspace has an HTTPS fetch remote `https://dev.azure.com/plantsuite/PlantSuite/_git/GitOps` and host `git credential fill` returns credentials
+- Given a bind-mode `up` fresh create whose host workspace has an HTTPS fetch remote `https://dev.azure.com/sample-org/SampleApp/_git/GitOps` and host `git credential fill` returns credentials
 - When the create path runs after start and before create-path hooks
-- Then the CLI acquires credentials on the host and runs an in-container exec as the connection user that writes the credential helper script, configures `credential.helper --add` with its absolute path at `--global` scope, and approves an entry for (https, dev.azure.com, plantsuite) BEFORE the first create-path hook exec
+- Then the CLI acquires credentials on the host and runs an in-container exec as the connection user that writes the credential helper script, configures `credential.helper --add` with its absolute path at `--global` scope, and approves an entry for (https, dev.azure.com, sample-org) BEFORE the first create-path hook exec
 
 > Note (Amendment 1, 2026-08-18): wording updated from `credential.helper store` (`--global`) to the username-agnostic helper mechanism; scenario semantics unchanged.
 
 #### Scenario: sibling repositories on the same host are covered
 
-- Given the same bind-mode `up` and a workspace whose remotes include `https://dev.azure.com/plantsuite/PlantSuite/_git/GitOps` and `https://dev.azure.com/plantsuite/PlantSuite/_git/Other`
+- Given the same bind-mode `up` and a workspace whose remotes include `https://dev.azure.com/sample-org/SampleApp/_git/GitOps` and `https://dev.azure.com/sample-org/SampleApp/_git/Other`
 - When seeding runs
 - Then one approve entry per unique (protocol, host, username) is applied and the entries contain no path component
 

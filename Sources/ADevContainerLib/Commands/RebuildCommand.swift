@@ -243,6 +243,17 @@ public enum RebuildCommand {
         // allowed on the old container. Named recovery retry also needs the helper up before
         // apply/write — do not run recovery apply above this gate.
         // A volume resume has no container to start.
+        // A stopped old container does not mount its volumes: refuse a corrupt one now, before
+        // the bare start writes to it, leaving the old container untouched.
+        // Shared by both health checks of this run so each volume warns at most once.
+        var healthWarnedVolumes: Set<String> = []
+        if volumeResume == nil, !selected.isRunning {
+            try VolumeHealth.gate(
+                volumes: VolumeHealth.managedVolumes(labels: labels),
+                runtime: runtime,
+                warned: &healthWarnedVolumes
+            )
+        }
         if isVolumeMode, volumeResume == nil, !selected.isRunning {
             StatusPrinter.status("Starting container")
             try runtime.start(nameOrId: selected.id)
@@ -381,7 +392,11 @@ public enum RebuildCommand {
             config: resolvedConfig,
             labels: labels,
             isVolumeMode: isVolumeMode,
-            containerId: selected.id,
+            stagingSource: guestStagingSource(
+                selected: selected,
+                volumeResume: volumeResume,
+                recoveryContext: recoveryContext
+            ),
             volumeRead: volumeRead,
             runtime: runtime,
             fileManager: fileManager
@@ -488,7 +503,11 @@ public enum RebuildCommand {
                     )
                 }
                 let staged = try stageGuestInitializeWorkspace(
-                    containerId: selected.id,
+                    source: guestStagingSource(
+                        selected: selected,
+                        volumeResume: volumeResume,
+                        recoveryContext: recoveryContext
+                    ),
                     raw: volumeRead.raw,
                     runtime: runtime,
                     fileManager: fileManager,
@@ -558,7 +577,11 @@ public enum RebuildCommand {
                     )
                 }
                 let staged = try stageGuestInitializeWorkspace(
-                    containerId: selected.id,
+                    source: guestStagingSource(
+                        selected: selected,
+                        volumeResume: volumeResume,
+                        recoveryContext: recoveryContext
+                    ),
                     raw: volumeRead.raw,
                     runtime: runtime,
                     fileManager: fileManager,
@@ -753,6 +776,32 @@ public enum RebuildCommand {
             )
         }
 
+        /// ext4 corruption cannot be fixed by editing the config: never enter config-edit
+        /// recovery. Remove only a failed replacement (offline repair needs the volume
+        /// unmounted); keep volumes and every resume/session record for `rebuild --name`.
+        func failOnVolumeCorruption(_ corrupt: CLIError, replacementID: String?) throws -> Never {
+            if let replacementID {
+                try? runtime.delete(nameOrId: replacementID, force: true)
+            }
+            if bindRecoveryEligible, let hostPath = RecoveryOrchestrator.hostConfigPath(labels: labels) {
+                try? BindRecoveryResume.retain(
+                    container: selected,
+                    hostConfigPath: hostPath,
+                    fileManager: fileManager
+                )
+            }
+            StatusPrinter.warning(
+                "Old container '\(selected.name)' was already removed; rebuild stopped on volume corruption (volumes and recovery state kept)"
+            )
+            let retry = "\(CommandSurface.commandPrefix) rebuild --name \(shellQuote(selected.name))"
+            throw CLIError(
+                code: corrupt.code,
+                property: corrupt.property,
+                message: corrupt.message,
+                hint: (corrupt.hint.map { "\($0). " } ?? "") + "After the repair, run \(retry)"
+            )
+        }
+
         // create() ensureVolumes list-then-reuse workspace/config named volumes
         // (never delete; missing config volumes created on demand).
         do {
@@ -788,6 +837,18 @@ public enum RebuildCommand {
                 message: "Failed to ensure rebuild volumes: \(error.localizedDescription)",
                 hint: "Existing volumes were preserved. Run '\(CommandSurface.commandPrefix) rebuild --name \(selected.name)' to resume; recovery will not create a blank workspace volume"
             )
+        }
+        // The old container is gone, so reused volumes are unmounted: refuse a corrupt one
+        // before the replacement writes to it.
+        do {
+            try VolumeHealth.gate(
+                volumes: (isVolumeMode ? [stampedWorkspaceVolume(labels)] : [])
+                    + effectiveConfig.mounts.filter { $0.type == .volume }.map(\.source),
+                runtime: runtime,
+                warned: &healthWarnedVolumes
+            )
+        } catch let corrupt as CLIError where corrupt.code == CLIErrorCode.volumeCorrupt {
+            try failOnVolumeCorruption(corrupt, replacementID: nil)
         }
         StatusPrinter.status("Creating container", item: replacementName)
         let id: String
@@ -838,6 +899,9 @@ public enum RebuildCommand {
         )
 
         func handleOwnershipFailure(_ error: Error) throws -> RebuildResult {
+            if WorkspaceOwnership.isVolumeCorruption(error), let corrupt = error as? CLIError {
+                try failOnVolumeCorruption(corrupt, replacementID: id)
+            }
             if allowRecovery, let recovery = recoveryContext {
                 StatusPrinter.status("Ownership setup failed; entering recovery")
                 return try RecoveryOrchestrator.recover(
@@ -1325,7 +1389,7 @@ public enum RebuildCommand {
         config: ResolvedDevContainerConfig,
         labels: [String: String],
         isVolumeMode: Bool,
-        containerId: String,
+        stagingSource: GuestStagingSource,
         volumeRead: ResolvedVolumeConfigRead?,
         runtime: AppleContainerRuntime,
         fileManager: FileManager
@@ -1342,7 +1406,7 @@ public enum RebuildCommand {
         }
         if isVolumeMode, let volumeRead {
             let staged = try stageGuestInitializeWorkspace(
-                containerId: containerId,
+                source: stagingSource,
                 raw: volumeRead.raw,
                 runtime: runtime,
                 fileManager: fileManager
@@ -1362,6 +1426,100 @@ public enum RebuildCommand {
         )
     }
 
+    /// Where guest config staging reads the workspace from.
+    private enum GuestStagingSource {
+        /// A live container (the old container, or a retained recovery helper).
+        case container(String)
+        /// Volume resume: the old container is gone. Read the retained workspace volume
+        /// through a short-lived pinned recovery helper (`nil` when it could not be prepared).
+        case workspaceVolume(RecoveryHelper.Preparation?)
+    }
+
+    private static func guestStagingSource(
+        selected: ContainerInfo,
+        volumeResume: VolumeRecoveryResume.State?,
+        recoveryContext: RecoveryOrchestrator.Prepared?
+    ) -> GuestStagingSource {
+        volumeResume == nil
+            ? .container(selected.id)
+            : .workspaceVolume(recoveryContext?.preparation)
+    }
+
+    private static func stageGuestInitializeWorkspace(
+        source: GuestStagingSource,
+        raw: RawVolumeConfig,
+        runtime: AppleContainerRuntime,
+        fileManager: FileManager,
+        errorCode: String = CLIErrorCode.lifecycleFailed,
+        property: String = "initializeCommand",
+        purpose: String = "initializeCommand",
+        tempPrefix: String = "adev-init",
+        dockerfileBuild: DockerfileBuild? = nil
+    ) throws -> URL {
+        let stage = { (containerId: String) throws -> URL in
+            try stageGuestInitializeWorkspace(
+                containerId: containerId,
+                raw: raw,
+                runtime: runtime,
+                fileManager: fileManager,
+                errorCode: errorCode,
+                property: property,
+                purpose: purpose,
+                tempPrefix: tempPrefix,
+                dockerfileBuild: dockerfileBuild
+            )
+        }
+        switch source {
+        case .container(let containerId):
+            return try stage(containerId)
+        case .workspaceVolume(let preparation):
+            guard let preparation else {
+                throw CLIError(
+                    code: errorCode,
+                    property: property,
+                    message: "Failed to stage guest .devcontainer for \(purpose): the old container is gone and the pinned recovery helper is unavailable",
+                    hint: "Allow the recovery helper image to be pulled (omit --skip-pull), then rerun \(CommandSurface.commandPrefix) rebuild --name. The workspace volume and recovery session were kept"
+                )
+            }
+            // Never share the volume with another container; createHelper verifies the mount.
+            try RecoveryHelper.verifyWorkspaceVolumeDetached(
+                volumeName: preparation.request.workspaceVolume,
+                runtime: runtime
+            )
+            let helperID = try RecoveryHelper.createHelper(preparation: preparation, runtime: runtime)
+            let staged = Result { try stage(helperID) }
+            do {
+                // The replacement must be the only container mounting the workspace volume.
+                try runtime.delete(nameOrId: helperID, force: true)
+            } catch {
+                let name = preparation.request.containerName
+                let retained = "The staging helper \(helperID) ('\(name)') was retained and still mounts workspace volume '\(preparation.request.workspaceVolume)'"
+                let hint = "Run \(CommandSurface.commandPrefix) rebuild --name \(shellQuote(name)) to reuse it as the recovery endpoint, "
+                    + "or remove it with \(CommandSurface.commandPrefix) delete --name \(shellQuote(name)) before any other use of the volume. "
+                    + "The workspace volume and recovery session were kept"
+                switch staged {
+                case .success(let url):
+                    removeStagedInitializeRoot(url, fileManager: fileManager)
+                    throw CLIError(
+                        code: CLIErrorCode.recoveryUnavailable,
+                        property: property,
+                        message: retained,
+                        hint: hint
+                    )
+                case .failure(let stageError):
+                    let cli = stageError as? CLIError
+                    throw CLIError(
+                        code: cli?.code ?? CLIErrorCode.recoveryUnavailable,
+                        property: cli?.property ?? property,
+                        message: (cli?.message ?? "Failed to stage guest .devcontainer for \(purpose)") + ". " + retained,
+                        hint: hint
+                    )
+                }
+            }
+            return try staged.get()
+        }
+    }
+
     /// Place the current guest `.devcontainer/` (when present) and/or root
     /// `.devcontainer.json` onto a host temp workspace root. Not a full checkout.
     /// Root-sibling dockerfile/context members are staged when `dockerfileBuild` is set.
@@ -1376,7 +1534,7 @@ public enum RebuildCommand {
         tempPrefix: String = "adev-init",
         dockerfileBuild: DockerfileBuild? = nil
     ) throws -> URL {
-        let tempDir = fileManager.temporaryDirectory
+        let tempDir = StateDirectories.temporaryDirectory(fileManager)
             .appendingPathComponent("\(tempPrefix)-\(UUID().uuidString)", isDirectory: true)
         do {
             try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -1575,7 +1733,7 @@ public enum RebuildCommand {
             )
         }
 
-        let tarURL = fileManager.temporaryDirectory
+        let tarURL = StateDirectories.temporaryDirectory(fileManager)
             .appendingPathComponent("\(archivePrefix)-archive-\(UUID().uuidString).tar")
         do {
             try archive.stdout.write(to: tarURL)

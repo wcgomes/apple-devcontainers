@@ -156,7 +156,7 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
                 if args == ["volume", "list", "--format", "json"] {
                     return ProcessResult(exitCode: 0, stdout: Data("[]".utf8), stderr: Data())
                 }
-                if args == ["volume", "create", "calendars-cargo-data"] {
+                if args == ["volume", "create", "--opt", "journal=ordered", "calendars-cargo-data"] {
                     return ProcessResult(exitCode: 0, stdout: Data(), stderr: Data())
                 }
                 return nil
@@ -386,7 +386,7 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
         }
     }),
     ("upChownsNamedVolumeMountsForNonRoot", {
-        let bindDir = FileManager.default.temporaryDirectory
+        let bindDir = StateDirectories.temporaryDirectory()
             .appendingPathComponent("adev-up-bind-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: bindDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: bindDir) }
@@ -1054,7 +1054,7 @@ nonisolated(unsafe) let upTests: [(String, () throws -> Void)] = [
         defer { restore() }
         let creds = SeedMockCredential()
         creds.results["https://dev.azure.com/org/proj/_git/repo"] = .success(
-            GitHTTPSCredentials(username: "plantsuite", password: password)
+            GitHTTPSCredentials(username: "sample-app", password: password)
         )
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         let result = try UpCommand.run(
@@ -1189,7 +1189,7 @@ nonisolated(unsafe) let credentialRefreshCommandTests: [(String, () throws -> Vo
         defer { restore() }
         let creds = SeedMockCredential()
         creds.results["https://dev.azure.com/org/proj/_git/repo"] = .success(
-            GitHTTPSCredentials(username: "plantsuite", password: password)
+            GitHTTPSCredentials(username: "sample-app", password: password)
         )
         let runtime = AppleContainerRuntime(executablePath: "/usr/local/bin/container", runner: mock)
         try StartCommand.run(
@@ -2487,7 +2487,7 @@ nonisolated(unsafe) let phase1Tests: [(String, () throws -> Void)] = [
     ("envUserWorkspaceFolderOnCreateRequest", {
         let root = TestRepo.root()
         let fixture = root.appendingPathComponent("Tests/Fixtures/env-user.json")
-        let ws = FileManager.default.temporaryDirectory
+        let ws = StateDirectories.temporaryDirectory()
             .appendingPathComponent("p1-\(UUID().uuidString)", isDirectory: true)
         let dc = ws.appendingPathComponent(".devcontainer", isDirectory: true)
         try FileManager.default.createDirectory(at: dc, withIntermediateDirectories: true)
@@ -2802,9 +2802,9 @@ nonisolated(unsafe) let phase2Tests: [(String, () throws -> Void)] = [
     ("phase2FixtureMountsAndPorts", {
         let root = TestRepo.root()
         let fixture = root.appendingPathComponent("Tests/Fixtures/mounts-ports.json")
-        let ws = FileManager.default.temporaryDirectory
+        let ws = StateDirectories.temporaryDirectory()
             .appendingPathComponent("p2-\(UUID().uuidString)", isDirectory: true)
-        let home = FileManager.default.temporaryDirectory
+        let home = StateDirectories.temporaryDirectory()
             .appendingPathComponent("p2-home-\(UUID().uuidString)", isDirectory: true)
         let kube = home.appendingPathComponent(".kube", isDirectory: true)
         let dc = ws.appendingPathComponent(".devcontainer", isDirectory: true)
@@ -2823,7 +2823,7 @@ nonisolated(unsafe) let phase2Tests: [(String, () throws -> Void)] = [
         try MiniTest.expect(resolved.config.forwardPorts.contains(14200))
         try MiniTest.expectEqual(
             resolved.config.portsAttributes["14200"]?["label"],
-            "PlantSuite Portal"
+            "SampleApp Portal"
         )
         let request = CreateRequest.from(
             resolved: resolved.config,
@@ -2841,7 +2841,7 @@ nonisolated(unsafe) let phase2Tests: [(String, () throws -> Void)] = [
         try MiniTest.expect(resolved.mountPromotions.isEmpty)
     }),
     ("fileBindPromotesToParentDirectory", {
-        let root = FileManager.default.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory()
             .appendingPathComponent("bind-\(UUID().uuidString)", isDirectory: true)
         let kubeDir = root.appendingPathComponent(".kube", isDirectory: true)
         try FileManager.default.createDirectory(at: kubeDir, withIntermediateDirectories: true)
@@ -3096,7 +3096,7 @@ nonisolated(unsafe) let phase3Tests: [(String, () throws -> Void)] = [
     ("phase3FixtureParses", {
         let root = TestRepo.root()
         let fixture = root.appendingPathComponent("Tests/Fixtures/lifecycle.json")
-        let ws = FileManager.default.temporaryDirectory
+        let ws = StateDirectories.temporaryDirectory()
             .appendingPathComponent("p3-\(UUID().uuidString)", isDirectory: true)
         let dc = ws.appendingPathComponent(".devcontainer", isDirectory: true)
         try FileManager.default.createDirectory(at: dc, withIntermediateDirectories: true)
@@ -4728,7 +4728,7 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         let ref = "ghcr.io/adevcontainer/features/sample-a:1"
         let fixture = TestRepo.root()
             .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-up-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
 
@@ -4895,7 +4895,7 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         let ref = "ghcr.io/adevcontainer/features/sample-a:1"
         let fixture = TestRepo.root()
             .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-finish-union-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         let hookDir = (cache as NSString).appendingPathComponent("hook-feature")
@@ -4991,7 +4991,7 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         let ref = "ghcr.io/adevcontainer/features/sample-a:1"
         let fixture = TestRepo.root()
             .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-reuse-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
 
@@ -5035,7 +5035,7 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         let ref = "ghcr.io/adevcontainer/features/sample-a:1"
         let fixture = TestRepo.root()
             .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-prog-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
 
@@ -5084,7 +5084,7 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         let ref = "ghcr.io/adevcontainer/features/sample-a:1"
         let fixture = TestRepo.root()
             .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-build-fail-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
 
@@ -5125,7 +5125,7 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         let ref = "ghcr.io/adevcontainer/features/sample-a:1"
         let fixture = TestRepo.root()
             .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-decline-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
 
@@ -5172,7 +5172,7 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         let ref = "ghcr.io/adevcontainer/features/sample-a:1"
         let fixture = TestRepo.root()
             .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-fail-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
 
@@ -5216,7 +5216,7 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         })
     }),
     ("upWithLocalFeaturesDefaultFetcher", {
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-up-local-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
 
@@ -5291,7 +5291,7 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         }
     }),
     ("upWithLocalFeaturesConfigDirRef", {
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-up-cfgdir-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
 
@@ -5735,7 +5735,7 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         let ref = "ghcr.io/adevcontainer/features/sample-a:1"
         let fixture = TestRepo.root()
             .appendingPathComponent("Tests/Fixtures/features-sample/sample-a").path
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("df-feat-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         let ws = try TestRepo.makeTempWorkspace(configJSON: """
@@ -5900,7 +5900,7 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         defer { try? FileManager.default.removeItem(at: ws) }
         let configPath = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
         let before = try Data(contentsOf: URL(fileURLWithPath: configPath))
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-up-oci-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         let previousFetcher = UpCommand.featuresFetcherOverride
@@ -5955,7 +5955,7 @@ nonisolated(unsafe) let featuresCommandTests: [(String, () throws -> Void)] = [
         }
         """)
         defer { try? FileManager.default.removeItem(at: ws) }
-        let cache = FileManager.default.temporaryDirectory
+        let cache = StateDirectories.temporaryDirectory()
             .appendingPathComponent("feat-up-fail-\(UUID().uuidString)", isDirectory: true).path
         defer { try? FileManager.default.removeItem(atPath: cache) }
         let previousFetcher = UpCommand.featuresFetcherOverride

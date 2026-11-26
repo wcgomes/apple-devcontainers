@@ -730,7 +730,7 @@ public final class RecoveryConfigSession: @unchecked Sendable {
         guard isSafeSessionID(sessionID) else {
             throw securityError("Recovery session id is not safe")
         }
-        let root = fileManager.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory(fileManager)
             .standardizedFileURL
             .resolvingSymlinksInPath()
         let directory = root.appendingPathComponent(
@@ -758,7 +758,7 @@ public final class RecoveryConfigSession: @unchecked Sendable {
         _ directoryURL: URL,
         fileManager: FileManager
     ) throws -> (URL, String) {
-        let root = fileManager.temporaryDirectory
+        let root = StateDirectories.temporaryDirectory(fileManager)
             .standardizedFileURL
             .resolvingSymlinksInPath()
         let candidate = directoryURL.standardizedFileURL

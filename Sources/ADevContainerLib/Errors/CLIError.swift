@@ -243,6 +243,8 @@ public enum CLIErrorCode {
     public static let gitFailed = "git_failed"
     /// Populate (copy into volume) failed after container create.
     public static let populateFailed = "populate_failed"
+    /// A named volume's ext4 filesystem reports corruption (`EUCLEAN`); needs offline repair.
+    public static let volumeCorrupt = "volume_corrupt"
     /// Multiple managed containers and no `--name` in non-interactive mode.
     public static let selectionRequired = "selection_required"
     /// Recovery prerequisites are unavailable or a recovery operation could not be established.

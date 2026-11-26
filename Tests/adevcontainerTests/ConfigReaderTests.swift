@@ -322,7 +322,7 @@ nonisolated(unsafe) let configReaderTests: [(String, () throws -> Void)] = [
             return nil
         }
         let config = try ConfigReader.read(
-            labels: volumeLabels(configFile: ".devcontainer/devcontainer.json", workspaceFolder: "/workspaces/plantsuite"),
+            labels: volumeLabels(configFile: ".devcontainer/devcontainer.json", workspaceFolder: "/workspaces/sample-app"),
             containerId: "c1",
             runtime: mockRuntime(mock),
             localEnv: ["HOME": "/Users/you"],
@@ -331,7 +331,7 @@ nonisolated(unsafe) let configReaderTests: [(String, () throws -> Void)] = [
         try MiniTest.expectEqual(config?.mounts.count, 1)
         try MiniTest.expectEqual(config?.mounts.first?.source, "/Users/you/.kube/config")
         try MiniTest.expectEqual(config?.mounts.first?.target, "/home/vscode/.kube/config")
-        try MiniTest.expectEqual(config?.workspaceFolder, "/workspaces/plantsuite")
+        try MiniTest.expectEqual(config?.workspaceFolder, "/workspaces/sample-app")
     }),
 
     ("strictVolumeReadEmptyLocalEnvCollapsesKubeConfigToRoot", {
@@ -351,7 +351,7 @@ nonisolated(unsafe) let configReaderTests: [(String, () throws -> Void)] = [
             return nil
         }
         let config = try ConfigReader.read(
-            labels: volumeLabels(configFile: ".devcontainer/devcontainer.json", workspaceFolder: "/workspaces/plantsuite"),
+            labels: volumeLabels(configFile: ".devcontainer/devcontainer.json", workspaceFolder: "/workspaces/sample-app"),
             containerId: "c1",
             runtime: mockRuntime(mock),
             localEnv: [:],
@@ -377,13 +377,13 @@ nonisolated(unsafe) let configReaderTests: [(String, () throws -> Void)] = [
             return nil
         }
         let resolved = try ConfigReader.readVolumeWithRaw(
-            labels: volumeLabels(configFile: ".devcontainer/devcontainer.json", workspaceFolder: "/workspaces/plantsuite"),
+            labels: volumeLabels(configFile: ".devcontainer/devcontainer.json", workspaceFolder: "/workspaces/sample-app"),
             containerId: "c1",
             runtime: mockRuntime(mock),
             localEnv: ["HOME": "/Users/you"]
         )
         try MiniTest.expectEqual(resolved.config.mounts.first?.source, "/Users/you/.kube/config")
-        try MiniTest.expectEqual(resolved.config.workspaceFolder, "/workspaces/plantsuite")
+        try MiniTest.expectEqual(resolved.config.workspaceFolder, "/workspaces/sample-app")
     }),
 
     ("resolveVolumeFileHostLocalEnvExpandsKubeConfigIdiom", {
@@ -399,13 +399,13 @@ nonisolated(unsafe) let configReaderTests: [(String, () throws -> Void)] = [
         let configFile = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
         let resolved = try ConfigReader.resolveVolumeFile(
             at: configFile,
-            labels: volumeLabels(configFile: ".devcontainer/devcontainer.json", workspaceFolder: "/workspaces/plantsuite"),
+            labels: volumeLabels(configFile: ".devcontainer/devcontainer.json", workspaceFolder: "/workspaces/sample-app"),
             localEnv: ["HOME": "/Users/you"]
         )
         try MiniTest.expectEqual(resolved.config.mounts.first?.source, "/Users/you/.kube/config")
-        try MiniTest.expectEqual(resolved.config.workspaceFolder, "/workspaces/plantsuite")
+        try MiniTest.expectEqual(resolved.config.workspaceFolder, "/workspaces/sample-app")
         try MiniTest.expect(
-            (resolved.workspacePath as NSString).lastPathComponent != "plantsuite",
+            (resolved.workspacePath as NSString).lastPathComponent != "sample-app",
             "temp guest-config root must not become workspace identity"
         )
     }),
@@ -423,7 +423,7 @@ nonisolated(unsafe) let configReaderTests: [(String, () throws -> Void)] = [
         let configFile = ws.appendingPathComponent(".devcontainer/devcontainer.json").path
         let resolved = try ConfigReader.resolveVolumeFile(
             at: configFile,
-            labels: volumeLabels(configFile: ".devcontainer/devcontainer.json", workspaceFolder: "/workspaces/plantsuite"),
+            labels: volumeLabels(configFile: ".devcontainer/devcontainer.json", workspaceFolder: "/workspaces/sample-app"),
             localEnv: [:]
         )
         try MiniTest.expectEqual(resolved.config.mounts.first?.source, "/.kube/config")
