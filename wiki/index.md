@@ -14,11 +14,13 @@
 
 ## Domain
 
-- [Apple devcontainer gaps](domain/devcontainer-apple-gaps.md) — Apple, identity, gaps — Documents compatibility gaps between Apple containers and devcontainers.
+- [Apple devcontainer gaps](domain/devcontainer-apple-gaps.md) — Apple, identity, gaps, volumes, ext4 — Documents compatibility gaps between Apple containers and devcontainers.
 
 ## Conventions
 
 - [Terminal output](conventions/terminal-output.md) — terminal, output, formatting — Defines terminal output conventions and presentation behavior.
 - [CLI runtime boundary](conventions/cli-runtime-boundary.md) — runtime, parser, JSON, validation, Features — Defines runtime boundaries, identities, mounts, and Feature handling.
 - [Release distribution](conventions/release-distribution.md) — release, distribution, Homebrew — Defines release, packaging, and distribution conventions.
+- [Test suite isolation](conventions/test-suite-isolation.md) — tests, TMPDIR, StateDirectories, isolation — Keeps the test suite away from real host recovery state.
+- [Private data placeholders](conventions/private-data-placeholders.md) — privacy, placeholders, fixtures, names — Bans private names and emails from repo content.
 - [Workspace devcontainer](conventions/workspace-devcontainer.md) — workspace, devcontainer, tooling — Documents the repository’s development container conventions.
