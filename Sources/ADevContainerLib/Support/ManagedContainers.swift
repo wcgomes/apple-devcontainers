@@ -35,6 +35,16 @@ public enum ManagedContainers {
         runtime: AppleContainerRuntime,
         picker: InteractivePicker = .default
     ) throws -> ContainerInfo {
+        try resolveSelectionReportingAutoSingle(name: name, runtime: runtime, picker: picker).info
+    }
+
+    /// Same as `resolveSelection`; `isAutoSingle` is true when no `--name` was given and the
+    /// target is the only managed container (no picker shown). Selection is not cwd-scoped.
+    public static func resolveSelectionReportingAutoSingle(
+        name: String?,
+        runtime: AppleContainerRuntime,
+        picker: InteractivePicker = .default
+    ) throws -> (info: ContainerInfo, isAutoSingle: Bool) {
         let managed = try list(runtime: runtime)
         if let name, !name.isEmpty {
             guard let found = managed.first(where: { $0.id == name || $0.name == name }) else {
@@ -44,7 +54,7 @@ public enum ManagedContainers {
                     hint: "Run '\(CommandSurface.commandPrefix) list' to see managed containers"
                 )
             }
-            return found
+            return (found, false)
         }
         if managed.isEmpty {
             throw CLIError(
@@ -54,7 +64,7 @@ public enum ManagedContainers {
             )
         }
         if managed.count == 1 {
-            return managed[0]
+            return (managed[0], true)
         }
         // Multiple: picker if interactive, else require --name
         guard picker.isInteractive else {
@@ -64,8 +74,53 @@ public enum ManagedContainers {
                 hint: "Run '\(CommandSurface.commandPrefix) list' then retry with --name <container>"
             )
         }
-        return try picker.pick(from: managed)
+        return (try picker.pick(from: managed), false)
     }
+
+    /// TTY y/N confirmation (default no) before `delete`/`rebuild` act on an auto-selected
+    /// single container, and before every `purge`. Writes the prompt to stderr; only y/yes
+    /// proceeds. The first line says how the target was chosen; `note` says what happens.
+    public static func confirmTarget(
+        _ info: ContainerInfo,
+        isAutoSingle: Bool,
+        action: String,
+        note: String,
+        readLine: () -> String?
+    ) -> Bool {
+        let prompt = targetConfirmationPrompt(info, isAutoSingle: isAutoSingle, action: action, note: note)
+        FileHandle.standardError.write(Data(prompt.utf8))
+        let answer = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        return answer == "y" || answer == "yes"
+    }
+
+    static func targetConfirmationPrompt(
+        _ info: ContainerInfo,
+        isAutoSingle: Bool,
+        action: String,
+        note: String
+    ) -> String {
+        let name = info.name.isEmpty ? info.id : info.name
+        var detail: String
+        if isVolumeMode(info) {
+            detail = "volume mode"
+            if let volume = info.labels[ContainerIdentity.labelWorkspaceVolume], !volume.isEmpty {
+                detail += ", volume \(volume)"
+            }
+        } else {
+            detail = "bind mode"
+            if let folder = info.labels[ContainerIdentity.labelLocalFolder], !folder.isEmpty {
+                detail += ", workspace \(folder)"
+            }
+        }
+        let heading = isAutoSingle ? "Only one managed container found" : "Container"
+        return "\(heading): \(name) (\(detail))\n"
+            + "\(action) it? \(note) [y/N] "
+    }
+}
+
+/// Thrown by `rebuild` when the auto-single TTY confirmation is declined (exit 0, like `purge`).
+public struct AutoSingleConfirmationDeclined: Error {
+    public init() {}
 }
 
 /// Interactive TTY picker for managed container selection.

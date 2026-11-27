@@ -104,7 +104,7 @@ Apple upgrades wipe the plugin directory. PATH `adevcontainer` survives. Restage
 
 ### Interactive picker
 
-The `start`, `exec`, `stop`, `delete`, `purge`, `rebuild`, and `inspect` commands open an interactive picker (picklist) in an interactive TTY when `--name` is not provided and multiple managed containers exist. In a non-interactive terminal, `--name <name>` is required in this case.
+The `start`, `exec`, `stop`, `delete`, `purge`, `rebuild`, and `inspect` commands open an interactive picker (picklist) in an interactive TTY when `--name` is not provided and multiple managed containers exist. In a non-interactive terminal, `--name <name>` is required in this case. When `--name` is not provided and exactly one managed container exists, it is selected automatically (selection is not scoped to the current directory); `delete` and `rebuild` then ask for confirmation in an interactive TTY (default no). `rebuild --json`, non-interactive runs, and `--name` skip that prompt. `purge` always confirms in an interactive TTY, including with `--name`; non-interactive runs proceed without a prompt.
 
 | Command | Purpose |
 | --- | --- |
@@ -119,7 +119,7 @@ The `start`, `exec`, `stop`, `delete`, `purge`, `rebuild`, and `inspect` command
 | `adevcontainer stop [--name <name>]` | Stop a container by name or with the interactive picker |
 | `adevcontainer inspect [--name <name>]` | Inspect a container by name or with the interactive picker |
 | `adevcontainer delete [--name <name>]` | Remove a container, keeping its managed volumes |
-| `adevcontainer purge [--name <name>]` | Remove a container, its managed volumes, and the image |
+| `adevcontainer purge [--name <name>]` | Remove a container, its managed volumes, and the image; confirms on an interactive TTY |
 | `adevcontainer rebuild [--name <name>] [--vscode]` | Rebuild a managed container from its current configuration |
 | `adevcontainer help [<command>]` | Show main usage or per-command help |
 | `adevcontainer version [--version]` | Print the CLI version |

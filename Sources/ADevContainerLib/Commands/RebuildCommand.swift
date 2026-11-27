@@ -80,7 +80,8 @@ public enum RebuildCommand {
         isTTY: Bool = AppleContainerConfig.stdinIsTTY(),
         recoveryEditor: RecoveryEditor? = nil,
         openEditorPrompt: RecoveryOpenEditorPrompt = .default,
-        credentials: any GitCredentialProviding = HostGitCredential()
+        credentials: any GitCredentialProviding = HostGitCredential(),
+        confirmReadLine: @escaping () -> String? = { Swift.readLine() }
     ) throws -> RebuildResult {
         try runInternal(
             options: options,
@@ -92,7 +93,8 @@ public enum RebuildCommand {
             fileManager: fileManager,
             isTTY: isTTY,
             recoveryEditor: recoveryEditor,
-            openEditorPrompt: openEditorPrompt
+            openEditorPrompt: openEditorPrompt,
+            confirmReadLine: confirmReadLine
         )
     }
 
@@ -112,15 +114,17 @@ public enum RebuildCommand {
         allowRecovery: Bool = true,
         isTTY: Bool = AppleContainerConfig.stdinIsTTY(),
         recoveryEditor: RecoveryEditor? = nil,
-        openEditorPrompt: RecoveryOpenEditorPrompt = .default
+        openEditorPrompt: RecoveryOpenEditorPrompt = .default,
+        confirmReadLine: () -> String? = { Swift.readLine() }
     ) throws -> RebuildResult {
         var volumeResume: VolumeRecoveryResume.State?
         let selected: ContainerInfo
+        var isAutoSingle = false
         if let selectedOverride {
             selected = selectedOverride
         } else {
             do {
-                selected = try ManagedContainers.resolveSelection(
+                (selected, isAutoSingle) = try ManagedContainers.resolveSelectionReportingAutoSingle(
                     name: options.name,
                     runtime: runtime,
                     picker: picker
@@ -141,6 +145,20 @@ public enum RebuildCommand {
                     throw error
                 }
             }
+        }
+        // Auto-selected single container (not cwd-scoped): confirm on a TTY before any runtime
+        // action. `--json` is machine-readable and never prompts.
+        if isAutoSingle, isTTY, !options.jsonOutput,
+           !ManagedContainers.confirmTarget(
+               selected,
+               isAutoSingle: true,
+               action: "Rebuild",
+               note: "Recreates it with the same name; volumes are preserved.",
+               readLine: confirmReadLine
+           )
+        {
+            FileHandle.standardError.write(Data("Rebuild cancelled\n".utf8))
+            throw AutoSingleConfirmationDeclined()
         }
         // Once a managed container is selected (picker / auto-single / --name / override),
         // pin --name so nested recovery retry cannot re-open InteractivePicker.

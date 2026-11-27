@@ -200,7 +200,12 @@ struct AdevcontainerMain {
 
         case "rebuild":
             let opts = parsed.rebuildOptions()
-            let result = try RebuildCommand.run(options: opts, runtime: runtime)
+            let result: RebuildResult
+            do {
+                result = try RebuildCommand.run(options: opts, runtime: runtime)
+            } catch is AutoSingleConfirmationDeclined {
+                return 0
+            }
             if opts.jsonOutput {
                 if !SuccessPresentation.didEmitSuccessJSON {
                     print(try result.jsonString())
