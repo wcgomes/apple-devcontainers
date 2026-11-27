@@ -113,6 +113,11 @@ if ProcessInfo.processInfo.environment["ADEVCONTAINER_CREDENTIAL_SMOKE"] == "1" 
     FileHandle.standardError.write(Data((reason + "\n").utf8))
     exit(2)
 }
+// Commands default to "stdin is a TTY" for y/N prompts; detach the suite from a developer
+// terminal so those prompts read EOF instead of blocking. PTY probes above get their own TTY.
+if isatty(STDIN_FILENO) != 0 {
+    _ = freopen("/dev/null", "r", stdin)
+}
 // Isolate every product temp / retained-state root (recovery sessions, resume indexes,
 // staging, clone recovery) in a per-run scratch directory that is removed on exit.
 // Foundation ignores TMPDIR on macOS, so without this the suite would read and delete

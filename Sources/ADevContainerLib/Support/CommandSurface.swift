@@ -362,10 +362,10 @@ public enum CommandSurface {
           start [--name]      Start a stopped managed container (initialize + postStart on real start; --json suppresses recovery prompt). A real start refreshes git credentials; already running does not
           exec [-it] [--name] [--] [cmd...]  Run a command (or shell) in a managed dev container
           stop [--name]       Stop a managed dev container (name or picker)
-          delete [--name]     Remove container only (not workspace volume)
+          delete [--name]     Remove container only (not workspace volume); confirms auto-single on a TTY
           purge [--name]      Remove container, volumes (incl. *-ws), and config image; confirms on a TTY
           rebuild [--name]    Force-rebuild a managed dev container from its current config
-                               (same name; volumes preserved)
+                               (same name; volumes preserved); confirms auto-single on a TTY
           inspect [--name]    Show identity, state, labels (from runtime + labels)
 
         Options:
@@ -623,14 +623,18 @@ public enum CommandSurface {
             \(cmd) delete [--name <container>]
 
             Remove the managed container only (not volumes or images).
+            Selection via --name / auto-single / interactive picker. Without --name, when the
+            only managed container is auto-selected (selection is not cwd-scoped), a TTY
+            confirms first (default no). --name and non-TTY proceed without a prompt.
             """
         case "purge":
             return """
             \(cmd) purge [--name <container>]
 
             Remove managed container, config named volumes (label), volume-mode
-            workspace volume (*-ws), and config image. Selection via --name/picker.
-            On a TTY, confirms before deletion (default no). Non-TTY proceeds without a prompt.
+            workspace volume (*-ws), and config image. Selection via --name / auto-single /
+            picker. On a TTY, always confirms before deletion, including with --name
+            (default no). Non-TTY proceeds without a prompt.
             """
         case "inspect":
             return """
@@ -646,6 +650,9 @@ public enum CommandSurface {
             rebuild from the container's CURRENT devcontainer.json. Selection via
             --name / auto-single / interactive picker (same as start/delete). -w is
             usage error (up only). The rebuild command runs the forced create path.
+            Without --name, when the only managed container is auto-selected (selection
+            is not cwd-scoped), a TTY confirms before any runtime action (default no).
+            --name, non-TTY, and --json proceed without a prompt.
 
             The old container is deleted only after the config read, host requirements
             preflight, and Features work all succeed; any failure before that leaves the

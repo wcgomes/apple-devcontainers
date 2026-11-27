@@ -2263,7 +2263,9 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         }
         StatusPrinter.enabled = true
         let id = "adev-purge-confirm"
-        let prompt = "Purge dev container \(id) and its unreferenced volumes and image? [y/N] "
+        let prompt = "Container: \(id) (bind mode)\n"
+            + "Purge it? Permanently removes the container, its unreferenced config volumes, "
+            + "and its config image; this cannot be undone. [y/N] "
         let answers: [String?] = [nil, "", "  ", "n", "no", "N", "NO", "maybe"]
         for answer in answers {
             let (runtime, mock) = makePurgeConfirmRuntime(id: id)
@@ -2286,10 +2288,10 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
                     try MiniTest.expectEqual(code, 0, "decline \(String(describing: answer))")
                 }, capture: &stderr)
             }, capture: &stdout)
-            try MiniTest.expectEqual(stderr, prompt, "stderr for \(String(describing: answer))")
+            try MiniTest.expectEqual(stderr, prompt + "Purge cancelled\n", "stderr for \(String(describing: answer))")
             try MiniTest.expect(!stderr.contains("Purging"), "no purging phase for \(String(describing: answer))")
             try MiniTest.expect(!stderr.contains("Deleting"), "no deleting phase for \(String(describing: answer))")
-            try MiniTest.expectEqual(stdout, "Purge cancelled\n", "stdout for \(String(describing: answer))")
+            try MiniTest.expectEqual(stdout, "", "stdout for \(String(describing: answer))")
             try MiniTest.expect(
                 !mock.calls.contains { ["delete", "volume", "image"].contains($0.arguments.first ?? "") },
                 "no deletes for \(String(describing: answer))"
@@ -2305,7 +2307,9 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         }
         StatusPrinter.enabled = true
         let id = "adev-purge-confirm"
-        let prompt = "Purge dev container \(id) and its unreferenced volumes and image? [y/N] "
+        let prompt = "Container: \(id) (bind mode)\n"
+            + "Purge it? Permanently removes the container, its unreferenced config volumes, "
+            + "and its config image; this cannot be undone. [y/N] "
         for answer in ["y", "Yes", " y "] {
             let (runtime, mock) = makePurgeConfirmRuntime(id: id)
             var stderr = ""
@@ -2344,7 +2348,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         }
         try MiniTest.expectEqual(code, 0)
         try MiniTest.expect(!read, "non-TTY must not read a line")
-        try MiniTest.expect(!stderr.contains("Purge dev container"), "non-TTY must not prompt")
+        try MiniTest.expect(!stderr.contains("Purge it?"), "non-TTY must not prompt")
         try MiniTest.expect(purgeConfirmDeleted(mock, id: id))
     }),
     ("purgeInteractiveSkipsRecoveryHelperWithoutPrompt", {
@@ -2365,7 +2369,7 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         }
         try MiniTest.expectEqual(code, 0)
         try MiniTest.expect(!read, "recovery helper skip must not prompt")
-        try MiniTest.expect(!stderr.contains("Purge dev container"))
+        try MiniTest.expect(!stderr.contains("Purge it?"))
         try MiniTest.expect(
             !mock.calls.contains { ["delete", "volume", "image"].contains($0.arguments.first ?? "") },
             "recovery helper skip must not delete"
@@ -2382,6 +2386,153 @@ nonisolated(unsafe) let lifecycleTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(!help.contains("--yes"))
         try MiniTest.expect(!usage.contains("--yes"))
     }),
+    ("purgePromptNamesHowTargetWasChosenAndMode", {
+        let id = "adev-purge-confirm"
+        let bindLabels = [ContainerIdentity.labelLocalFolder: "/work/app"]
+        let volumeLabels = [
+            ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
+            ContainerIdentity.labelWorkspaceVolume: "adev-purge-confirm-ws",
+        ]
+        let bindNote = "Purge it? Permanently removes the container, its unreferenced config volumes, "
+            + "and its config image; this cannot be undone. [y/N] "
+        let volumeNote = "Purge it? Permanently removes the container, its unreferenced config and workspace volumes, "
+            + "and its config image; this cannot be undone. [y/N] "
+        let volumeNoWorkspaceLabel = [ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume]
+        // (name, labels, other managed containers → picker, expected prompt)
+        let cases: [(String?, [String: String], [String], String)] = [
+            (id, bindLabels, [], "Container: \(id) (bind mode, workspace /work/app)\n" + bindNote),
+            (nil, bindLabels, [], "Only one managed container found: \(id) (bind mode, workspace /work/app)\n" + bindNote),
+            (nil, bindLabels, ["adev-purge-other"], "Container: \(id) (bind mode, workspace /work/app)\n" + bindNote),
+            (id, volumeLabels, [], "Container: \(id) (volume mode, volume adev-purge-confirm-ws)\n" + volumeNote),
+            (nil, volumeLabels, [], "Only one managed container found: \(id) (volume mode, volume adev-purge-confirm-ws)\n" + volumeNote),
+            (id, volumeNoWorkspaceLabel, [], "Container: \(id) (volume mode)\n" + bindNote),
+        ]
+        // Numbered picker selecting the target (listed first); picker UI stays off stderr.
+        let picker = InteractivePicker(isInteractive: true, readLine: { "1" }, writeError: { _ in })
+        for (name, labels, others, expected) in cases {
+            let (runtime, mock) = makePurgeConfirmRuntime(id: id, extraLabels: labels, otherContainerIds: others)
+            var stdout = ""
+            var stderr = ""
+            fflush(nil)
+            try withCapturedStdout({
+                try withCapturedStderr({
+                    let code = try PurgeCommand.run(
+                        name: name,
+                        runtime: runtime,
+                        picker: picker,
+                        isInteractive: true,
+                        readLine: { "n" }
+                    )
+                    fflush(nil)
+                    try MiniTest.expectEqual(code, 0)
+                }, capture: &stderr)
+            }, capture: &stdout)
+            try MiniTest.expectEqual(stderr, expected + "Purge cancelled\n", "prompt for name \(String(describing: name))")
+            try MiniTest.expectEqual(stdout, "", "cancel is not on stdout")
+            try MiniTest.expect(!mock.calls.contains { ["delete", "volume", "image"].contains($0.arguments.first ?? "") })
+        }
+    }),
+    ("deleteAutoSingleInteractiveYesDeletes", {
+        let id = "adev-delete-confirm"
+        for answer in ["y", "Yes", " YES "] {
+            let (runtime, mock) = makePurgeConfirmRuntime(id: id)
+            var stderr = ""
+            try withCapturedStderr({
+                try DeleteCommand.run(runtime: runtime, isInteractive: true, readLine: { answer })
+                fflush(nil)
+            }, capture: &stderr)
+            try MiniTest.expect(
+                stderr.contains("Only one managed container found: \(id) (bind mode)\nDelete it? "),
+                "prompt names container and mode for \(answer)"
+            )
+            try MiniTest.expect(stderr.contains("volumes and workspace are kept. [y/N] "), "preserved note for \(answer)")
+            try MiniTest.expect(
+                mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.contains(id) },
+                "delete runs for \(answer)"
+            )
+        }
+    }),
+    ("deleteAutoSingleInteractiveDeclineSkipsDelete", {
+        let id = "adev-delete-confirm"
+        let answers: [String?] = [nil, "", "n", "no", "maybe"]
+        for answer in answers {
+            let (runtime, mock) = makePurgeConfirmRuntime(id: id)
+            var stderr = ""
+            try withCapturedStderr({
+                try DeleteCommand.run(runtime: runtime, isInteractive: true, readLine: { answer })
+                fflush(nil)
+            }, capture: &stderr)
+            try MiniTest.expect(stderr.hasSuffix("[y/N] Delete cancelled\n"), "cancel message for \(String(describing: answer))")
+            try MiniTest.expect(
+                !mock.calls.contains { $0.arguments.first != "list" },
+                "no runtime mutation for \(String(describing: answer))"
+            )
+        }
+    }),
+    ("deleteNamedInteractiveSkipsAutoSingleConfirmation", {
+        let id = "adev-delete-confirm"
+        let (runtime, mock) = makePurgeConfirmRuntime(id: id)
+        var read = false
+        try DeleteCommand.run(name: id, runtime: runtime, isInteractive: true, readLine: {
+            read = true
+            return "n"
+        })
+        try MiniTest.expect(!read, "--name must not prompt")
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.contains(id) })
+    }),
+    ("deleteAutoSingleNonInteractiveProceedsWithoutPrompt", {
+        let id = "adev-delete-confirm"
+        let (runtime, mock) = makePurgeConfirmRuntime(id: id)
+        var read = false
+        try DeleteCommand.run(runtime: runtime, isInteractive: false, readLine: {
+            read = true
+            return "n"
+        })
+        try MiniTest.expect(!read, "non-TTY must not prompt")
+        try MiniTest.expect(mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.contains(id) })
+    }),
+    ("targetConfirmationPromptNamesModeAndWorkspace", {
+        let bind = ContainerInfo(
+            id: "adev-app-1",
+            name: "adev-app-1",
+            state: "running",
+            labels: [ContainerIdentity.labelLocalFolder: "/work/app"],
+            image: nil
+        )
+        try MiniTest.expectEqual(
+            ManagedContainers.targetConfirmationPrompt(bind, isAutoSingle: true, action: "Rebuild", note: "Kept."),
+            "Only one managed container found: adev-app-1 (bind mode, workspace /work/app)\nRebuild it? Kept. [y/N] "
+        )
+        let volume = ContainerInfo(
+            id: "adev-vol-1",
+            name: "",
+            state: "stopped",
+            labels: [
+                ContainerIdentity.labelWorkspaceMode: ContainerIdentity.workspaceModeVolume,
+                ContainerIdentity.labelWorkspaceVolume: "adev-vol-1-ws",
+            ],
+            image: nil
+        )
+        try MiniTest.expectEqual(
+            ManagedContainers.targetConfirmationPrompt(volume, isAutoSingle: true, action: "Delete", note: "Kept."),
+            "Only one managed container found: adev-vol-1 (volume mode, volume adev-vol-1-ws)\nDelete it? Kept. [y/N] "
+        )
+        try MiniTest.expectEqual(
+            ManagedContainers.targetConfirmationPrompt(bind, isAutoSingle: false, action: "Purge", note: "Gone."),
+            "Container: adev-app-1 (bind mode, workspace /work/app)\nPurge it? Gone. [y/N] "
+        )
+    }),
+    ("deleteAndRebuildHelpMentionAutoSingleConfirmation", {
+        let usage = CommandSurface.usageText()
+        try MiniTest.expect(usage.contains("delete [--name]     Remove container only (not workspace volume); confirms auto-single on a TTY"))
+        try MiniTest.expect(usage.contains("(same name; volumes preserved); confirms auto-single on a TTY"))
+        for command in ["delete", "rm", "rebuild"] {
+            let help = CommandSurface.commandHelpText(command) ?? ""
+            try MiniTest.expect(help.contains("auto-selected (selection"), "\(command) help explains auto-single")
+            try MiniTest.expect(help.contains("default no"), "\(command) help states default")
+        }
+        try MiniTest.expect((CommandSurface.commandHelpText("rebuild") ?? "").contains("--name, non-TTY, and --json proceed"))
+    }),
 ]
 
 private final class PurgeConfirmDeleted: @unchecked Sendable {
@@ -2390,18 +2541,25 @@ private final class PurgeConfirmDeleted: @unchecked Sendable {
 
 private func makePurgeConfirmRuntime(
     id: String = "adev-purge-confirm",
-    recoveryHelper: Bool = false
+    recoveryHelper: Bool = false,
+    extraLabels: [String: String] = [:],
+    otherContainerIds: [String] = []
 ) -> (runtime: AppleContainerRuntime, mock: MockProcessRunner) {
     var labels: [String: String] = [
         ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
         ContainerIdentity.labelConfigVolumes: "vol-confirm",
-    ]
+    ].merging(extraLabels) { _, new in new }
     if recoveryHelper {
         labels[RecoveryHelper.recoveryMarkerLabel] = RecoveryHelper.recoveryMarkerValue
     }
     let entry = MockProcessRunner.containerListJSON(
         id: id, state: "stopped", labels: labels, image: "alpine:3.20"
     )
+    let others = otherContainerIds.map {
+        MockProcessRunner.containerListJSON(id: $0, state: "stopped", labels: [
+            ContainerIdentity.labelManaged: ContainerIdentity.managedValue,
+        ])
+    }
     let volumeListData = try! JSONSerialization.data(
         withJSONObject: [["id": "vol-confirm"]] as [[String: Any]]
     )
@@ -2410,7 +2568,7 @@ private func makePurgeConfirmRuntime(
     mock.handlers = [
         { args in
             if args.starts(with: ["list"]) {
-                let payload: [Any] = deleted.value ? [] : [entry]
+                let payload: [Any] = deleted.value ? [] : [entry] + others
                 let data = try! JSONSerialization.data(withJSONObject: payload)
                 return ProcessResult(exitCode: 0, stdout: data, stderr: Data())
             }

@@ -568,6 +568,105 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
         try MiniTest.expect(createArgs.contains(expectedName), "create uses live computed name")
     }),
 
+    ("rebuildAutoSingleInteractiveYesProceeds", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20"}"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let s = RebuildScenario()
+        let info = RebuildScenario.container(
+            id: "adev-confirm-yes",
+            labels: s.bindLabels(
+                localFolder: ws.path,
+                configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+            )
+        )
+        s.containers = [info]
+        s.install()
+        var stderr = ""
+        var result: RebuildResult?
+        try withCapturedStderr({
+            result = try RebuildCommand.run(
+                options: RebuildOptions(),
+                runtime: s.runtime,
+                isTTY: true,
+                confirmReadLine: { "y" }
+            )
+            fflush(nil)
+        }, capture: &stderr)
+        try MiniTest.expectEqual(result?.outcome, "success")
+        try MiniTest.expect(
+            stderr.contains(
+                "Only one managed container found: adev-confirm-yes (bind mode, workspace \(ws.path))\n"
+                    + "Rebuild it? Recreates it with the same name; volumes are preserved. [y/N] "
+            ),
+            "prompt names container, mode, and workspace"
+        )
+        try MiniTest.expect(s.mock.calls.contains { $0.arguments.first == "delete" && $0.arguments.last == info.id })
+    }),
+
+    ("rebuildAutoSingleInteractiveDeclineNoMutation", {
+        let answers: [String?] = [nil, "", "n", "No"]
+        for answer in answers {
+            let s = RebuildScenario()
+            // Stopped volume mode: an accepted rebuild would bare-start before any config read.
+            s.containers = [RebuildScenario.container(id: "vol-confirm", state: "stopped", labels: s.volumeLabels())]
+            s.install()
+            var stderr = ""
+            try withCapturedStderr({
+                try MiniTest.expectThrows({
+                    _ = try RebuildCommand.run(
+                        options: RebuildOptions(skipPull: true),
+                        runtime: s.runtime,
+                        isTTY: true,
+                        confirmReadLine: { answer }
+                    )
+                }, validate: { err in
+                    try MiniTest.expect(err is AutoSingleConfirmationDeclined, "declined for \(String(describing: answer))")
+                })
+                fflush(nil)
+            }, capture: &stderr)
+            try MiniTest.expect(stderr.contains("(volume mode"), "prompt names volume mode")
+            try MiniTest.expect(stderr.hasSuffix("[y/N] Rebuild cancelled\n"), "cancel message for \(String(describing: answer))")
+            try MiniTest.expect(
+                !s.mock.calls.contains { $0.arguments.first != "list" },
+                "no runtime action beyond list for \(String(describing: answer))"
+            )
+        }
+    }),
+
+    ("rebuildSkipsAutoSingleConfirmationForNameNonTTYAndJSON", {
+        let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20"}"#)
+        defer { try? FileManager.default.removeItem(at: ws) }
+        let cases: [(String, RebuildOptions, Bool)] = [
+            ("--name", RebuildOptions(name: "adev-confirm-skip"), true),
+            ("non-TTY", RebuildOptions(), false),
+            ("--json", RebuildOptions(jsonOutput: true), true),
+        ]
+        for (label, options, isTTY) in cases {
+            let s = RebuildScenario()
+            let info = RebuildScenario.container(
+                id: "adev-confirm-skip",
+                labels: s.bindLabels(
+                    localFolder: ws.path,
+                    configFile: ws.appendingPathComponent(".devcontainer/devcontainer.json").path
+                )
+            )
+            s.containers = [info]
+            s.install()
+            var read = false
+            let result = try RebuildCommand.run(
+                options: options,
+                runtime: s.runtime,
+                isTTY: isTTY,
+                confirmReadLine: {
+                    read = true
+                    return "n"
+                }
+            )
+            try MiniTest.expect(!read, "\(label) must not prompt")
+            try MiniTest.expectEqual(result.outcome, "success", label)
+        }
+    }),
+
     ("rebuildFailsContainerNotFoundNoDelete", {
         let ws = try TestRepo.makeTempWorkspace(configJSON: #"{"image":"alpine:3.20"}"#)
         defer { try? FileManager.default.removeItem(at: ws) }
@@ -2971,7 +3070,8 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
                     openEditorPrompt: RecoveryOpenEditorPrompt(
                         readLine: { "y" },
                         writeError: { prompts.lines.append($0) }
-                    )
+                    ),
+                    confirmReadLine: { "y" }
                 )
             }) { error in
                 let cli = error as? CLIError
@@ -3052,7 +3152,8 @@ nonisolated(unsafe) let rebuildPhaseTests: [(String, () throws -> Void)] = [
                     openEditorPrompt: RecoveryOpenEditorPrompt(
                         readLine: { "y" },
                         writeError: { prompts.lines.append($0) }
-                    )
+                    ),
+                    confirmReadLine: { "y" }
                 )
             }) { error in
                 let cli = error as? CLIError

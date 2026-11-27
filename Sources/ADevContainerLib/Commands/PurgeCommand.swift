@@ -4,7 +4,7 @@ public enum PurgeCommand {
     /// Removes managed dev container, named volumes from config labels, config image,
     /// and volume-mode workspace volume (`*-ws` / label) when applicable.
     ///
-    /// Selection is managed-only via `--name` / picker. Volumes come from labels
+    /// Selection is managed-only via `--name` / auto-single / picker. Volumes come from labels
     /// (`config_volumes`, `workspace_volume`); image from runtime inspect.
     /// Candidate volumes are deleted only when unreferenced after target container delete.
     ///
@@ -20,7 +20,7 @@ public enum PurgeCommand {
         isInteractive: Bool = AppleContainerConfig.stdinIsTTY(),
         readLine: @escaping () -> String? = { Swift.readLine() }
     ) throws -> Int32 {
-        let info = try ManagedContainers.resolveSelection(
+        let (info, isAutoSingle) = try ManagedContainers.resolveSelectionReportingAutoSingle(
             name: name,
             runtime: runtime,
             picker: picker
@@ -35,12 +35,21 @@ public enum PurgeCommand {
             return 0
         }
 
+        let workspaceVolumeName: String? = {
+            let v = info.labels[ContainerIdentity.labelWorkspaceVolume]
+            return (v?.isEmpty == false) ? v : nil
+        }()
+
         if isInteractive {
-            let prompt = "Purge dev container \(info.id) and its unreferenced volumes and image? [y/N] "
-            FileHandle.standardError.write(Data(prompt.utf8))
-            let answer = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-            if answer != "y" && answer != "yes" {
-                print("Purge cancelled")
+            let volumes = workspaceVolumeName != nil ? "config and workspace volumes" : "config volumes"
+            guard ManagedContainers.confirmTarget(
+                info,
+                isAutoSingle: isAutoSingle,
+                action: "Purge",
+                note: "Permanently removes the container, its unreferenced \(volumes), and its config image; this cannot be undone.",
+                readLine: readLine
+            ) else {
+                FileHandle.standardError.write(Data("Purge cancelled\n".utf8))
                 return 0
             }
         }
@@ -49,10 +58,7 @@ public enum PurgeCommand {
             container: info,
             expectedContainerName: info.name,
             configVolumeNames: ContainerIdentity.parseConfigVolumeNames(from: info.labels),
-            workspaceVolumeName: {
-                let v = info.labels[ContainerIdentity.labelWorkspaceVolume]
-                return (v?.isEmpty == false) ? v : nil
-            }(),
+            workspaceVolumeName: workspaceVolumeName,
             image: info.image
         )
 
